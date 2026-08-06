@@ -13,8 +13,8 @@ Honest status, so nothing is described as further along than it is.
 | TypeScript simulation | Working, tested, fixed-point, deterministic — now the reference oracle |
 | React/canvas vertical slice | Renders and plays locally |
 | Rust core foundation | `fixed`, `canonical`, `types`, `error` complete and tested |
-| Rust behavior modules | In progress |
-| TS↔Rust parity harness | **Not built.** This is the top technical risk |
+| Rust behavior modules | Complete — 207 tests, clippy clean, wasm32 builds |
+| TS↔Rust parity harness | **Not built, and blocked on ADR 0003.** Top technical risk |
 | WASM client integration | Not started |
 | Match server | Not started |
 | Persistence | Schema defined; D1 binding still `null` |
@@ -63,8 +63,16 @@ supply-chain policy, progression and security specifications.
 **Gate:** clippy clean under `-D warnings`, wasm32 builds, gates verified by running them.
 
 ### M1 — Core port + parity ⬅ *current*
-Six behavior modules; TS oracle updated to the canonical encoding; differential harness
-proving TS and Rust agree bit-exactly across a golden corpus.
+Behavior modules **complete**: `rng`, `terrain`, `character`, `hash`, `ballistics`,
+`command` — 207 tests, clippy clean under `-D warnings`, wasm32 builds.
+
+Remaining, and both are oracle-side work:
+1. Update `lib/game/simulation.ts` to the canonical byte encoding (ADR 0001 §5).
+2. Update it to the shared quantized sine table (**ADR 0003**). The oracle's
+   `Math.sin`/`Math.cos` cannot be reproduced in fixed point *and* are not bit-identical
+   across JS engines — a latent determinism defect the port exposed rather than created.
+3. Build the differential harness over a golden corpus.
+
 **Gate:** thousands of seeded command sequences produce identical final state hashes in
 both implementations. Until this passes, the port is unverified and nothing depends on it.
 
