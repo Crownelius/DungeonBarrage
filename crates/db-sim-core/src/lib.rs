@@ -26,10 +26,16 @@
 //! against it by the differential harness in `tests/parity/`, which is a merge gate. The
 //! TypeScript implementation is retired only once the full golden corpus is green.
 
+pub mod ballistics;
 pub mod canonical;
+pub mod command;
 pub mod error;
 pub mod fixed;
+pub mod hash;
+pub mod rng;
+pub mod terrain;
 pub mod types;
+pub mod weapon;
 
 pub use error::{LoadoutRejection, SimError, SimResult};
 pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSITION_SCALE};
