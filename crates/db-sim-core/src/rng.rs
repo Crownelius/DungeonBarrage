@@ -83,41 +83,50 @@ impl Rng {
 
     /// Returns a uniformly distributed value in `[0, max_exclusive)`.
     ///
-    /// Uses rejection sampling to eliminate modulo bias. The sequence of
-    /// values in range is independent of `max_exclusive` and uniform; the
-    /// number of calls to `next_u32` is not fixed but averages close to 1.
+    /// Uses rejection sampling to eliminate modulo bias completely, including
+    /// at the extremes (`max_exclusive` a power of two, or `max_exclusive ==
+    /// u32::MAX`). `next_u32` draws one of `2^32` equally likely raw values;
+    /// those `2^32` values do not in general divide evenly into
+    /// `max_exclusive` buckets, so a plain `raw % max_exclusive` would favor
+    /// the low buckets by up to one extra raw value each. To remove that
+    /// bias, exactly the `2^32 mod max_exclusive` raw values that would
+    /// otherwise land unevenly are discarded before reducing what remains.
+    ///
+    /// `2^32` does not fit in a `u32`, so it is never materialized directly.
+    /// `max_exclusive.wrapping_neg() % max_exclusive` computes
+    /// `(2^32 - max_exclusive) mod max_exclusive`, which is congruent to
+    /// `2^32 mod max_exclusive` (adding `max_exclusive` back does not change
+    /// the residue). Unsigned integers have no negation operator in Rust, so
+    /// `wrapping_neg` — the two's-complement negation — is the only way to
+    /// express this, not an optional shortcut.
+    ///
+    /// The sequence of values in range is independent of `max_exclusive` and
+    /// uniform; the number of calls to `next_u32` is not fixed but averages
+    /// just above 1, and is exactly 1 whenever `max_exclusive` divides `2^32`
+    /// evenly (every power of two up to `2^31`).
     ///
     /// The seed determines the sequence of outcomes; the same seed and same
     /// sequence of bounds will always produce the same sequence of results.
     ///
-    /// If `max_exclusive` is 0, returns 0 (degenerate but never panics).
+    /// If `max_exclusive` is 0, returns 0 (degenerate but never panics) and
+    /// does not consume a draw from the sequence.
     pub fn bounded(&mut self, max_exclusive: u32) -> u32 {
         if max_exclusive == 0 {
             return 0;
         }
 
-        // Rejection sampling: compute the largest multiple of max_exclusive
-        // that fits within u32, then accept only values below it.
-        //
-        // This ensures every outcome in [0, max_exclusive) is equally likely.
-        // Without this, modulo would slightly favor low-order values when
-        // max_exclusive does not divide 2^32 evenly.
-        #[expect(
-            clippy::integer_division,
-            reason = "rejection sampling threshold: we need the quotient, not a float"
-        )]
         #[expect(
             clippy::arithmetic_side_effects,
-            reason = "wrapping_mul is correct for PRNG arithmetic"
+            reason = "max_exclusive != 0 is guaranteed by the early return above, so this remainder cannot panic"
         )]
-        let threshold = (u32::MAX / max_exclusive).wrapping_mul(max_exclusive);
+        let threshold = max_exclusive.wrapping_neg() % max_exclusive;
 
         loop {
             let value = self.next_u32();
-            if value <= threshold {
+            if value >= threshold {
                 #[expect(
                     clippy::arithmetic_side_effects,
-                    reason = "value <= threshold < max_exclusive guarantees no panic"
+                    reason = "max_exclusive != 0 is guaranteed by the early return above, so this remainder cannot panic"
                 )]
                 {
                     return value % max_exclusive;
@@ -205,6 +214,17 @@ mod tests {
     }
 
     #[test]
+    fn known_answer_vector_next_u64_seed_12345() {
+        // Independent known-answer check for next_u64, not merely a
+        // restatement of its own formula: seed 12345's first two next_u32
+        // outputs are 0 and 1_882_538_953 (known_answer_vectors_seed_12345),
+        // so next_u64's high/low combination must equal exactly the second
+        // value. If this fails, either next_u32 or the combination changed.
+        let mut rng = Rng::from_state(12345);
+        assert_eq!(rng.next_u64(), 1_882_538_953);
+    }
+
+    #[test]
     fn bounded_zero_returns_zero() {
         // Edge case: zero bound is treated as a special case.
         let mut rng = Rng::from_state(42);
@@ -258,8 +278,10 @@ mod tests {
         // 10,000 samples of bounded(10) should distribute roughly evenly.
         for _ in 0..10_000 {
             let value = rng.bounded(bound);
-            if let Ok(idx) = usize::try_from(value) {
-                counts.get_mut(idx).map(|count| *count += 1);
+            if let Ok(idx) = usize::try_from(value)
+                && let Some(count) = counts.get_mut(idx)
+            {
+                *count += 1;
             }
         }
 
@@ -287,8 +309,10 @@ mod tests {
 
         for _ in 0..100_000 {
             let value = rng.bounded(bound);
-            if let Ok(idx) = usize::try_from(value) {
-                counts.get_mut(idx).map(|count| *count += 1);
+            if let Ok(idx) = usize::try_from(value)
+                && let Some(count) = counts.get_mut(idx)
+            {
+                *count += 1;
             }
         }
 
@@ -301,6 +325,43 @@ mod tests {
                 i,
                 count
             );
+        }
+    }
+
+    #[test]
+    fn bounded_threshold_never_rejects_a_power_of_two_bound() {
+        // The rejection threshold is `bound.wrapping_neg() % bound`, i.e.
+        // `2^32 mod bound`. Whenever bound is a power of two, 2^32 divides
+        // evenly, so the threshold must be exactly zero and every raw u32 is
+        // accepted with no rejection and no bias.
+        //
+        // This is precisely the case a naive `(u32::MAX / bound) * bound`
+        // formulation gets wrong by one: u32::MAX == 2^32 - 1, so dividing by
+        // an exact divisor of 2^32 yields a quotient one short of the true
+        // `2^32 / bound`, which silently reintroduces a bias toward outcome
+        // zero. Asserting the threshold directly catches that class of bug
+        // even though it is far too small (roughly 1 in 2^32) for any
+        // statistical distribution test to detect.
+        for shift in 0..32u32 {
+            let bound = 1u32 << shift;
+            let threshold = bound.wrapping_neg() % bound;
+            assert_eq!(threshold, 0, "power-of-two bound {bound} must reject nothing");
+        }
+    }
+
+    #[test]
+    fn bounded_threshold_matches_reference_formula_for_odd_bounds() {
+        // Cross-check the wrapping-arithmetic threshold against a
+        // widened-to-u64 reference computation of `2^32 mod bound` for
+        // bounds that do not divide 2^32 evenly (the case the historical
+        // off-by-one silently mishandled).
+        for bound in [3u32, 5, 6, 7, 9, 10, 100, 1_000, 65_535, 65_537, u32::MAX - 1, u32::MAX] {
+            let threshold = bound.wrapping_neg() % bound;
+            // Widen the threshold to u64 for comparison rather than narrow
+            // the reference to u32, so there is no fallible conversion (and
+            // no unwrap/expect/panic) on the assertion path at all.
+            let reference = (1u64 << 32) % u64::from(bound);
+            assert_eq!(u64::from(threshold), reference, "mismatch for bound {bound}");
         }
     }
 

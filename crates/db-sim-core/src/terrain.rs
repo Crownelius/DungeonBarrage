@@ -166,6 +166,22 @@ pub fn apply_operation(
     }
 }
 
+/// Converts a `u32` mask dimension to the `i32` index of its last valid cell.
+///
+/// `width`/`height` are `u32` but every cell coordinate in this module's API is `i32`
+/// (forced by [`FixedPoint`]'s `i32` fields, which is the only source of shape
+/// coordinates). A plain `dim as i32` would wrap to a large negative number for any
+/// dimension at or above `2^31`, which would then read as an *empty or inverted*
+/// bounding box instead of a large one — silently skipping cells that should have been
+/// processed rather than panicking. `try_from` with a saturating fallback keeps the
+/// bound correct (clamped to the largest index an `i32` coordinate can ever reach)
+/// instead of wrapping.
+#[must_use]
+#[inline]
+fn last_valid_index(dim: u32) -> i32 {
+    i32::try_from(dim).unwrap_or(i32::MAX).saturating_sub(1)
+}
+
 /// Subtracts a circle of terrain, removing only materials permitted by the mask.
 fn subtract_circle(
     mask: &mut TerrainMask,
@@ -179,9 +195,9 @@ fn subtract_circle(
 
     // Compute bounding box, clamped to mask bounds
     let min_x = (center_x.saturating_sub(radius)).max(0);
-    let max_x = (center_x.saturating_add(radius)).min((mask.width as i32).saturating_sub(1));
+    let max_x = (center_x.saturating_add(radius)).min(last_valid_index(mask.width));
     let min_y = (center_y.saturating_sub(radius)).max(0);
-    let max_y = (center_y.saturating_add(radius)).min((mask.height as i32).saturating_sub(1));
+    let max_y = (center_y.saturating_add(radius)).min(last_valid_index(mask.height));
 
     let mut removed = 0u32;
 
@@ -221,9 +237,9 @@ fn subtract_capsule(
 
     // Compute bounding box of the entire capsule
     let min_x = (start_x.min(end_x).saturating_sub(radius)).max(0);
-    let max_x = (start_x.max(end_x).saturating_add(radius)).min((mask.width as i32).saturating_sub(1));
+    let max_x = (start_x.max(end_x).saturating_add(radius)).min(last_valid_index(mask.width));
     let min_y = (start_y.min(end_y).saturating_sub(radius)).max(0);
-    let max_y = (start_y.max(end_y).saturating_add(radius)).min((mask.height as i32).saturating_sub(1));
+    let max_y = (start_y.max(end_y).saturating_add(radius)).min(last_valid_index(mask.height));
 
     let mut removed = 0u32;
 
@@ -447,15 +463,19 @@ mod tests {
 
     #[test]
     fn subtract_circle_respects_material_mask_soft() {
+        // Checkerboard of Soil (removable under SOFT) and ReinforcedStone (not). Verifies,
+        // cell by cell, that SOFT removes exactly the in-radius Soil cells and leaves every
+        // ReinforcedStone cell and every out-of-radius cell exactly as it started — not just
+        // that the operation ran without error.
         if let Ok(mut mask) = create_mask(10, 10, Material::Empty) {
-            for y in 0..10 {
-                for x in 0..10 {
+            for y in 0..10i32 {
+                for x in 0..10i32 {
                     let material = if (x + y) % 2 == 0 {
                         Material::Soil
                     } else {
                         Material::ReinforcedStone
                     };
-                    let _ = set_material(&mut mask, x as i32, y as i32, material);
+                    let _ = set_material(&mut mask, x, y, material);
                 }
             }
 
@@ -469,7 +489,31 @@ mod tests {
                     material_mask: MaterialMask::SOFT,
                 };
 
-                let _ = apply_operation(&mut mask, &op);
+                let removed = apply_operation(&mut mask, &op);
+                let mut expected_removed = 0u32;
+
+                for y in 0..10i32 {
+                    for x in 0..10i32 {
+                        let original = if (x + y) % 2 == 0 {
+                            Material::Soil
+                        } else {
+                            Material::ReinforcedStone
+                        };
+                        let dx = i64::from(x - 5);
+                        let dy = i64::from(y - 5);
+                        let in_radius = dx * dx + dy * dy <= 9;
+                        let expected = if in_radius && original == Material::Soil {
+                            expected_removed += 1;
+                            Material::Empty
+                        } else {
+                            original
+                        };
+                        assert_eq!(material_at(&mask, x, y), expected, "cell ({x}, {y})");
+                    }
+                }
+
+                assert_eq!(removed, expected_removed);
+                assert!(removed > 0);
             } else {
                 panic!("from_cells failed");
             }
@@ -771,6 +815,213 @@ mod tests {
             assert_eq!(material_at(&mask, 15, 8), Material::Soil);
         } else {
             panic!("create_mask or from_cells failed");
+        }
+    }
+
+    #[test]
+    fn circle_radius_one_removes_exactly_the_plus_pentomino() {
+        // Hand-verified discrete circle: dx=0 gives dy in [-1,1] (3 cells), dx=+-1 gives
+        // dy=0 only (1 cell each) = 5 cells total, the classic "plus" shape.
+        if let (Ok(mut mask), Some(center)) =
+            (create_mask(11, 11, Material::Soil), FixedPoint::from_cells(5, 5))
+        {
+            let op = TerrainOperation {
+                sequence: 0,
+                shape: TerrainShape::SubtractCircle {
+                    center,
+                    radius_cells: 1,
+                },
+                material_mask: MaterialMask::SOFT,
+            };
+
+            let removed = apply_operation(&mut mask, &op);
+
+            assert_eq!(removed, 5);
+            assert_eq!(material_at(&mask, 5, 5), Material::Empty);
+            assert_eq!(material_at(&mask, 4, 5), Material::Empty);
+            assert_eq!(material_at(&mask, 6, 5), Material::Empty);
+            assert_eq!(material_at(&mask, 5, 4), Material::Empty);
+            assert_eq!(material_at(&mask, 5, 6), Material::Empty);
+            // Diagonal neighbours are outside radius 1 (distance-squared 2 > 1).
+            assert_eq!(material_at(&mask, 4, 4), Material::Soil);
+            assert_eq!(material_at(&mask, 6, 6), Material::Soil);
+        } else {
+            panic!("create_mask or from_cells failed");
+        }
+    }
+
+    #[test]
+    fn circle_radius_three_removes_exactly_twenty_nine_cells() {
+        // Hand-verified discrete circle count for radius 3, far enough from every edge that
+        // the bounding box is never clipped: dx=0 -> 7, dx=+-1 -> 5 each, dx=+-2 -> 5 each,
+        // dx=+-3 -> 1 each == 7 + 10 + 10 + 2 == 29.
+        if let (Ok(mut mask), Some(center)) =
+            (create_mask(25, 25, Material::Soil), FixedPoint::from_cells(12, 12))
+        {
+            let op = TerrainOperation {
+                sequence: 0,
+                shape: TerrainShape::SubtractCircle {
+                    center,
+                    radius_cells: 3,
+                },
+                material_mask: MaterialMask::SOFT,
+            };
+
+            let removed = apply_operation(&mut mask, &op);
+
+            assert_eq!(removed, 29);
+        } else {
+            panic!("create_mask or from_cells failed");
+        }
+    }
+
+    #[test]
+    fn capsule_zero_radius_removes_exactly_the_line_cells() {
+        // Radius 0 collapses the capsule to the discrete line itself. A horizontal segment
+        // from x=5 to x=10 at y=5 covers exactly the 6 integer points x in [5, 10].
+        if let (Ok(mut mask), Some(start), Some(end)) = (
+            create_mask(20, 20, Material::Soil),
+            FixedPoint::from_cells(5, 5),
+            FixedPoint::from_cells(10, 5),
+        ) {
+            let op = TerrainOperation {
+                sequence: 0,
+                shape: TerrainShape::SubtractCapsule {
+                    start,
+                    end,
+                    radius_cells: 0,
+                },
+                material_mask: MaterialMask::SOFT,
+            };
+
+            let removed = apply_operation(&mut mask, &op);
+
+            assert_eq!(removed, 6);
+            for x in 5..=10 {
+                assert_eq!(material_at(&mask, x, 5), Material::Empty, "x={x}");
+            }
+            // One cell off the line in either direction must survive untouched.
+            assert_eq!(material_at(&mask, 7, 4), Material::Soil);
+            assert_eq!(material_at(&mask, 7, 6), Material::Soil);
+        } else {
+            panic!("create_mask or from_cells failed");
+        }
+    }
+
+    #[test]
+    fn material_at_extreme_i32_bounds_never_panics_and_returns_empty() {
+        if let Ok(mask) = create_mask(5, 5, Material::Soil) {
+            assert_eq!(material_at(&mask, i32::MIN, i32::MIN), Material::Empty);
+            assert_eq!(material_at(&mask, i32::MAX, i32::MAX), Material::Empty);
+            assert_eq!(material_at(&mask, i32::MIN, 2), Material::Empty);
+            assert_eq!(material_at(&mask, 2, i32::MIN), Material::Empty);
+            assert_eq!(material_at(&mask, i32::MAX, 2), Material::Empty);
+            assert_eq!(material_at(&mask, 2, i32::MAX), Material::Empty);
+        } else {
+            panic!("create_mask failed");
+        }
+    }
+
+    #[test]
+    fn set_material_extreme_i32_bounds_never_panics_and_returns_false() {
+        if let Ok(mut mask) = create_mask(5, 5, Material::Empty) {
+            assert!(!set_material(&mut mask, i32::MIN, i32::MIN, Material::Soil));
+            assert!(!set_material(&mut mask, i32::MAX, i32::MAX, Material::Soil));
+            assert!(!set_material(&mut mask, i32::MIN, 2, Material::Soil));
+            assert!(!set_material(&mut mask, 2, i32::MIN, Material::Soil));
+        } else {
+            panic!("create_mask failed");
+        }
+    }
+
+    #[test]
+    fn subtract_circle_huge_radius_u16_max_does_not_overflow() {
+        // Exercises radius_cells at its u16 extreme; radius_squared alone is ~4.3e9, which
+        // must not overflow or panic on the way to being widened and compared as i64.
+        if let (Ok(mut mask), Some(center)) =
+            (create_mask(4, 4, Material::Soil), FixedPoint::from_cells(2, 2))
+        {
+            let op = TerrainOperation {
+                sequence: 0,
+                shape: TerrainShape::SubtractCircle {
+                    center,
+                    radius_cells: u16::MAX,
+                },
+                material_mask: MaterialMask::SOFT,
+            };
+
+            let removed = apply_operation(&mut mask, &op);
+
+            assert_eq!(removed, 16);
+            assert!(mask.cells.iter().all(|&c| c == 0));
+        } else {
+            panic!("create_mask or from_cells failed");
+        }
+    }
+
+    #[test]
+    fn subtract_circle_width_near_u32_max_does_not_wrap_to_negative_bound() {
+        // A `mask.width as i32` cast would turn a width at or above 2^31 into a negative
+        // number, collapsing the x bounding box to an empty range and silently skipping
+        // cells that are well within the real (if enormous) mask. Constructing the mask
+        // directly, with a `cells` buffer far smaller than `width * height`, tests the
+        // bounding-box arithmetic in isolation without allocating gigabytes: row y=0 maps
+        // to `cells[x]` regardless of how large `width` is, so real backing data exists for
+        // the cells this test inspects, while every other row safely reads back Empty.
+        let mut mask = TerrainMask {
+            width: u32::MAX,
+            height: 1,
+            cells: vec![Material::Soil as u8; 20],
+        };
+        if let Some(center) = FixedPoint::from_cells(10, 0) {
+            let op = TerrainOperation {
+                sequence: 0,
+                shape: TerrainShape::SubtractCircle {
+                    center,
+                    radius_cells: 3,
+                },
+                material_mask: MaterialMask::SOFT,
+            };
+
+            let removed = apply_operation(&mut mask, &op);
+
+            // x in [7, 13] at y=0: 7 cells, all backed by real Soil data.
+            assert_eq!(removed, 7);
+            for x in 7..=13 {
+                assert_eq!(material_at(&mask, x, 0), Material::Empty, "x={x}");
+            }
+        } else {
+            panic!("from_cells failed");
+        }
+    }
+
+    #[test]
+    fn subtract_circle_height_near_u32_max_does_not_wrap_to_negative_bound() {
+        // Mirror of the width test above, but for `mask.height`, using a width-1 mask so
+        // row-major index `y * width + x` reduces to `y`, keeping real backing data cheap.
+        let mut mask = TerrainMask {
+            width: 1,
+            height: u32::MAX,
+            cells: vec![Material::Soil as u8; 20],
+        };
+        if let Some(center) = FixedPoint::from_cells(0, 10) {
+            let op = TerrainOperation {
+                sequence: 0,
+                shape: TerrainShape::SubtractCircle {
+                    center,
+                    radius_cells: 3,
+                },
+                material_mask: MaterialMask::SOFT,
+            };
+
+            let removed = apply_operation(&mut mask, &op);
+
+            assert_eq!(removed, 7);
+            for y in 7..=13 {
+                assert_eq!(material_at(&mask, 0, y), Material::Empty, "y={y}");
+            }
+        } else {
+            panic!("from_cells failed");
         }
     }
 }

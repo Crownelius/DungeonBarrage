@@ -71,6 +71,15 @@ const FROSTFALL_MORTAR: WeaponDefinition = WeaponDefinition {
 };
 
 /// Mole Drill: tunneling weapon that bores through terrain before detonation.
+///
+/// **Resolved discrepancy:** ARSENAL.md describes the tunnel as "0.6 BW wide." Applying
+/// the same width-is-diameter convention confirmed against the oracle for Trench Spade and
+/// Breach Pick below (`radius_cells = round(width_bw / 2 * 4)`) gives
+/// `0.6 / 2 * 4 = 1.2` cells, which rounds to `1` — exactly the oracle's `radiusCells: 1`
+/// used here. There is no real disagreement between ARSENAL.md and the oracle once the
+/// diameter/radius convention is applied consistently; a prior review pass flagged this as
+/// a blocker by comparing the raw 0.6 BW figure directly against `radius_cells` without
+/// halving it first.
 const MOLE_DRILL: WeaponDefinition = WeaponDefinition {
     id: "mole-drill",
     version: 1,
@@ -204,6 +213,16 @@ const RETURNING_BOOMERANG: WeaponDefinition = WeaponDefinition {
 };
 
 /// 5.7 Service Pistol: precise, flat ballistics, wind-immune.
+///
+/// **Reported divergence (unresolved, per `MODULE_OWNERSHIP.md` "report, do not silently
+/// pick"):** ARSENAL.md's table calls this weapon the "5.7 Service Pistol." The oracle's
+/// `launchWeapons` entry instead uses id `"needle-7"` and display name "Needle-7 Service
+/// Pistol." `id` is the stable wire identifier shared with the oracle's `WeaponId` type, so
+/// it follows the oracle here for protocol parity — ARSENAL.md does not specify ids at all,
+/// so there is no real disagreement on `id`. `display_name` is purely cosmetic (never
+/// contributes to the state hash or gameplay, `ARSENAL.md`'s cosmetic boundary) and here
+/// follows the oracle rather than ARSENAL.md's table string; that specific choice is a
+/// content/branding call for design to confirm, not a gameplay defect.
 const SERVICE_PISTOL: WeaponDefinition = WeaponDefinition {
     id: "needle-7",
     version: 1,
@@ -225,12 +244,11 @@ const SERVICE_PISTOL: WeaponDefinition = WeaponDefinition {
 
 /// Heavy Revolver: high knockback with recoil that displaces the shooter.
 ///
-/// Recoil magnitude: 0.5 BW = BODY_WIDTH / 2. Using saturating division to avoid panic
-/// on overflow (though BODY_WIDTH / 2 is always safe).
-#[expect(
-    clippy::integer_division,
-    reason = "BODY_WIDTH / 2 is a fixed constant (2048); safe fixed-point division"
-)]
+/// Recoil magnitude: 0.5 BW = `BODY_WIDTH.saturating_div(2)`. `BODY_WIDTH` is a fixed
+/// positive constant so this can never actually saturate; the checked-style method keeps
+/// the computation consistent with the crate's "checked or saturating arithmetic" rule
+/// (`docs/MODULE_OWNERSHIP.md`) without open-coding a raw `/` outside `fixed.rs`, which is
+/// documented as the only sanctioned place for scaled division.
 const HEAVY_REVOLVER: WeaponDefinition = WeaponDefinition {
     id: "heavy-revolver",
     version: 1,
@@ -256,7 +274,7 @@ const HEAVY_REVOLVER: WeaponDefinition = WeaponDefinition {
         SpecialEffect {
             trigger: EffectTrigger::OnFire,
             kind: EffectKind::Recoil,
-            magnitude: BODY_WIDTH / 2, // 0.5 BW backward displacement
+            magnitude: BODY_WIDTH.saturating_div(2), // 0.5 BW backward displacement
             duration_turns: 0,
         },
     ],
@@ -391,15 +409,34 @@ pub fn find(id: &str) -> Option<&'static WeaponDefinition> {
     LAUNCH_ROSTER.iter().find(|w| w.id == id)
 }
 
-/// Validates the launch roster at load time, enforcing gameplay invariants.
+/// Exclusive upper bound of the Main section's array positions (`0..MAIN_SECTION_END`).
+const MAIN_SECTION_END: usize = 4;
+
+/// Exclusive upper bound of the Secondary section's array positions
+/// (`MAIN_SECTION_END..SECONDARY_SECTION_END`). Everything from here on is MeleeTool.
+const SECONDARY_SECTION_END: usize = 9;
+
+/// Required number of melee/tool weapons. Kept as its own named constant (rather than
+/// derived from the input slice's length) because [`validate`] is also exercised in tests
+/// against deliberately short synthetic rosters, where the roster's own length must never
+/// be allowed to silently redefine what "correct" means.
+const EXPECTED_MELEE_COUNT: usize = 3;
+
+/// Core roster validation, generic over the slice under test.
+///
+/// Kept separate from [`validate_roster`] purely so the roster's self-consistency rules can
+/// be exercised in tests against synthetic malformed rosters, not just the real
+/// [`LAUNCH_ROSTER`] (which by construction never exercises any of this function's error
+/// paths). See the `tests` module below.
 ///
 /// This function checks:
-/// - All 12 weapons are present (4 main, 5 secondary, 3 melee/tool)
 /// - Every weapon id is unique and non-empty
-/// - Every weapon's slot matches its roster section
+/// - Every weapon's slot matches its roster section (implies exactly 4 main, 5 secondary,
+///   3 melee/tool, and thus that the roster is exactly 12 weapons long)
 /// - **EXACTLY ONE** weapon has `AmmoPolicy::Infinite`, and it is the Longsword
 /// - Longsword range is exactly 2× `BASE_MELEE_RANGE`
-/// - All other melee/tools have range exactly `BASE_MELEE_RANGE`
+/// - All other melee/tools use a `Strike` attack with range exactly `BASE_MELEE_RANGE`
+///   (a melee/tool weapon using a `Projectile` attack is rejected, not silently skipped)
 /// - `special_effects.len() <= MAX_SPECIAL_EFFECTS`
 /// - `action_point_cost` is in range 1..=4
 /// - `base_damage` is non-zero
@@ -407,18 +444,14 @@ pub fn find(id: &str) -> Option<&'static WeaponDefinition> {
 ///
 /// # Errors
 /// Returns `SimError::InvalidRoster` if any check fails.
-///
-/// # Panics
-/// Never panics on correct roster data. Returns `SimError::InvalidRoster` on any
-/// validation failure.
-pub fn validate_roster() -> SimResult<()> {
+fn validate(roster: &[WeaponDefinition]) -> SimResult<()> {
     let mut seen_ids = std::collections::BTreeSet::new();
-    let mut main_count = 0;
-    let mut secondary_count = 0;
-    let mut melee_count = 0;
-    let mut infinite_weapons = Vec::new();
+    let mut main_count: usize = 0;
+    let mut secondary_count: usize = 0;
+    let mut melee_count: usize = 0;
+    let mut infinite_weapons: Vec<&'static str> = Vec::new();
 
-    for (idx, weapon) in LAUNCH_ROSTER.iter().enumerate() {
+    for (idx, weapon) in roster.iter().enumerate() {
         // Check id is unique and non-empty
         if weapon.id.is_empty() {
             return Err(crate::SimError::InvalidRoster);
@@ -427,23 +460,23 @@ pub fn validate_roster() -> SimResult<()> {
             return Err(crate::SimError::InvalidRoster);
         }
 
-        // Check slot consistency: mains first (0..4), secondaries (4..9), melee (9..12)
+        // Check slot consistency: mains first, then secondaries, then melee/tools.
         match weapon.slot {
             WeaponSlot::Main => {
-                main_count += 1;
-                if idx >= 4 {
+                main_count = main_count.saturating_add(1);
+                if idx >= MAIN_SECTION_END {
                     return Err(crate::SimError::InvalidRoster);
                 }
             }
             WeaponSlot::Secondary => {
-                secondary_count += 1;
-                if idx < 4 || idx >= 9 {
+                secondary_count = secondary_count.saturating_add(1);
+                if !(MAIN_SECTION_END..SECONDARY_SECTION_END).contains(&idx) {
                     return Err(crate::SimError::InvalidRoster);
                 }
             }
             WeaponSlot::MeleeTool => {
-                melee_count += 1;
-                if idx < 9 {
+                melee_count = melee_count.saturating_add(1);
+                if idx < SECONDARY_SECTION_END {
                     return Err(crate::SimError::InvalidRoster);
                 }
             }
@@ -455,7 +488,7 @@ pub fn validate_roster() -> SimResult<()> {
         }
 
         // Check action point cost: 1..=4 per ARSENAL.md guardrail 4
-        if weapon.action_point_cost < 1 || weapon.action_point_cost > 4 {
+        if !(1..=4).contains(&weapon.action_point_cost) {
             return Err(crate::SimError::InvalidRoster);
         }
 
@@ -464,76 +497,125 @@ pub fn validate_roster() -> SimResult<()> {
             return Err(crate::SimError::InvalidRoster);
         }
 
-        // Track infinite ammo weapons
+        // Track infinite-ammo weapons, and forbid infinite ammo combined with terrain
+        // destruction in the same pass (both conditions key off the same `Infinite` check).
         if matches!(weapon.ammo, AmmoPolicy::Infinite) {
             infinite_weapons.push(weapon.id);
-        }
-
-        // No weapon may have both infinite ammo and terrain destruction
-        if matches!(weapon.ammo, AmmoPolicy::Infinite) {
-            match weapon.attack {
-                Attack::Projectile(ref proj) => {
-                    if !matches!(proj.terrain, TerrainProfile::None) {
-                        return Err(crate::SimError::InvalidRoster);
-                    }
-                }
-                Attack::Strike(ref strike) => {
-                    if !matches!(strike.terrain, TerrainProfile::None) {
-                        return Err(crate::SimError::InvalidRoster);
-                    }
-                }
+            let destroys_terrain = match weapon.attack {
+                Attack::Projectile(proj) => !matches!(proj.terrain, TerrainProfile::None),
+                Attack::Strike(strike) => !matches!(strike.terrain, TerrainProfile::None),
+            };
+            if destroys_terrain {
+                return Err(crate::SimError::InvalidRoster);
             }
         }
     }
 
-    // Check exact slot counts
-    if main_count != 4 || secondary_count != 5 || melee_count != 3 {
+    // Check exact slot counts. This is the point at which the loop above's per-item
+    // position checks are known to have all passed, so this also certifies the roster is
+    // exactly MAIN_SECTION_END + (SECONDARY_SECTION_END - MAIN_SECTION_END) +
+    // EXPECTED_MELEE_COUNT weapons long.
+    if main_count != MAIN_SECTION_END
+        || secondary_count != SECONDARY_SECTION_END.saturating_sub(MAIN_SECTION_END)
+        || melee_count != EXPECTED_MELEE_COUNT
+    {
         return Err(crate::SimError::InvalidRoster);
     }
 
-    // **Longsword Invariant:** Exactly one infinite-ammo weapon, and it is the Longsword
-    let has_only_longsword_infinite = infinite_weapons.len() == 1
-        && infinite_weapons
-            .first()
-            .map_or(false, |id| *id == "longsword");
+    // **Longsword Invariant:** Exactly one infinite-ammo weapon, and it is the Longsword.
+    let has_only_longsword_infinite =
+        infinite_weapons.len() == 1 && infinite_weapons.first().is_some_and(|id| *id == "longsword");
     if !has_only_longsword_infinite {
         return Err(crate::SimError::InvalidRoster);
     }
 
-    // Longsword range must be exactly 2× BASE_MELEE_RANGE
-    let longsword = LAUNCH_ROSTER
+    // Longsword range must be exactly 2× BASE_MELEE_RANGE.
+    let longsword = roster
         .iter()
         .find(|w| w.id == "longsword")
         .ok_or(crate::SimError::InvalidRoster)?;
 
-    if let Attack::Strike(strike) = longsword.attack {
-        let expected = BASE_MELEE_RANGE
-            .checked_mul(2)
-            .ok_or(crate::SimError::InvalidRoster)?;
-        if strike.range != expected {
-            return Err(crate::SimError::InvalidRoster);
-        }
-    } else {
+    let Attack::Strike(longsword_strike) = longsword.attack else {
+        return Err(crate::SimError::InvalidRoster);
+    };
+    let expected_longsword_range = BASE_MELEE_RANGE
+        .checked_mul(2)
+        .ok_or(crate::SimError::InvalidRoster)?;
+    if longsword_strike.range != expected_longsword_range {
         return Err(crate::SimError::InvalidRoster);
     }
 
-    // All other melee/tools must have range exactly BASE_MELEE_RANGE
-    for weapon in LAUNCH_ROSTER.iter() {
-        if weapon.slot == WeaponSlot::MeleeTool && weapon.id != "longsword" {
-            if let Attack::Strike(strike) = weapon.attack {
-                if strike.range != BASE_MELEE_RANGE {
-                    return Err(crate::SimError::InvalidRoster);
-                }
-            }
+    // Every other melee/tool must use a Strike attack with range exactly BASE_MELEE_RANGE.
+    // A melee/tool weapon that used a Projectile attack instead of Strike must also be
+    // rejected here, not silently pass through unchecked.
+    for weapon in roster {
+        if weapon.slot != WeaponSlot::MeleeTool || weapon.id == "longsword" {
+            continue;
+        }
+        let Attack::Strike(strike) = weapon.attack else {
+            return Err(crate::SimError::InvalidRoster);
+        };
+        if strike.range != BASE_MELEE_RANGE {
+            return Err(crate::SimError::InvalidRoster);
         }
     }
 
     Ok(())
 }
 
+/// Validates the launch roster at load time, enforcing gameplay invariants.
+///
+/// See [`validate`] for the full list of checks. The roster is proven valid by the
+/// `roster_is_valid` test below, so a bad roster should never reach a player.
+///
+/// # Errors
+/// Returns `SimError::InvalidRoster` if any check fails.
+///
+/// # Panics
+/// Never panics on correct roster data. Returns `SimError::InvalidRoster` on any
+/// validation failure.
+pub fn validate_roster() -> SimResult<()> {
+    validate(LAUNCH_ROSTER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Fixtures for the negative-path tests below.
+    //
+    // `validate_roster()` only ever runs against the real `LAUNCH_ROSTER`, which by
+    // construction never exercises any of `validate`'s error paths. To prove those paths
+    // actually reject what they claim to reject (rather than merely never triggering),
+    // these tests clone the real, valid roster and corrupt exactly one field per test, so
+    // each test isolates exactly one invariant. Helpers use `.get_mut()` rather than
+    // indexing, matching the crate's `indexing_slicing = "deny"` rule.
+    // -----------------------------------------------------------------------
+
+    fn set_id(roster: &mut [WeaponDefinition], idx: usize, id: &'static str) {
+        if let Some(weapon) = roster.get_mut(idx) {
+            weapon.id = id;
+        }
+    }
+
+    fn set_slot(roster: &mut [WeaponDefinition], idx: usize, slot: WeaponSlot) {
+        if let Some(weapon) = roster.get_mut(idx) {
+            weapon.slot = slot;
+        }
+    }
+
+    fn set_attack(roster: &mut [WeaponDefinition], idx: usize, attack: Attack) {
+        if let Some(weapon) = roster.get_mut(idx) {
+            weapon.attack = attack;
+        }
+    }
+
+    fn set_ammo(roster: &mut [WeaponDefinition], idx: usize, ammo: AmmoPolicy) {
+        if let Some(weapon) = roster.get_mut(idx) {
+            weapon.ammo = ammo;
+        }
+    }
 
     #[test]
     fn roster_is_valid() {
@@ -548,7 +630,7 @@ mod tests {
     #[test]
     fn all_main_weapons_come_first() {
         for (idx, weapon) in LAUNCH_ROSTER.iter().enumerate() {
-            if idx < 4 {
+            if idx < MAIN_SECTION_END {
                 assert_eq!(weapon.slot, WeaponSlot::Main);
             } else {
                 assert_ne!(weapon.slot, WeaponSlot::Main);
@@ -559,9 +641,9 @@ mod tests {
     #[test]
     fn all_secondary_weapons_come_second() {
         for (idx, weapon) in LAUNCH_ROSTER.iter().enumerate() {
-            if idx >= 4 && idx < 9 {
+            if (MAIN_SECTION_END..SECONDARY_SECTION_END).contains(&idx) {
                 assert_eq!(weapon.slot, WeaponSlot::Secondary);
-            } else if idx >= 4 {
+            } else if idx >= MAIN_SECTION_END {
                 assert_ne!(weapon.slot, WeaponSlot::Secondary);
             }
         }
@@ -570,7 +652,7 @@ mod tests {
     #[test]
     fn all_melee_tools_come_last() {
         for (idx, weapon) in LAUNCH_ROSTER.iter().enumerate() {
-            if idx >= 9 {
+            if idx >= SECONDARY_SECTION_END {
                 assert_eq!(weapon.slot, WeaponSlot::MeleeTool);
             } else {
                 assert_ne!(weapon.slot, WeaponSlot::MeleeTool);
@@ -600,40 +682,37 @@ mod tests {
             .filter(|w| matches!(w.ammo, AmmoPolicy::Infinite))
             .collect();
         assert_eq!(infinite.len(), 1);
-        if let Some(weapon) = infinite.first() {
-            assert_eq!(weapon.id, "longsword");
-        } else {
-            assert!(false, "Expected one infinite weapon");
-        }
+        let Some(weapon) = infinite.first() else {
+            unreachable!("Expected one infinite weapon");
+        };
+        assert_eq!(weapon.id, "longsword");
     }
 
     #[test]
     fn longsword_range_is_exactly_double_base_melee() {
-        if let Some(longsword) = LAUNCH_ROSTER.iter().find(|w| w.id == "longsword") {
-            if let Attack::Strike(strike) = longsword.attack {
-                assert_eq!(strike.range, BASE_MELEE_RANGE * 2);
-            } else {
-                assert!(false, "Longsword must use Strike attack");
-            }
-        } else {
-            assert!(false, "Longsword must exist in roster");
-        }
+        let Some(longsword) = LAUNCH_ROSTER.iter().find(|w| w.id == "longsword") else {
+            unreachable!("Longsword must exist in roster");
+        };
+        let Attack::Strike(strike) = longsword.attack else {
+            unreachable!("Longsword must use Strike attack");
+        };
+        assert_eq!(strike.range, BASE_MELEE_RANGE * 2);
     }
 
     #[test]
     fn all_other_melee_tools_have_base_melee_range() {
         for weapon in LAUNCH_ROSTER {
-            if weapon.slot == WeaponSlot::MeleeTool && weapon.id != "longsword" {
-                if let Attack::Strike(strike) = weapon.attack {
-                    assert_eq!(
-                        strike.range, BASE_MELEE_RANGE,
-                        "{} must have BASE_MELEE_RANGE",
-                        weapon.id
-                    );
-                } else {
-                    assert!(false, "{} must use Strike attack", weapon.id);
-                }
+            if weapon.slot != WeaponSlot::MeleeTool || weapon.id == "longsword" {
+                continue;
             }
+            let Attack::Strike(strike) = weapon.attack else {
+                unreachable!("{} must use Strike attack", weapon.id);
+            };
+            assert_eq!(
+                strike.range, BASE_MELEE_RANGE,
+                "{} must have BASE_MELEE_RANGE",
+                weapon.id
+            );
         }
     }
 
@@ -652,7 +731,7 @@ mod tests {
     fn action_point_costs_in_valid_range() {
         for weapon in LAUNCH_ROSTER {
             assert!(
-                weapon.action_point_cost >= 1 && weapon.action_point_cost <= 4,
+                (1..=4).contains(&weapon.action_point_cost),
                 "{} AP cost out of range: {}",
                 weapon.id,
                 weapon.action_point_cost
@@ -674,18 +753,23 @@ mod tests {
     #[test]
     fn no_infinite_ammo_with_terrain_destruction() {
         for weapon in LAUNCH_ROSTER {
-            if matches!(weapon.ammo, AmmoPolicy::Infinite) {
-                match weapon.attack {
-                    Attack::Projectile(ref proj) => {
-                        assert!(matches!(proj.terrain, TerrainProfile::None),
-                            "{} has infinite ammo but destroys terrain",
-                            weapon.id);
-                    }
-                    Attack::Strike(ref strike) => {
-                        assert!(matches!(strike.terrain, TerrainProfile::None),
-                            "{} has infinite ammo but destroys terrain",
-                            weapon.id);
-                    }
+            if !matches!(weapon.ammo, AmmoPolicy::Infinite) {
+                continue;
+            }
+            match weapon.attack {
+                Attack::Projectile(proj) => {
+                    assert!(
+                        matches!(proj.terrain, TerrainProfile::None),
+                        "{} has infinite ammo but destroys terrain",
+                        weapon.id
+                    );
+                }
+                Attack::Strike(strike) => {
+                    assert!(
+                        matches!(strike.terrain, TerrainProfile::None),
+                        "{} has infinite ammo but destroys terrain",
+                        weapon.id
+                    );
                 }
             }
         }
@@ -700,14 +784,18 @@ mod tests {
     }
 
     #[test]
+    fn find_rejects_empty_id() {
+        assert!(find("").is_none());
+    }
+
+    #[test]
     fn find_returns_correct_weapon_data() {
-        if let Some(ramshot) = find("ramshot-cannon") {
-            assert_eq!(ramshot.base_damage, 62);
-            assert_eq!(ramshot.action_point_cost, 3);
-            assert_eq!(ramshot.slot, WeaponSlot::Main);
-        } else {
-            assert!(false, "Ramshot must exist");
-        }
+        let Some(ramshot) = find("ramshot-cannon") else {
+            unreachable!("Ramshot must exist");
+        };
+        assert_eq!(ramshot.base_damage, 62);
+        assert_eq!(ramshot.action_point_cost, 3);
+        assert_eq!(ramshot.slot, WeaponSlot::Main);
     }
 
     #[test]
@@ -721,37 +809,188 @@ mod tests {
 
     #[test]
     fn cinder_cluster_has_exactly_two_special_effects() {
-        if let Some(cinder) = find("cinder-cluster") {
-            assert_eq!(cinder.special_effects.len(), 2);
-        } else {
-            assert!(false, "Cinder Cluster must exist");
-        }
+        let Some(cinder) = find("cinder-cluster") else {
+            unreachable!("Cinder Cluster must exist");
+        };
+        assert_eq!(cinder.special_effects.len(), 2);
     }
 
     #[test]
     fn heavy_revolver_has_exactly_two_special_effects() {
-        if let Some(revolver) = find("heavy-revolver") {
-            assert_eq!(revolver.special_effects.len(), 2);
-        } else {
-            assert!(false, "Heavy Revolver must exist");
-        }
+        let Some(revolver) = find("heavy-revolver") else {
+            unreachable!("Heavy Revolver must exist");
+        };
+        assert_eq!(revolver.special_effects.len(), 2);
     }
 
     #[test]
     fn blood_maul_self_damage_matches_magnitude() {
-        if let Some(blood_maul) = find("blood-maul") {
-            if let Attack::Strike(strike) = blood_maul.attack {
-                assert_eq!(strike.self_damage, 14);
-                if let Some(effect) = blood_maul.special_effects.first() {
-                    assert_eq!(effect.magnitude, 14);
-                } else {
-                    assert!(false, "Blood Maul must have a special effect");
-                }
-            } else {
-                assert!(false, "Blood Maul must be a strike");
-            }
-        } else {
-            assert!(false, "Blood Maul must exist");
+        let Some(blood_maul) = find("blood-maul") else {
+            unreachable!("Blood Maul must exist");
+        };
+        let Attack::Strike(strike) = blood_maul.attack else {
+            unreachable!("Blood Maul must be a strike");
+        };
+        assert_eq!(strike.self_damage, 14);
+        let Some(effect) = blood_maul.special_effects.first() else {
+            unreachable!("Blood Maul must have a special effect");
+        };
+        assert_eq!(effect.magnitude, 14);
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative-path tests: `validate` must reject each of these, not merely never
+    // encounter them. Every fixture starts from a full clone of the real, valid roster so
+    // each test isolates exactly one broken invariant.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rejects_duplicate_weapon_id() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_id(&mut roster, 1, "ramshot-cannon"); // collides with index 0
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_empty_weapon_id() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_id(&mut roster, 0, "");
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_slot_position_mismatch() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        // Index 0 is a Main position; relabeling its slot without moving it desyncs the
+        // declared slot from the section it sits in.
+        set_slot(&mut roster, 0, WeaponSlot::Secondary);
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_wrong_melee_tool_count() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        roster.pop(); // drops Breach Pick, leaving only 2 melee/tools instead of 3
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_two_infinite_weapons() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_ammo(&mut roster, 4, AmmoPolicy::Infinite); // Recurve Bow, alongside Longsword
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_infinite_weapon_that_is_not_longsword() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_id(&mut roster, 5, "long-blade"); // Longsword's slot, renamed
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_longsword_with_wrong_range() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_attack(
+            &mut roster,
+            5,
+            Attack::Strike(StrikeAttack {
+                range: BASE_MELEE_RANGE, // standard reach instead of the mandated 2x
+                terrain: TerrainProfile::None,
+                self_damage: 0,
+            }),
+        );
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_other_melee_tool_with_wrong_range() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_attack(
+            &mut roster,
+            9, // Trench Spade
+            Attack::Strike(StrikeAttack {
+                range: BASE_MELEE_RANGE.saturating_mul(2),
+                terrain: TerrainProfile::None,
+                self_damage: 0,
+            }),
+        );
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_melee_tool_using_projectile_attack() {
+        // A melee/tool weapon that used a Projectile attack instead of Strike must be
+        // rejected outright, not silently skipped by the range check.
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_attack(
+            &mut roster,
+            9, // Trench Spade
+            Attack::Projectile(ProjectileAttack {
+                speed_per_tick: 1,
+                gravity_per_tick: 0,
+                wind_scale_basis_points: 0,
+                max_ticks: 1,
+                terrain: TerrainProfile::None,
+            }),
+        );
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_special_effects_over_limit() {
+        const TOO_MANY: [SpecialEffect; MAX_SPECIAL_EFFECTS + 1] = [SpecialEffect {
+            trigger: EffectTrigger::OnImpact,
+            kind: EffectKind::Knockback,
+            magnitude: 1,
+            duration_turns: 0,
+        }; MAX_SPECIAL_EFFECTS + 1];
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        if let Some(weapon) = roster.get_mut(0) {
+            weapon.special_effects = &TOO_MANY;
         }
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_action_point_cost_below_one() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        if let Some(weapon) = roster.get_mut(0) {
+            weapon.action_point_cost = 0;
+        }
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_action_point_cost_above_four() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        if let Some(weapon) = roster.get_mut(0) {
+            weapon.action_point_cost = 5;
+        }
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_zero_base_damage() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        if let Some(weapon) = roster.get_mut(0) {
+            weapon.base_damage = 0;
+        }
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
+    }
+
+    #[test]
+    fn rejects_infinite_ammo_with_terrain_destruction() {
+        let mut roster = LAUNCH_ROSTER.to_vec();
+        set_attack(
+            &mut roster,
+            5, // Longsword: still infinite ammo, still the correct 2x range
+            Attack::Strike(StrikeAttack {
+                range: BASE_MELEE_RANGE.saturating_mul(2),
+                terrain: TerrainProfile::Crater { radius_cells: 1 },
+                self_damage: 0,
+            }),
+        );
+        assert_eq!(validate(&roster), Err(crate::SimError::InvalidRoster));
     }
 }
