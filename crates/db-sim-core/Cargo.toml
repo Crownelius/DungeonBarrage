@@ -1,0 +1,17 @@
+[package]
+name = "db-sim-core"
+description = "Authoritative deterministic simulation core for Dungeon Barrage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The core is intentionally dependency-free. Every crate added here becomes part of
+# the authoritative trust boundary (SECURITY_BASELINE.md §8) and requires justification.
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

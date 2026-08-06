@@ -1,0 +1,17 @@
+[package]
+name = "db-sim-wasm"
+description = "WebAssembly boundary for the Dungeon Barrage simulation core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+db-sim-core = { path = "../db-sim-core" }
+
+[lints]
+workspace = true

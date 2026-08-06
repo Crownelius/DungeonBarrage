@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/db-sim-core", "crates/db-sim-wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "UNLICENSED"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Determinism guardrails (ADR 0001). Floating point in the authoritative core is a
+# correctness bug, not a style preference — these deny at the lint level so a stray
+# `f64` cannot reach the simulation without an explicit, reviewed allow.
+float_arithmetic = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_precision_loss = "deny"
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+integer_division = "warn"
+arithmetic_side_effects = "warn"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
