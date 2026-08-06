@@ -21,30 +21,32 @@ pub enum SimError {
         /// Which computation.
         context: &'static str,
     },
-    /// A referenced weapon, map, or behavior identifier does not exist.
+    /// A referenced character, ability, map, or behavior identifier does not exist.
     UnknownDefinition,
     /// A terrain buffer's length disagrees with its declared dimensions.
     TerrainShapeMismatch,
-    /// A loadout did not fill all three slots, or repeated a slot.
-    InvalidLoadout {
-        /// Why the loadout was rejected.
-        reason: LoadoutRejection,
+    /// A character definition failed validation.
+    InvalidCharacter {
+        /// Why the character was rejected.
+        reason: CharacterRejection,
     },
     /// The content roster failed its self-consistency check at load time.
     InvalidRoster,
 }
 
-/// Why a loadout was rejected.
+/// Why a character definition was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadoutRejection {
-    /// A slot was empty.
-    MissingSlot,
-    /// A weapon was equipped into a slot it does not belong to.
+pub enum CharacterRejection {
+    /// An ability was declared for a slot it does not belong to.
     SlotMismatch,
-    /// The same weapon appeared more than once.
-    DuplicateWeapon,
-    /// A referenced weapon identifier is not in the roster.
-    UnknownWeapon,
+    /// The character does not offer exactly `PASSIVES_PER_CHARACTER` passives.
+    WrongPassiveCount,
+    /// Two abilities or passives share an identifier.
+    DuplicateId,
+    /// A referenced character identifier is not in the roster.
+    UnknownCharacter,
+    /// A stat fell outside its permitted range.
+    StatOutOfRange,
 }
 
 impl fmt::Display for SimError {
@@ -56,8 +58,8 @@ impl fmt::Display for SimError {
             Self::TerrainShapeMismatch => {
                 f.write_str("terrain buffer length does not match its dimensions")
             }
-            Self::InvalidLoadout { reason } => write!(f, "invalid loadout: {reason:?}"),
-            Self::InvalidRoster => f.write_str("weapon roster failed validation"),
+            Self::InvalidCharacter { reason } => write!(f, "invalid character: {reason:?}"),
+            Self::InvalidRoster => f.write_str("character roster failed validation"),
         }
     }
 }

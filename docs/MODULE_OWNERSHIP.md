@@ -40,7 +40,7 @@ coordination.
 | `lib.rs` | Module wiring, versions | Integrator |
 | `rng.rs` | Versioned seeded PRNG | Implementation task |
 | `terrain.rs` | Occupancy mask, terrain operations | Implementation task |
-| `weapon.rs` | Weapon roster data + validation | Implementation task |
+| `character.rs` | Character roster data + validation | Implementation task |
 | `ballistics.rs` | Trajectory integration + collision | Implementation task |
 | `hash.rs` | `Canonical` impls for state types | Implementation task |
 | `command.rs` | Command validation + application | Implementation task |
@@ -67,7 +67,7 @@ suggestions; a violation fails the build.
 
 `lib/game/simulation.ts` is the reference oracle (ADR 0001). A module that reimplements
 oracle behaviour must match it **bit-exactly**, including rounding. Where this port
-deliberately diverges — the `main`/`secondary`/`meleeTool` slot rename, and the canonical
+deliberately diverges — the character-kit model replacing the loadout (ADR 0002), and the canonical
 encoding replacing `JSON.stringify` — the divergence is recorded in ADR 0001 §5–§6 and the
 oracle is updated to match, not the other way round.
 

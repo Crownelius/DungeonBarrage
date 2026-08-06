@@ -1,71 +1,158 @@
 //! Shared data contract for the simulation core.
 //!
 //! **This module is the interface every other module agrees on.** Behavior modules
-//! (`terrain`, `weapon`, `ballistics`, `command`, `rng`, `scheduler`) operate on these
+//! (`terrain`, `character`, `ballistics`, `command`, `rng`, `scheduler`) operate on these
 //! types; they do not define their own. Changing a type here is a cross-cutting change
 //! and must be coordinated, not made locally.
 //!
-//! Naming follows `PRODUCT_SPEC.md` §3 (`main` / `secondary` / `meleeTool`), which
-//! supersedes the `offHand` / `melee` names used by the TypeScript oracle. The oracle is
-//! updated to match in the same change so parity is preserved (ADR 0001 §6).
+//! Per ADR 0002, characters replace the three-slot loadout. A player picks one character
+//! and its fixed kit is their whole moveset. The *shape* of an attack is unchanged from
+//! the retired weapon model — a projectile is still a projectile — so terrain,
+//! ballistics, damage, and knockback carry over untouched. Only the owner of an attack
+//! changed, from "a weapon a player equipped" to "an ability a character has".
 
-use crate::fixed::FixedPoint;
+use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
+
+/// Reference value that every damage percentage scales from (`CHARACTERS.md` §2).
+///
+/// A "55% attack" deals 55 hit points. One shared reference keeps all 24 characters on a
+/// comparable scale, and — unlike scaling from target max HP — it means a 400 HP tank is
+/// genuinely tankier than a 190 HP assassin rather than merely having a bigger number.
+pub const BASE_ATTACK: i32 = 100;
+
+/// Special-gauge scale. The gauge is stored in hundredths so the fractional per-damage
+/// gains in `CHARACTERS.md` §2 (+0.40 dealt, +0.25 taken, +0.30 healed) stay exact
+/// integer arithmetic — a float here would break determinism (ADR 0001 §4).
+pub const GAUGE_FULL: u16 = 10_000;
+
+/// Maximum gauge charge from any single action, in hundredths (+45.00).
+///
+/// Without a cap, one large hit fills the gauge instantly and the special stops being
+/// something a player builds toward.
+pub const GAUGE_MAX_PER_ACTION: u16 = 4_500;
 
 // ---------------------------------------------------------------------------
-// Loadout slots
+// Character shape
 // ---------------------------------------------------------------------------
 
-/// The three mutually exclusive equipment slots. Every character fills all three.
+/// How far a character can reach (`CHARACTERS.md` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum WeaponSlot {
-    /// Signature map-scale artillery with a defining special effect.
-    Main,
-    /// Faster or more precise backup: bows, handguns, boomerang, longsword.
-    Secondary,
-    /// Short-range attack or terrain tool.
-    MeleeTool,
+pub enum RangeTier {
+    /// Must close completely. Terrain and positioning dominate.
+    Melee,
+    /// Short. Pressures adjacent ground but cannot cross the map.
+    Tier1,
+    /// Medium. The default engagement band.
+    Tier2,
+    /// Long. Threatens most of a standard map.
+    Tier3,
 }
 
-impl WeaponSlot {
-    /// All slots in canonical order. Iteration order is fixed for hashing.
-    pub const ALL: [Self; 3] = [Self::Main, Self::Secondary, Self::MeleeTool];
+impl RangeTier {
+    /// Reach in fixed-point units.
+    #[must_use]
+    pub const fn reach(self) -> i32 {
+        match self {
+            // 1.25 BW, matching the retired melee standard so existing tuning transfers.
+            // Written in POSITION_SCALE units because one BW is exactly four of them —
+            // this states the fractional reach exactly, with no division to round.
+            Self::Melee => 5 * POSITION_SCALE,
+            Self::Tier1 => 8 * BODY_WIDTH,
+            Self::Tier2 => 16 * BODY_WIDTH,
+            Self::Tier3 => 26 * BODY_WIDTH,
+        }
+    }
 
-    /// The stable wire identifier for this slot.
-    ///
-    /// Used in the canonical encoding and the protocol. Never localize these.
+    /// Stable wire identifier. Never localize these.
     #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
-            Self::Main => "main",
-            Self::Secondary => "secondary",
-            Self::MeleeTool => "meleeTool",
+            Self::Melee => "melee",
+            Self::Tier1 => "tier1",
+            Self::Tier2 => "tier2",
+            Self::Tier3 => "tier3",
         }
     }
 }
 
-/// How a weapon's charges behave.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AmmoPolicy {
-    /// A finite server-owned charge count, decremented once per accepted attack.
-    Finite {
-        /// Charges granted at match start.
-        capacity: u16,
-    },
-    /// Never decrements.
-    ///
-    /// The Longsword is the **only** weapon permitted this policy
-    /// (`ARSENAL.md`, Longsword invariant). Roster validation enforces it.
-    Infinite,
+/// How far a character moves per turn (`CHARACTERS.md` §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MovementClass {
+    /// 2.5 BW.
+    Slow,
+    /// 4 BW.
+    Normal,
+    /// 8 BW — double normal.
+    Fast,
+}
+
+impl MovementClass {
+    /// Movement allowance per turn, in fixed-point units.
+    #[must_use]
+    pub const fn per_turn(self) -> i32 {
+        match self {
+            // 2.5 BW, expressed exactly in POSITION_SCALE units (1 BW == 4 of them).
+            Self::Slow => 10 * POSITION_SCALE,
+            Self::Normal => 4 * BODY_WIDTH,
+            Self::Fast => 8 * BODY_WIDTH,
+        }
+    }
+
+    /// Stable wire identifier.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Slow => "slow",
+            Self::Normal => "normal",
+            Self::Fast => "fast",
+        }
+    }
+}
+
+/// Which of a character's abilities is being used.
+///
+/// Bounded at three so the HUD is bounded at three buttons. `BasicAlt` exists because
+/// Aleph carries both a bow and throwing knives; modelling that as a second basic is
+/// cheaper than a general per-character ability list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AbilitySlot {
+    /// Primary basic attack. Always available, never gated.
+    Basic,
+    /// Optional second basic attack. Always available on characters that have one.
+    BasicAlt,
+    /// Special. Requires a full gauge, which it consumes entirely.
+    Special,
+}
+
+impl AbilitySlot {
+    /// All slots in canonical order. Iteration order is fixed for hashing.
+    pub const ALL: [Self; 3] = [Self::Basic, Self::BasicAlt, Self::Special];
+
+    /// Stable wire identifier.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::BasicAlt => "basicAlt",
+            Self::Special => "special",
+        }
+    }
+
+    /// Whether using this slot requires and consumes a full special gauge.
+    #[must_use]
+    pub const fn consumes_gauge(self) -> bool {
+        matches!(self, Self::Special)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Weapon definitions
+// Ability definitions
 // ---------------------------------------------------------------------------
 
 /// When a special effect fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectTrigger {
-    /// At the moment the attack is committed.
+    /// At the moment the ability is committed.
     OnFire,
     /// During projectile flight.
     OnFlight,
@@ -75,12 +162,12 @@ pub enum EffectTrigger {
     OnTurnEnd,
 }
 
-/// The reviewed vocabulary of special effects.
+/// The reviewed vocabulary of ability effects.
 ///
-/// This is a **closed set**. Weapon definitions are data that reference these
-/// identifiers; there is no scripting language and no dynamically loaded behavior
+/// This is a **closed set**. Character kits are data that reference these identifiers;
+/// there is no scripting language and no dynamically loaded behavior
 /// (`SECURITY_BASELINE.md` §6). Adding a variant requires a client and server build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EffectKind {
     /// Displaces the victim along the impact normal.
     Knockback,
@@ -94,30 +181,60 @@ pub enum EffectKind {
     Tunnel,
     /// Follows an outbound-and-return path.
     Return,
-    /// Displaces the *shooter* opposite the shot.
+    /// Displaces the *actor* opposite the shot.
     Recoil,
     /// Damages the acting player. Surfaced in the UI as **Backlash**, previewed before
-    /// commitment, resolved simultaneously with target damage, and never hideable by a
-    /// skin (`PRODUCT_SPEC.md` §3).
+    /// commitment, and never hideable by a skin.
     SelfDamage,
+    /// Relocates the actor to a computed or chosen destination (Arzum, Aleph, Huck).
+    Teleport,
+    /// Pulls a target toward the actor, or the actor toward the target (Numa, Natomica).
+    Pull,
+    /// Pushes targets away from a point (Natomica's Repulse).
+    Push,
+    /// Extra damage when a pushed target strikes terrain (Natomica).
+    WallImpact,
+    /// Prevents a target from moving or being displaced for a number of turns (Numa).
+    Lockdown,
+    /// Spawns a persistent, destructible ally object (Emi's turret).
+    SpawnTurret,
+    /// Restores health to a chosen ally.
+    Heal,
+    /// Transfers health from the actor to an ally (Zeke's Lifeshare).
+    HealthTransfer,
+    /// Resolves the same attack several times in one turn (Karl).
+    MultiStrike,
+    /// Guarantees critical hits for a number of subsequent attacks (Karl).
+    GuaranteeCrit,
+    /// Leaves a persistent object embedded in terrain (Aleph's knives).
+    EmbedProjectile,
+    /// Detonates embedded objects in a deterministic chain (Aleph).
+    ChainDetonate,
+    /// Moves a target to another target's position (Huck's Body Throw).
+    Relocate,
+    /// Blocks line of sight within a radius for a number of turns (Aleph's gas).
+    Obscure,
 }
 
-/// A special effect attached to a weapon.
+/// An effect attached to an ability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpecialEffect {
     /// When it fires.
     pub trigger: EffectTrigger,
     /// What it does.
     pub kind: EffectKind,
-    /// Effect-specific magnitude, in the unit natural to `kind` (fixed-point distance
-    /// for displacement, hit points for damage, cell counts for terrain).
+    /// Effect-specific magnitude, in the unit natural to `kind` — fixed-point distance
+    /// for displacement, hit points for damage and healing, cell counts for terrain,
+    /// percent-of-[`BASE_ATTACK`] for scaled damage.
     pub magnitude: i32,
-    /// How many of the victim's turns it persists. Status effects last at most one
-    /// affected turn and never stack (`ARSENAL.md` guardrail 4).
+    /// Secondary magnitude, for effects needing two numbers (a damage range's upper
+    /// bound, a radius alongside a duration). Zero when unused.
+    pub magnitude_secondary: i32,
+    /// How many turns it persists. Zero for instantaneous effects.
     pub duration_turns: u8,
 }
 
-/// How a projectile alters terrain on detonation.
+/// How an ability alters terrain on detonation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerrainProfile {
     /// Leaves terrain untouched.
@@ -143,12 +260,13 @@ pub struct ProjectileAttack {
     pub speed_per_tick: i32,
     /// Fixed-point downward acceleration added per tick.
     pub gravity_per_tick: i32,
-    /// Wind response, in basis points. `0` means wind-immune (the 5.7 Service Pistol);
-    /// higher values mean stronger drift (the Recurve Bow).
+    /// Wind response in basis points. `0` is wind-immune; Emi's dense cube is lowest in
+    /// the roster at 2_000.
     pub wind_scale_basis_points: i32,
-    /// Hard lifetime cap. Bounds worst-case server work per shot and guarantees a shot
-    /// always terminates (`PRODUCT_SPEC.md` §2: 8-second unresolved projectile limit).
+    /// Hard lifetime cap. Bounds worst-case server work and guarantees termination.
     pub max_ticks: u16,
+    /// How many times the projectile bounces before detonating (Roberto's grenade: 1).
+    pub bounces: u8,
     /// Terrain effect on detonation.
     pub terrain: TerrainProfile,
 }
@@ -156,13 +274,12 @@ pub struct ProjectileAttack {
 /// A close-range attack resolved without a flying projectile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrikeAttack {
-    /// Reach in fixed-point units. Standard is [`crate::fixed::BASE_MELEE_RANGE`]
-    /// (1.25 BW); the Longsword is exactly twice that.
+    /// Reach in fixed-point units. Normally the character's [`RangeTier::reach`], but
+    /// stated explicitly so an ability can differ from its character's default.
     pub range: i32,
-    /// Terrain effect, for digging and breaching tools.
+    /// Terrain effect.
     pub terrain: TerrainProfile,
-    /// Backlash dealt to the acting player. Bypasses ordinary shields and can eliminate
-    /// its user (`ARSENAL.md` guardrail 6).
+    /// Backlash dealt to the acting player. Can eliminate its user.
     pub self_damage: u16,
 }
 
@@ -175,36 +292,153 @@ pub enum Attack {
     Strike(StrikeAttack),
 }
 
-/// Maximum special effects on one weapon. Bounds the definition size so a hostile or
-/// malformed content pack cannot produce unbounded per-impact work.
-pub const MAX_SPECIAL_EFFECTS: usize = 4;
+/// Maximum effects on one ability. Bounds definition size so a malformed content pack
+/// cannot produce unbounded per-impact work.
+pub const MAX_SPECIAL_EFFECTS: usize = 6;
 
-/// A complete, versioned weapon definition.
+/// A single ability belonging to a character.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityDefinition {
+    /// Stable identifier, e.g. `"arzum-chain-strike"`.
+    pub id: &'static str,
+    /// Player-facing name.
+    pub display_name: &'static str,
+    /// Which slot it occupies.
+    pub slot: AbilitySlot,
+    /// Damage as a percentage of [`BASE_ATTACK`]. `45` means 45 hit points.
+    pub damage_percent: u16,
+    /// Critical-hit damage percentage. Equal to `damage_percent` when the ability
+    /// cannot crit.
+    pub crit_damage_percent: u16,
+    /// Crit chance in basis points. Zero when the ability cannot crit.
+    pub crit_chance_basis_points: u16,
+    /// How many times this ability resolves in one turn. `1` for most; Karl's basic is
+    /// `3`.
+    pub strikes_per_turn: u8,
+    /// Attack shape and parameters.
+    pub attack: Attack,
+    /// Effects, in declaration order.
+    pub effects: &'static [SpecialEffect],
+}
+
+impl AbilityDefinition {
+    /// Damage in hit points for a non-critical hit.
+    ///
+    /// Returns [`None`] on overflow rather than wrapping — a wrapped damage value would
+    /// heal the target.
+    #[must_use]
+    pub const fn damage(&self) -> Option<i32> {
+        crate::fixed::scale(BASE_ATTACK, self.damage_percent as i32, 100)
+    }
+
+    /// Damage in hit points for a critical hit.
+    #[must_use]
+    pub const fn crit_damage(&self) -> Option<i32> {
+        crate::fixed::scale(BASE_ATTACK, self.crit_damage_percent as i32, 100)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Passives
+// ---------------------------------------------------------------------------
+
+/// Maximum passives offered per character. The choice is presented as exactly three
+/// options (`CHARACTERS.md` §2).
+pub const PASSIVES_PER_CHARACTER: usize = 3;
+
+/// A passive a player may select the first time their gauge fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassiveDefinition {
+    /// Stable identifier, e.g. `"arzum-momentum"`.
+    pub id: &'static str,
+    /// Player-facing name.
+    pub display_name: &'static str,
+    /// What it modifies.
+    pub kind: PassiveKind,
+    /// Magnitude in the unit natural to `kind`.
+    pub magnitude: i32,
+}
+
+/// The closed vocabulary of passive effects.
+///
+/// Closed for the same reason [`EffectKind`] is: passives are versioned data referencing
+/// reviewed behavior, never downloadable logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PassiveKind {
+    /// Flat bonus to maximum health.
+    BonusMaxHealth,
+    /// Flat bonus to movement per turn, fixed-point.
+    BonusMovement,
+    /// Additive crit chance, basis points.
+    BonusCritChance,
+    /// Percentage reduction to incoming damage, basis points.
+    DamageReduction,
+    /// Percentage bonus to outgoing damage, basis points.
+    DamageBonus,
+    /// Percentage bonus to healing done, basis points.
+    HealingBonus,
+    /// Extra turns on this character's duration effects.
+    BonusDuration,
+    /// Extra radius on this character's terrain effects, fixed-point.
+    BonusRadius,
+    /// Immunity to knockback, push, and pull.
+    DisplacementImmunity,
+    /// Immunity to the actor's own friendly fire.
+    SelfDamageImmunity,
+    /// Converts a random ability target or destination into a chosen one.
+    RemoveRandomness,
+    /// Raises a persistent-object cap (Aleph's embedded knives).
+    BonusObjectCap,
+    /// Heals the actor for a flat amount on each connecting attack.
+    LifestealFlat,
+}
+
+// ---------------------------------------------------------------------------
+// Character definitions
+// ---------------------------------------------------------------------------
+
+/// A complete, versioned playable character.
 ///
 /// Definitions are immutable once used by a completed match. Balance changes publish a
-/// new version rather than mutating in place (`PLATFORM_STRATEGY.md` §6).
+/// new version rather than mutating in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WeaponDefinition {
-    /// Stable identifier, e.g. `"ramshot-cannon"`.
+pub struct CharacterDefinition {
+    /// Stable identifier, e.g. `"arzum"`.
     pub id: &'static str,
     /// Definition version.
     pub version: u32,
     /// Player-facing name.
     pub display_name: &'static str,
-    /// The one slot this weapon occupies.
-    pub slot: WeaponSlot,
-    /// Charge behavior.
-    pub ammo: AmmoPolicy,
-    /// Action points consumed. Firing also ends the turn.
-    pub action_point_cost: u8,
-    /// Damage on an exact direct hit.
-    pub base_damage: u16,
-    /// Attack shape and parameters.
-    pub attack: Attack,
-    /// Special effects, in declaration order.
-    pub special_effects: &'static [SpecialEffect],
-    /// Whether this weapon is legal in rated modes.
-    pub ranked_enabled: bool,
+    /// Starting and maximum health.
+    pub max_health: u16,
+    /// Default reach.
+    pub range_tier: RangeTier,
+    /// Movement allowance class.
+    pub movement: MovementClass,
+    /// Primary basic attack.
+    pub basic: AbilityDefinition,
+    /// Optional second basic attack. Only Aleph has one at launch.
+    pub basic_alt: Option<AbilityDefinition>,
+    /// Special, gated by a full gauge.
+    pub special: AbilityDefinition,
+    /// Exactly [`PASSIVES_PER_CHARACTER`] options.
+    pub passives: &'static [PassiveDefinition],
+    /// Whether this character is free on every account (`CHARACTERS.md` §3).
+    pub is_starter: bool,
+    /// Credit cost when not a starter. Zero for starters.
+    pub credit_cost: u32,
+}
+
+impl CharacterDefinition {
+    /// The ability in `slot`, if this character has one there.
+    #[must_use]
+    pub const fn ability(&self, slot: AbilitySlot) -> Option<&AbilityDefinition> {
+        match slot {
+            AbilitySlot::Basic => Some(&self.basic),
+            AbilitySlot::BasicAlt => self.basic_alt.as_ref(),
+            AbilitySlot::Special => Some(&self.special),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,41 +613,18 @@ pub struct BallisticResult {
 // Players and match state
 // ---------------------------------------------------------------------------
 
-/// A player's three equipped weapons.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Loadout {
-    /// Main-slot weapon id.
-    pub main: String,
-    /// Secondary-slot weapon id.
-    pub secondary: String,
-    /// Melee/tool-slot weapon id.
-    pub melee_tool: String,
-}
-
-impl Loadout {
-    /// The equipped id for `slot`.
-    #[must_use]
-    pub fn slot(&self, slot: WeaponSlot) -> &str {
-        match slot {
-            WeaponSlot::Main => &self.main,
-            WeaponSlot::Secondary => &self.secondary,
-            WeaponSlot::MeleeTool => &self.melee_tool,
-        }
-    }
-}
-
 /// Purely cosmetic appearance.
 ///
 /// **Never** contributes to the state hash, collision, reach, or any gameplay value
 /// (`ARSENAL.md`, cosmetic boundary). Carried in state only so the renderer can read it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Appearance {
-    /// Body rig identifier.
-    pub body_id: String,
-    /// Outfit identifier.
-    pub outfit_id: String,
-    /// Per-slot weapon skin identifiers.
-    pub weapon_skin_ids: [String; 3],
+    /// Character skin identifier.
+    pub skin_id: String,
+    /// Per-slot ability effect skin identifiers.
+    pub ability_skin_ids: [String; 3],
+    /// Victory pose identifier.
+    pub victory_pose_id: String,
 }
 
 /// An active status effect on a character.
@@ -427,60 +638,132 @@ pub struct StatusEffect {
     pub turns_remaining: u8,
 }
 
-/// A charge counter for one equipped weapon.
+/// A persistent object owned by a player — Emi's turret, Aleph's embedded knives.
 ///
-/// [`None`] means the weapon's policy is [`AmmoPolicy::Infinite`] and it has no counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AmmoCounter {
-    /// Remaining charges, or [`None`] for infinite.
-    pub remaining: Option<u16>,
+/// Distinct from terrain: these are destructible entities with their own health and
+/// lifetime, and they resolve in a deterministic order keyed on `sequence`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentObject {
+    /// Monotonic per-match creation order. Drives deterministic chain resolution.
+    pub sequence: u32,
+    /// Which player owns it.
+    pub owner_id: String,
+    /// What it is.
+    pub kind: PersistentObjectKind,
+    /// Where it sits.
+    pub position: FixedPoint,
+    /// Remaining health. Zero removes it.
+    pub health: u16,
+    /// Turns remaining before it expires. `u8::MAX` means it never expires on its own
+    /// (Aleph's knives persist until triggered or displaced by the cap).
+    pub turns_remaining: u8,
+}
+
+/// Kinds of persistent object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PersistentObjectKind {
+    /// Emi's cube turret. Fires only in response to Emi's own attacks.
+    Turret,
+    /// One of Aleph's embedded throwing knives. Detonates when another lands nearby.
+    EmbeddedKnife,
+    /// Aleph's gas cloud. Blocks line of sight.
+    GasCloud,
 }
 
 /// One character's authoritative state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerState {
-    /// Opaque server-generated identifier. Never an email, external subject, or
-    /// platform id (`SECURITY_BASELINE.md` §4).
+    /// Opaque server-generated identifier. Never an email, external subject, or platform
+    /// id (`SECURITY_BASELINE.md` §4).
     pub id: String,
     /// Team index. Distinct values are opponents; equal values are allies.
     pub team: u8,
     /// Current health. Zero means eliminated.
     pub health: u16,
+    /// Maximum health, from the character definition plus any passive bonus. Stored
+    /// rather than re-derived so a mid-match definition change cannot retroactively move
+    /// a player's ceiling.
+    pub max_health: u16,
     /// Position, fixed-point.
     pub position: FixedPoint,
-    /// Equipped weapons.
-    pub loadout: Loadout,
-    /// Charges per slot, indexed parallel to [`WeaponSlot::ALL`].
-    pub ammo: [AmmoCounter; 3],
-    /// Active statuses, kept sorted by `kind` discriminant for canonical encoding.
+    /// Which character is being played.
+    pub character_id: String,
+    /// The passive chosen on first gauge fill. [`None`] until that choice is made — the
+    /// choice happens mid-match, not at selection (`CHARACTERS.md` §2).
+    pub passive_id: Option<String>,
+    /// Special gauge in hundredths, `0..=`[`GAUGE_FULL`].
+    pub special_gauge: u16,
+    /// Whether the gauge has ever been full this match. Gates the one-time passive
+    /// prompt, so a player who fills, spends, and refills is not asked twice.
+    pub has_chosen_passive: bool,
+    /// Active statuses, kept sorted by `kind` for canonical encoding.
     pub statuses: Vec<StatusEffect>,
     /// Cosmetic only. Excluded from the state hash.
     pub appearance: Appearance,
 }
 
+impl PlayerState {
+    /// Whether the special is available.
+    #[must_use]
+    pub const fn special_ready(&self) -> bool {
+        self.special_gauge >= GAUGE_FULL
+    }
+
+    /// Whether this character is eliminated.
+    #[must_use]
+    pub const fn is_eliminated(&self) -> bool {
+        self.health == 0
+    }
+
+    /// Adds gauge charge, applying both the per-action cap and the ceiling.
+    ///
+    /// Saturating throughout: an overflowing charge must clamp to full, never wrap to
+    /// empty and rob a player of an earned special.
+    pub const fn add_gauge(&mut self, amount: u16) {
+        let capped = if amount > GAUGE_MAX_PER_ACTION {
+            GAUGE_MAX_PER_ACTION
+        } else {
+            amount
+        };
+        let raised = self.special_gauge.saturating_add(capped);
+        self.special_gauge = if raised > GAUGE_FULL { GAUGE_FULL } else { raised };
+    }
+}
+
 /// Where a match is in its turn cycle (`PRODUCT_SPEC.md` §2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MatchPhase {
     /// Pre-match presentation.
     MatchIntro,
     /// Turn beginning; scheduled environment changes applied.
     TurnStart,
-    /// Player may move within the AP budget.
+    /// Player may move within their allowance.
     Movement,
-    /// Player selects weapon, angle, and power.
+    /// Player selects ability, angle, and power.
     AimingAndSelection,
+    /// The gauge just filled for the first time; the passive choice is pending. Blocks
+    /// ability commands until resolved so the choice cannot be skipped by firing.
+    PassiveSelection,
     /// Command accepted; input locked.
     CommandLocked,
-    /// Projectile or melee resolving.
+    /// Ability resolving.
     Resolution,
-    /// Bodies and debris settling.
+    /// Bodies, debris, and persistent objects settling.
     Settling,
-    /// Statuses ticking.
+    /// Statuses and object lifetimes ticking.
     StatusResolution,
     /// Checking win conditions.
     VictoryCheck,
     /// Terminal.
     MatchComplete,
+}
+
+impl MatchPhase {
+    /// Whether an ability command may be accepted in this phase.
+    #[must_use]
+    pub const fn accepts_ability_command(self) -> bool {
+        matches!(self, Self::Movement | Self::AimingAndSelection)
+    }
 }
 
 /// The complete authoritative match state.
@@ -504,16 +787,22 @@ pub struct SimulationState {
     /// Horizontal wind acceleration per tick, fixed-point. Held constant for at least a
     /// full turn (`PRODUCT_SPEC.md` §4).
     pub wind_per_tick: i32,
-    /// Action points remaining to the active player this turn.
-    pub action_points_remaining: u8,
+    /// Movement allowance remaining to the active player this turn, fixed-point.
+    pub movement_remaining: i32,
+    /// Whether the active player has already committed their attack this turn.
+    pub has_attacked_this_turn: bool,
     /// Terrain occupancy.
     pub terrain: TerrainMask,
     /// Players, kept sorted by `id` so iteration is deterministic.
     pub players: Vec<PlayerState>,
+    /// Persistent objects, kept sorted by `sequence`.
+    pub objects: Vec<PersistentObject>,
     /// Accepted command identifiers, sorted, for idempotent rejection of replays.
     pub processed_command_ids: Vec<String>,
     /// Next terrain operation sequence number.
     pub next_terrain_sequence: u32,
+    /// Next persistent object sequence number.
+    pub next_object_sequence: u32,
     /// PRNG state. Advanced only through the seeded generator.
     pub rng_state: u64,
 }
@@ -523,6 +812,11 @@ impl SimulationState {
     #[must_use]
     pub fn player(&self, id: &str) -> Option<&PlayerState> {
         self.players.iter().find(|player| player.id == id)
+    }
+
+    /// Finds a player by id, mutably.
+    pub fn player_mut(&mut self, id: &str) -> Option<&mut PlayerState> {
+        self.players.iter_mut().find(|player| player.id == id)
     }
 
     /// Whether `command_id` has already been accepted.
@@ -541,26 +835,41 @@ impl SimulationState {
 // Commands
 // ---------------------------------------------------------------------------
 
-/// A client's intent to act.
+/// A client's intent to use an ability.
 ///
 /// Every field is validated before use; nothing here is trusted
 /// (`SECURITY_BASELINE.md` §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WeaponCommand {
+pub struct AbilityCommand {
     /// Idempotency key, unique within the match.
     pub command_id: String,
     /// Claimed actor. Verified against the session, never trusted as given.
     pub player_id: String,
-    /// State version the client believed it was acting on.
+    /// Turn number the client believed it was acting on.
     pub expected_turn_number: u32,
-    /// Which equipped slot is firing.
-    pub slot: WeaponSlot,
-    /// Weapon id, cross-checked against the equipped loadout.
-    pub weapon_id: String,
+    /// Which ability slot is being used.
+    pub slot: AbilitySlot,
     /// Launch angle, millidegrees.
     pub angle_millidegrees: i32,
     /// Launch power, basis points.
     pub power_basis_points: i32,
+    /// Target player, for abilities that select one (Zeke's heal, Huck's throw).
+    pub target_player_id: Option<String>,
+    /// Secondary target, for abilities needing two (Huck's Body Throw destination).
+    pub secondary_target_player_id: Option<String>,
+}
+
+/// A client's choice of passive, made the first time their gauge fills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassiveChoiceCommand {
+    /// Idempotency key, unique within the match.
+    pub command_id: String,
+    /// Claimed actor. Verified against the session.
+    pub player_id: String,
+    /// Turn number the client believed it was acting on.
+    pub expected_turn_number: u32,
+    /// The chosen passive. Must belong to the player's character.
+    pub passive_id: String,
 }
 
 /// Why a command was refused.
@@ -573,22 +882,28 @@ pub enum CommandRejection {
     DuplicateCommand,
     /// Not this player's turn. **Security event.**
     NotActivePlayer,
-    /// The match is not accepting commands in its current phase.
+    /// The match is not accepting this command in its current phase.
     WrongPhase,
     /// The client's expected turn number is stale or ahead.
     TurnVersionMismatch,
-    /// The named weapon is not equipped in the named slot. **Security event.**
-    WeaponNotEquipped,
-    /// No charges remain.
-    OutOfAmmo,
-    /// Insufficient action points.
-    InsufficientActionPoints,
+    /// The acting player's character has no ability in that slot. **Security event.**
+    AbilityNotAvailable,
+    /// The special was used without a full gauge.
+    GaugeNotReady,
+    /// The player has already attacked this turn.
+    AlreadyAttacked,
     /// Angle or power outside the permitted range. **Security event.**
     InputOutOfRange,
     /// The acting player is eliminated.
     PlayerEliminated,
-    /// The weapon id is not in the roster. **Security event.**
-    UnknownWeapon,
+    /// A required target was absent, eliminated, or not a legal target.
+    InvalidTarget,
+    /// The character id is not in the roster. **Security event.**
+    UnknownCharacter,
+    /// The chosen passive does not belong to the player's character. **Security event.**
+    InvalidPassive,
+    /// A passive choice arrived when none was pending, or a second time.
+    PassiveAlreadyChosen,
 }
 
 impl CommandRejection {
@@ -599,9 +914,10 @@ impl CommandRejection {
         matches!(
             self,
             Self::NotActivePlayer
-                | Self::WeaponNotEquipped
+                | Self::AbilityNotAvailable
                 | Self::InputOutOfRange
-                | Self::UnknownWeapon
+                | Self::UnknownCharacter
+                | Self::InvalidPassive
         )
     }
 }
@@ -612,7 +928,7 @@ impl CommandRejection {
 /// must identify the elimination cause (`PRODUCT_SPEC.md` §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DamageEvent {
-    /// Who was damaged.
+    /// Who was affected.
     pub player_id: String,
     /// Damage from an exact direct hit.
     pub direct: u16,
@@ -622,6 +938,12 @@ pub struct DamageEvent {
     pub backlash: u16,
     /// Damage from a world hazard.
     pub hazard: u16,
+    /// Extra damage from being driven into terrain (Natomica's Repulse).
+    pub wall_impact: u16,
+    /// Health restored. Separate from damage so a result panel can show both.
+    pub healed: u16,
+    /// Whether this hit was a critical.
+    pub was_critical: bool,
     /// Displacement applied.
     pub knockback: FixedPoint,
     /// Whether this event eliminated the character.
@@ -643,10 +965,12 @@ pub struct CommandOutcome {
     pub impact: Option<BallisticImpact>,
     /// Terrain mutations, in sequence order.
     pub terrain_ops: Vec<TerrainOperation>,
-    /// Damage applied, sorted by `player_id`.
+    /// Damage and healing applied, sorted by `player_id`.
     pub damage: Vec<DamageEvent>,
-    /// Charges consumed.
-    pub ammo_consumed: u16,
+    /// Persistent objects created by this action.
+    pub objects_created: Vec<PersistentObject>,
+    /// Gauge charge gained by the actor, in hundredths.
+    pub gauge_gained: u16,
     /// Terrain cells removed, for telemetry and the Excavator XP bonus.
     pub terrain_cells_removed: u32,
     /// State hash after application, for divergence detection.
