@@ -224,6 +224,13 @@ const SERVICE_PISTOL: WeaponDefinition = WeaponDefinition {
 };
 
 /// Heavy Revolver: high knockback with recoil that displaces the shooter.
+///
+/// Recoil magnitude: 0.5 BW = BODY_WIDTH / 2. Using saturating division to avoid panic
+/// on overflow (though BODY_WIDTH / 2 is always safe).
+#[expect(
+    clippy::integer_division,
+    reason = "BODY_WIDTH / 2 is a fixed constant (2048); safe fixed-point division"
+)]
 const HEAVY_REVOLVER: WeaponDefinition = WeaponDefinition {
     id: "heavy-revolver",
     version: 1,
@@ -485,7 +492,11 @@ pub fn validate_roster() -> SimResult<()> {
     }
 
     // **Longsword Invariant:** Exactly one infinite-ammo weapon, and it is the Longsword
-    if infinite_weapons.len() != 1 || infinite_weapons[0] != "longsword" {
+    let has_only_longsword_infinite = infinite_weapons.len() == 1
+        && infinite_weapons
+            .first()
+            .map_or(false, |id| *id == "longsword");
+    if !has_only_longsword_infinite {
         return Err(crate::SimError::InvalidRoster);
     }
 
@@ -589,19 +600,23 @@ mod tests {
             .filter(|w| matches!(w.ammo, AmmoPolicy::Infinite))
             .collect();
         assert_eq!(infinite.len(), 1);
-        assert_eq!(infinite[0].id, "longsword");
+        if let Some(weapon) = infinite.first() {
+            assert_eq!(weapon.id, "longsword");
+        } else {
+            assert!(false, "Expected one infinite weapon");
+        }
     }
 
     #[test]
     fn longsword_range_is_exactly_double_base_melee() {
-        let longsword = LAUNCH_ROSTER
-            .iter()
-            .find(|w| w.id == "longsword")
-            .expect("Longsword must exist");
-        if let Attack::Strike(strike) = longsword.attack {
-            assert_eq!(strike.range, BASE_MELEE_RANGE * 2);
+        if let Some(longsword) = LAUNCH_ROSTER.iter().find(|w| w.id == "longsword") {
+            if let Attack::Strike(strike) = longsword.attack {
+                assert_eq!(strike.range, BASE_MELEE_RANGE * 2);
+            } else {
+                assert!(false, "Longsword must use Strike attack");
+            }
         } else {
-            panic!("Longsword must use Strike attack");
+            assert!(false, "Longsword must exist in roster");
         }
     }
 
@@ -616,7 +631,7 @@ mod tests {
                         weapon.id
                     );
                 } else {
-                    panic!("{} must use Strike attack", weapon.id);
+                    assert!(false, "{} must use Strike attack", weapon.id);
                 }
             }
         }
@@ -686,10 +701,13 @@ mod tests {
 
     #[test]
     fn find_returns_correct_weapon_data() {
-        let ramshot = find("ramshot-cannon").expect("Ramshot must exist");
-        assert_eq!(ramshot.base_damage, 62);
-        assert_eq!(ramshot.action_point_cost, 3);
-        assert_eq!(ramshot.slot, WeaponSlot::Main);
+        if let Some(ramshot) = find("ramshot-cannon") {
+            assert_eq!(ramshot.base_damage, 62);
+            assert_eq!(ramshot.action_point_cost, 3);
+            assert_eq!(ramshot.slot, WeaponSlot::Main);
+        } else {
+            assert!(false, "Ramshot must exist");
+        }
     }
 
     #[test]
@@ -703,24 +721,37 @@ mod tests {
 
     #[test]
     fn cinder_cluster_has_exactly_two_special_effects() {
-        let cinder = find("cinder-cluster").expect("Cinder Cluster must exist");
-        assert_eq!(cinder.special_effects.len(), 2);
+        if let Some(cinder) = find("cinder-cluster") {
+            assert_eq!(cinder.special_effects.len(), 2);
+        } else {
+            assert!(false, "Cinder Cluster must exist");
+        }
     }
 
     #[test]
     fn heavy_revolver_has_exactly_two_special_effects() {
-        let revolver = find("heavy-revolver").expect("Heavy Revolver must exist");
-        assert_eq!(revolver.special_effects.len(), 2);
+        if let Some(revolver) = find("heavy-revolver") {
+            assert_eq!(revolver.special_effects.len(), 2);
+        } else {
+            assert!(false, "Heavy Revolver must exist");
+        }
     }
 
     #[test]
     fn blood_maul_self_damage_matches_magnitude() {
-        let blood_maul = find("blood-maul").expect("Blood Maul must exist");
-        if let Attack::Strike(strike) = blood_maul.attack {
-            assert_eq!(strike.self_damage, 14);
-            assert_eq!(blood_maul.special_effects[0].magnitude, 14);
+        if let Some(blood_maul) = find("blood-maul") {
+            if let Attack::Strike(strike) = blood_maul.attack {
+                assert_eq!(strike.self_damage, 14);
+                if let Some(effect) = blood_maul.special_effects.first() {
+                    assert_eq!(effect.magnitude, 14);
+                } else {
+                    assert!(false, "Blood Maul must have a special effect");
+                }
+            } else {
+                assert!(false, "Blood Maul must be a strike");
+            }
         } else {
-            panic!("Blood Maul must be a strike");
+            assert!(false, "Blood Maul must exist");
         }
     }
 }
