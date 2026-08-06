@@ -1,7 +1,7 @@
 # Dungeon Barrage program plan
 
 **Status:** Living plan. Updated at each milestone gate.
-**Related:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PLATFORM_STRATEGY.md](./PLATFORM_STRATEGY.md) · [adr/0001-rust-wasm-core.md](./adr/0001-rust-wasm-core.md) · [MODULE_OWNERSHIP.md](./MODULE_OWNERSHIP.md)
+**Related:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [CHARACTERS.md](./CHARACTERS.md) · [PLATFORM_STRATEGY.md](./PLATFORM_STRATEGY.md) · [adr/0001-rust-wasm-core.md](./adr/0001-rust-wasm-core.md) · [adr/0002-character-kits.md](./adr/0002-character-kits.md) · [adr/0003-shared-trig-table.md](./adr/0003-shared-trig-table.md) · [MODULE_OWNERSHIP.md](./MODULE_OWNERSHIP.md)
 
 ## 1. Where the project actually is
 
@@ -83,9 +83,10 @@ from the runtime path (retained in `reference/`).
 compressed; no regression against the performance budgets in `PLATFORM_STRATEGY.md` §15.
 
 ### M3 — Vertical slice complete
-Full 12-weapon roster live, three maps, layered avatar compositing, complete match HUD,
-training bot, rematch, event replay.
-**Gate:** a first-time player customizes, equips, plays, understands the result, and
+Nine starter characters playable, three maps, layered cosmetic compositing, complete
+match HUD with the special gauge and passive-choice prompt, training bot, rematch,
+event replay.
+**Gate:** a first-time player picks a character, plays, understands the result, and
 rematches without explanation.
 
 ### M4 — Authoritative match server
@@ -95,8 +96,8 @@ reconnect snapshots, private room codes, guest sessions.
 state; disconnect/reconnect recovers during both planning and resolution.
 
 ### M5 — Progression, economy, accounts
-XP curve, level 0–55, the level-up choice, shard ledger, weapon shop, idempotent grants,
-optional account conversion.
+XP curve, level 0–55, the level-up choice, credit ledger, character shop, idempotent
+grants, optional account conversion.
 **Gate:** duplicate completion messages cannot grant twice — proven by test, not asserted;
 economy ledger reconciles against cached balances; a client cannot assert its own level,
 currency, or ownership.
@@ -135,7 +136,7 @@ the turn-based loop is proven means debugging two schedulers against an unvalida
 2. **The reference screenshot** described in `PRODUCT_SPEC.md` §12 was supplied in an
    earlier session and is not present in the current one. Art-direction work that depends
    on it needs it re-attached.
-3. **Level-up reward balance** — see `PROGRESSION.md` §4. Recommended: raise the shard
+3. **Level-up reward balance** — see `PROGRESSION.md` §4. Recommended: raise the credit
    option to 250–400. One versioned data change, no new systems.
 4. **SOC 2** is an audited organizational attestation, not a code property
    (`SECURITY_BASELINE.md` §1). Engineering can build so an audit is achievable; the
@@ -148,3 +149,11 @@ the turn-based loop is proven means debugging two schedulers against an unvalida
    upgrades outside the pinned ranges of `vinext`, `vite`, and `@cloudflare/vite-plugin`.
    Nearly all are dev/build-chain rather than shipped code, but they run on the developer
    machine. Worth a deliberate upgrade pass once the vinext version is stable.
+
+7. **Character content backlog.** 15 of the 24 characters are unspecified, and 45 of the
+   72 passives are undrafted (`CHARACTERS.md` §4, §7). Both are real scheduling
+   commitments.
+8. **Four character rules need confirmation** (`CHARACTERS.md` §7): Karl's 24%/74% vs the
+   brief's 33%; Numa's harpoon direction threshold; Zeke's 22 HP heal reading; and whether
+   Arzum's 50–200% ultimate roll should narrow in rated play. Karl's crit *chance* is
+   additionally an unsourced 20% placeholder flagged during review.
