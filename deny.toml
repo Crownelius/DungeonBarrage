@@ -1,0 +1,49 @@
+# cargo-deny configuration. Enforces SECURITY_BASELINE.md §8 (supply chain).
+#
+# The simulation core is intentionally dependency-free: every crate that enters the
+# authoritative path is part of the trust boundary. This file makes that a gate rather
+# than an intention.
+
+[advisories]
+# Any unmaintained or vulnerable dependency fails the build. There is no severity
+# threshold below which a known advisory in the authoritative path is acceptable.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses only. A copyleft dependency in a distributed game client is a
+# legal question, not an engineering one, and must be escalated rather than absorbed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+# Our own crates are `publish = false` and carry no OSS license. Skipping them keeps the
+# allow-list meaningful: it describes third-party code entering the trust boundary, which
+# is the thing this check exists to control.
+private = { ignore = true }
+
+[bans]
+# Duplicate versions of one crate bloat the WASM payload and make advisory triage
+# ambiguous — you can no longer say "we are on version X".
+multiple-versions = "warn"
+# A versionless dependency is a supply-chain hazard for registry crates, but intra-
+# workspace path deps are versionless by design and resolve to code in this repository.
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Only crates.io. A git dependency bypasses the registry's immutability guarantee: the
+# same revision spec can resolve to different code over time.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

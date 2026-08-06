@@ -1,0 +1,158 @@
+# CI gates for Dungeon Barrage.
+#
+# This workflow is the enforcement mechanism for docs/SECURITY_BASELINE.md §10. A control
+# that is documented but not gated is an intention, not a control — everything listed in
+# that section that CAN be automated is automated here.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build wasm32
+        run: cargo build --target wasm32-unknown-unknown -p db-sim-wasm --release
+
+      # ADR 0001's memory-safety invariant. Grepped rather than assumed: a dropped
+      # `forbid` line would otherwise silently reopen the entire class of bug that
+      # motivated choosing Rust over C++.
+      - name: Verify unsafe is forbidden
+        run: |
+          grep -q 'unsafe_code = "forbid"' Cargo.toml \
+            || { echo "::error::workspace lint 'unsafe_code = forbid' is missing"; exit 1; }
+          if grep -rn --include='*.rs' -E '(^|[^_[:alnum:]])unsafe[[:space:]]*\{' crates/; then
+            echo "::error::unsafe block found in the simulation core"
+            exit 1
+          fi
+
+      # Determinism invariant (ADR 0001 §4). Floating point in the authoritative core
+      # breaks bit-exact reproducibility across wasm32 and native targets.
+      # Comment lines are stripped first — the modules that document this rule naturally
+      # mention f32/f64, and a gate that trips on its own documentation trains people to
+      # disable it.
+      - name: Verify no floating point in the core
+        run: |
+          hits=$(grep -rn --include='*.rs' -E '\b(f32|f64)\b' crates/db-sim-core/src/ \
+                 | grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::floating point found in the authoritative simulation core"
+            exit 1
+          fi
+
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  web:
+    name: Web client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` not `npm install`: installs exactly the lockfile, so CI cannot
+      # silently resolve a different dependency tree than a developer reviewed.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+  code-hygiene:
+    name: Security grep gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SECURITY_BASELINE.md §6. These are cheap, high-signal checks for the specific
+      # patterns that turn into XSS and SQL injection. They are deliberately blunt: a
+      # false positive costs a comment, a false negative costs an incident.
+      - name: No dangerouslySetInnerHTML
+        run: |
+          if grep -rn --include='*.ts' --include='*.tsx' 'dangerouslySetInnerHTML' app/ lib/ 2>/dev/null; then
+            echo "::error::dangerouslySetInnerHTML is prohibited (XSS)"
+            exit 1
+          fi
+
+      - name: No eval or Function constructor
+        run: |
+          if grep -rnE --include='*.ts' --include='*.tsx' '(^|[^.\w])eval\(|new Function\(' app/ lib/ worker/ 2>/dev/null; then
+            echo "::error::eval / Function constructor is prohibited (RCE)"
+            exit 1
+          fi
+
+      # Drizzle's query builder parameterizes. Raw interpolated SQL does not.
+      - name: No string-interpolated SQL
+        run: |
+          if grep -rnE --include='*.ts' 'sql[.`]?raw|execute\(`.*\$\{' db/ app/ worker/ 2>/dev/null; then
+            echo "::error::raw or interpolated SQL is prohibited (injection)"
+            exit 1
+          fi
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret committed and then removed is still a leaked secret
+          # and still needs rotating.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
