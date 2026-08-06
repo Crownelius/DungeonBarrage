@@ -1,0 +1,11 @@
+{
+  "name": "Dungeon Barrage",
+  "short_name": "Barrage",
+  "description": "A turn-based artillery duel with destructible dungeons and modular fighters.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#120f1c",
+  "theme_color": "#120f1c",
+  "orientation": "landscape-primary",
+  "categories": ["games", "entertainment"]
+}
