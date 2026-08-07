@@ -19,6 +19,10 @@ missing_docs = "warn"
 # `f64` cannot reach the simulation without an explicit, reviewed allow.
 float_arithmetic = "deny"
 cast_possible_truncation = "deny"
+# Added after a truncating `u32 as i32` in terrain.rs wrapped negative and silently made a
+# terrain operation touch zero cells. It built clean and passed its tests because this lint
+# was absent from the deny list. Found by review, not by CI — so the gate is now here too.
+cast_possible_wrap = "deny"
 cast_sign_loss = "deny"
 cast_precision_loss = "deny"
 indexing_slicing = "deny"

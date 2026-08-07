@@ -55,12 +55,18 @@ character has".
 Loadout { main, secondary, meleeTool }        →  CharacterSelection { character_id, passive_id }
 WeaponSlot { Main, Secondary, MeleeTool }     →  AbilitySlot { Basic, BasicAlt, Special }
 WeaponDefinition                              →  AbilityDefinition  (shape unchanged)
-PlayerState.ammo: [AmmoCounter; 3]            →  PlayerState.special_gauge: u8  (0–100)
+PlayerState.ammo: [AmmoCounter; 3]            →  PlayerState.special_gauge: u16 (hundredths)
 ```
 
 `AbilitySlot::BasicAlt` exists because Aleph has two freely-chosen basic attacks (bow and
 knife). Modelling that as a second basic is cheaper than a general per-character ability
 list, and it bounds the UI at three buttons.
+
+The gauge is stored in **hundredths** (`GAUGE_FULL = 10_000`), not as 0–100. `CHARACTERS.md`
+§2's per-damage gains are fractional (+0.40 dealt, +0.25 taken, +0.30 healed) and a float
+would break the determinism contract, so the scale absorbs the fraction and the arithmetic
+stays integer. *(This paragraph corrects an earlier revision of this ADR, which specified
+`u8` (0–100) — a type the implementation never used.)*
 
 Ammunition disappears entirely. Basic attacks are unlimited; specials are gated by the
 gauge. This removes the Longsword invariant (`ARSENAL.md`) along with the system it

@@ -235,7 +235,7 @@ the turn-based loop is proven means debugging two schedulers against an unvalida
 - **Commit every meaningful change**, with a message stating *why*, not just what.
 - **Every gate runs locally before it is committed.** An untested gate is decoration —
   two bugs in the CI file itself were caught this way on the first day.
-- **Findings are reported, not silently fixed.** The 50× imbalance in the level-up reward
+- **Findings are reported, not silently fixed.** The 46× imbalance in the level-up reward
   choice (`PROGRESSION.md` §4) is implemented as specified *and* flagged with tuning
   options. Scaling the design down is the product owner's call.
 - **No control is weakened to make progress.** It is changed by an ADR, in the open, with

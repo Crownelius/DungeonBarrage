@@ -593,10 +593,24 @@ module — including a test that correctly caught a real bug in its own implemen
 and died before fixing it. Separately, `5579395` records removing a stray `test_debug.rs` an
 agent left at the repository root, which is the residue of a run that ended untidily.
 
-The wider report is that **agents died to session limits three times across two workflow
-runs, and one module had to be finished by hand.** The hand-finished module and the stray
-file are confirmed in git; the count of three deaths across two runs is **[unverified]** — it
-is not recorded in any commit, document, or artefact in the repository.
+The full count, from the workflow runtime's own completion reports rather than from git,
+is **four agent failures across two runs**, all with the same cause — an account session
+limit, not a code fault:
+
+| Run | Agents | Failed | Modules lost |
+|---|---:|---:|---|
+| 1 — core modules | 9 | 3 | `hash`, `ballistics`, `command` |
+| 2 — character modules | 5 | 1 | `command` |
+
+Only the hand-finished `command.rs` (`78b686f`) and the stray `test_debug.rs` (`5579395`)
+leave traces in git; the failures themselves are not recorded in any commit, document, or
+artefact in this repository, so they cannot be re-derived from it. An earlier revision of
+this log said "three times" — that figure came from the briefing and was wrong.
+
+This is itself a finding. **A delegation system that loses its own failure record is
+under-instrumented.** Four agents' work evaporated and the only durable evidence is one
+commit message and one deleted file. Run-level outcomes should be written to the repository,
+not left in a transcript.
 
 **Learned:** delegation needs a resumption story. The pipeline recovered here only because
 the interrupted agent's work was self-describing — a failing test is a handoff note. Work
