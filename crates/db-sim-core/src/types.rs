@@ -726,7 +726,11 @@ impl PlayerState {
             amount
         };
         let raised = self.special_gauge.saturating_add(capped);
-        self.special_gauge = if raised > GAUGE_FULL { GAUGE_FULL } else { raised };
+        self.special_gauge = if raised > GAUGE_FULL {
+            GAUGE_FULL
+        } else {
+            raised
+        };
     }
 }
 

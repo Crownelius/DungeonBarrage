@@ -1,7 +1,7 @@
 //! Fixed-point projectile trajectory integration with terrain and character collision.
 //!
 //! Ports `sampleBallisticTrajectory` / `sampleWeaponTrajectory` from
-//! `lib/game/simulation.ts` to integer-only arithmetic. The integration order is
+//! the retired TypeScript oracle (`reference/simulation-oracle-retired.ts`) to integer-only arithmetic. The integration order is
 //! **semi-implicit (symplectic) Euler**: velocity is advanced by acceleration first,
 //! then position is advanced by the *new* velocity, every tick. Matching this order is
 //! not cosmetic — swapping it changes every trajectory's shape (semi-implicit Euler is
@@ -146,11 +146,12 @@ fn sine_scaled(angle_millidegrees: i32) -> SimResult<i32> {
         reason = "table index: floor(normalized / 1000) selects the whole-degree entry at or below the angle; normalized is non-negative so floor == truncation"
     )]
     let degree_index = normalized / DEGREE_STEP_MILLIDEGREES;
-    let remainder_millidegrees = normalized
-        .checked_rem(DEGREE_STEP_MILLIDEGREES)
-        .ok_or(SimError::Overflow {
-            context: "ballistics::sine_table_remainder",
-        })?;
+    let remainder_millidegrees =
+        normalized
+            .checked_rem(DEGREE_STEP_MILLIDEGREES)
+            .ok_or(SimError::Overflow {
+                context: "ballistics::sine_table_remainder",
+            })?;
 
     let index = usize::try_from(degree_index).map_err(|_| SimError::Overflow {
         context: "ballistics::sine_table_index",
@@ -303,20 +304,26 @@ fn bounds_max_y(terrain_mask: &TerrainMask) -> SimResult<i32> {
 /// negates its `Math.sin` term for the same reason.
 fn launch_velocity(attack: &ProjectileAttack, input: &BallisticInput) -> SimResult<(i32, i32)> {
     // roundDivide(speedPerTick * powerBasisPoints, 10_000) in the oracle.
-    let launch_speed = fixed::scale(attack.speed_per_tick, input.power_basis_points, fixed::BASIS_POINTS)
-        .ok_or(SimError::Overflow {
-            context: "ballistics::launch_speed",
-        })?;
+    let launch_speed = fixed::scale(
+        attack.speed_per_tick,
+        input.power_basis_points,
+        fixed::BASIS_POINTS,
+    )
+    .ok_or(SimError::Overflow {
+        context: "ballistics::launch_speed",
+    })?;
 
     let cos_scaled = cosine_scaled(input.angle_millidegrees)?;
     let sin_scaled = sine_scaled(input.angle_millidegrees)?;
 
-    let velocity_x = fixed::scale(launch_speed, cos_scaled, SIN_SCALE).ok_or(SimError::Overflow {
-        context: "ballistics::velocity_x_launch",
-    })?;
-    let raw_velocity_y = fixed::scale(launch_speed, sin_scaled, SIN_SCALE).ok_or(SimError::Overflow {
-        context: "ballistics::velocity_y_launch",
-    })?;
+    let velocity_x =
+        fixed::scale(launch_speed, cos_scaled, SIN_SCALE).ok_or(SimError::Overflow {
+            context: "ballistics::velocity_x_launch",
+        })?;
+    let raw_velocity_y =
+        fixed::scale(launch_speed, sin_scaled, SIN_SCALE).ok_or(SimError::Overflow {
+            context: "ballistics::velocity_y_launch",
+        })?;
     let velocity_y = raw_velocity_y.checked_neg().ok_or(SimError::Overflow {
         context: "ballistics::velocity_y_launch_negate",
     })?;
@@ -402,10 +409,12 @@ pub fn integrate(
     // wind_scale_basis_points of 0 (wind-immune weapons) always yields exactly 0 here,
     // regardless of how extreme wind_per_tick is — `scale` multiplies by the numerator
     // before dividing, so a zero numerator zeroes the product outright.
-    let wind_acceleration = fixed::apply_basis_points(input.wind_per_tick, attack.wind_scale_basis_points)
-        .ok_or(SimError::Overflow {
-            context: "ballistics::wind_acceleration",
-        })?;
+    let wind_acceleration =
+        fixed::apply_basis_points(input.wind_per_tick, attack.wind_scale_basis_points).ok_or(
+            SimError::Overflow {
+                context: "ballistics::wind_acceleration",
+            },
+        )?;
 
     let mut position = input.origin;
     let mut samples = vec![BallisticSample { tick: 0, position }];
@@ -414,9 +423,11 @@ pub fn integrate(
     for tick in 1..=u32::from(attack.max_ticks) {
         // Semi-implicit Euler: velocity is advanced by acceleration BEFORE position is
         // advanced by velocity. This ordering is load-bearing for parity — see module docs.
-        velocity_x = velocity_x.checked_add(wind_acceleration).ok_or(SimError::Overflow {
-            context: "ballistics::velocity_x_update",
-        })?;
+        velocity_x = velocity_x
+            .checked_add(wind_acceleration)
+            .ok_or(SimError::Overflow {
+                context: "ballistics::velocity_x_update",
+            })?;
         velocity_y = velocity_y
             .checked_add(attack.gravity_per_tick)
             .ok_or(SimError::Overflow {
@@ -424,18 +435,29 @@ pub fn integrate(
             })?;
 
         let candidate = FixedPoint::new(
-            position.x.checked_add(velocity_x).ok_or(SimError::Overflow {
-                context: "ballistics::position_x_update",
-            })?,
-            position.y.checked_add(velocity_y).ok_or(SimError::Overflow {
-                context: "ballistics::position_y_update",
-            })?,
+            position
+                .x
+                .checked_add(velocity_x)
+                .ok_or(SimError::Overflow {
+                    context: "ballistics::position_x_update",
+                })?,
+            position
+                .y
+                .checked_add(velocity_y)
+                .ok_or(SimError::Overflow {
+                    context: "ballistics::position_y_update",
+                })?,
         );
 
         // Bounds: matches the oracle exactly — both edges on X, only the lower edge
         // absent on Y (a shot may fly arbitrarily far above the map before falling back).
         if candidate.x < 0 || candidate.x >= max_x || candidate.y >= max_y {
-            return Ok(terminal_result(samples, candidate, tick, ImpactCause::OutOfBounds));
+            return Ok(terminal_result(
+                samples,
+                candidate,
+                tick,
+                ImpactCause::OutOfBounds,
+            ));
         }
 
         if terrain::is_solid_at(terrain_mask, candidate) {
@@ -463,14 +485,23 @@ pub fn integrate(
                 continue;
             }
 
-            return Ok(terminal_result(samples, candidate, tick, ImpactCause::Terrain));
+            return Ok(terminal_result(
+                samples,
+                candidate,
+                tick,
+                ImpactCause::Terrain,
+            ));
         }
 
-        if characters
-            .iter()
-            .any(|(_id, char_position, radius)| fixed::within_radius(candidate, *char_position, *radius))
-        {
-            return Ok(terminal_result(samples, candidate, tick, ImpactCause::Character));
+        if characters.iter().any(|(_id, char_position, radius)| {
+            fixed::within_radius(candidate, *char_position, *radius)
+        }) {
+            return Ok(terminal_result(
+                samples,
+                candidate,
+                tick,
+                ImpactCause::Character,
+            ));
         }
 
         position = candidate;
@@ -532,10 +563,18 @@ mod tests {
     /// A generous, empty playable area with no solid cells and no characters, so tests
     /// only exercise the specific behavior under test.
     fn open_terrain(width_cells: u32, height_cells: u32) -> TerrainMask {
-        must_succeed(terrain::create_mask(width_cells, height_cells, Material::Empty))
+        must_succeed(terrain::create_mask(
+            width_cells,
+            height_cells,
+            Material::Empty,
+        ))
     }
 
-    fn no_gravity_no_wind_attack(speed_per_tick: i32, max_ticks: u16, bounces: u8) -> ProjectileAttack {
+    fn no_gravity_no_wind_attack(
+        speed_per_tick: i32,
+        max_ticks: u16,
+        bounces: u8,
+    ) -> ProjectileAttack {
         ProjectileAttack {
             speed_per_tick,
             gravity_per_tick: 0,
@@ -591,9 +630,14 @@ mod tests {
         let mut mask = open_terrain(10, 10);
         // A vertical wall: solid column at cell x=5.
         let _ = terrain::set_material(&mut mask, 5, 3, Material::Wood);
-        if let (Some(prev), Some(next)) = (FixedPoint::from_cells(4, 3), FixedPoint::from_cells(5, 3)) {
+        if let (Some(prev), Some(next)) =
+            (FixedPoint::from_cells(4, 3), FixedPoint::from_cells(5, 3))
+        {
             let (reflect_x, reflect_y) = reflection_axes(prev, next, &mask);
-            assert!(reflect_x, "purely horizontal move into a wall must reflect X");
+            assert!(
+                reflect_x,
+                "purely horizontal move into a wall must reflect X"
+            );
             assert!(!reflect_y, "no vertical component should reflect");
         } else {
             panic!("from_cells failed");
@@ -604,10 +648,15 @@ mod tests {
     fn reflection_axes_detects_horizontal_floor() {
         let mut mask = open_terrain(10, 10);
         let _ = terrain::set_material(&mut mask, 3, 5, Material::Soil);
-        if let (Some(prev), Some(next)) = (FixedPoint::from_cells(3, 4), FixedPoint::from_cells(3, 5)) {
+        if let (Some(prev), Some(next)) =
+            (FixedPoint::from_cells(3, 4), FixedPoint::from_cells(3, 5))
+        {
             let (reflect_x, reflect_y) = reflection_axes(prev, next, &mask);
             assert!(!reflect_x, "no horizontal component should reflect");
-            assert!(reflect_y, "purely vertical move into a floor must reflect Y");
+            assert!(
+                reflect_y,
+                "purely vertical move into a floor must reflect Y"
+            );
         } else {
             panic!("from_cells failed");
         }
@@ -619,9 +668,14 @@ mod tests {
         // Solid only at the diagonal target cell; both axis-isolated probes land on
         // empty cells, so neither individually detects the collision.
         let _ = terrain::set_material(&mut mask, 5, 5, Material::Wood);
-        if let (Some(prev), Some(next)) = (FixedPoint::from_cells(4, 4), FixedPoint::from_cells(5, 5)) {
+        if let (Some(prev), Some(next)) =
+            (FixedPoint::from_cells(4, 4), FixedPoint::from_cells(5, 5))
+        {
             let (reflect_x, reflect_y) = reflection_axes(prev, next, &mask);
-            assert!(reflect_x && reflect_y, "corner-cut fallback must reflect both axes");
+            assert!(
+                reflect_x && reflect_y,
+                "corner-cut fallback must reflect both axes"
+            );
         } else {
             panic!("from_cells failed");
         }
@@ -661,15 +715,24 @@ mod tests {
         assert_eq!(result.samples.len(), 3);
         assert_eq!(
             result.samples.first(),
-            Some(&BallisticSample { tick: 0, position: FixedPoint::ZERO })
+            Some(&BallisticSample {
+                tick: 0,
+                position: FixedPoint::ZERO
+            })
         );
         assert_eq!(
             result.samples.get(1),
-            Some(&BallisticSample { tick: 4, position: FixedPoint::new(4000, 1000) })
+            Some(&BallisticSample {
+                tick: 4,
+                position: FixedPoint::new(4000, 1000)
+            })
         );
         assert_eq!(
             result.samples.get(2),
-            Some(&BallisticSample { tick: 5, position: FixedPoint::new(5000, 1500) })
+            Some(&BallisticSample {
+                tick: 5,
+                position: FixedPoint::new(5000, 1500)
+            })
         );
     }
 
@@ -696,7 +759,11 @@ mod tests {
         let result = must_succeed(integrate(&input, &attack, &mask, &[]));
 
         for sample in &result.samples {
-            assert_eq!(sample.position.x, origin.x, "tick {} drifted horizontally", sample.tick);
+            assert_eq!(
+                sample.position.x, origin.x,
+                "tick {} drifted horizontally",
+                sample.tick
+            );
         }
         assert_eq!(result.impact.position.x, origin.x);
     }
@@ -727,7 +794,10 @@ mod tests {
         for y in 0..5 {
             let _ = terrain::set_material(&mut mask, 7, y, Material::Wood);
         }
-        let origin = must_exist(FixedPoint::from_cells(2, 2), "from_cells must succeed for small cells");
+        let origin = must_exist(
+            FixedPoint::from_cells(2, 2),
+            "from_cells must succeed for small cells",
+        );
         let input = BallisticInput {
             origin,
             angle_millidegrees: 0,
@@ -742,7 +812,13 @@ mod tests {
         // solid cell 7 ([7168, 8192)).
         assert_eq!(result.impact.position, FixedPoint::new(7248, 2048));
         // The impact sample is always the last one, regardless of stride.
-        assert_eq!(result.samples.last(), Some(&BallisticSample { tick: 26, position: FixedPoint::new(7248, 2048) }));
+        assert_eq!(
+            result.samples.last(),
+            Some(&BallisticSample {
+                tick: 26,
+                position: FixedPoint::new(7248, 2048)
+            })
+        );
     }
 
     #[test]
@@ -756,7 +832,10 @@ mod tests {
         for y in 0..5 {
             let _ = terrain::set_material(&mut mask, 7, y, Material::Wood);
         }
-        let origin = must_exist(FixedPoint::from_cells(2, 2), "from_cells must succeed for small cells");
+        let origin = must_exist(
+            FixedPoint::from_cells(2, 2),
+            "from_cells must succeed for small cells",
+        );
         let input = BallisticInput {
             origin,
             angle_millidegrees: 0,
@@ -766,15 +845,24 @@ mod tests {
         let result = must_succeed(integrate(&input, &attack, &mask, &[]));
 
         assert_eq!(result.impact.cause, ImpactCause::OutOfBounds);
-        assert!(result.impact.tick > 26, "must terminate strictly after the bounce tick");
-        assert!(result.impact.position.x < 0, "must have exited through the left edge after reflecting");
+        assert!(
+            result.impact.tick > 26,
+            "must terminate strictly after the bounce tick"
+        );
+        assert!(
+            result.impact.position.x < 0,
+            "must have exited through the left edge after reflecting"
+        );
     }
 
     #[test]
     fn integrate_terminates_on_character_contact() {
         let attack = no_gravity_no_wind_attack(200, 200, 0);
         let mask = open_terrain(20, 5);
-        let origin = must_exist(FixedPoint::from_cells(2, 2), "from_cells must succeed for small cells");
+        let origin = must_exist(
+            FixedPoint::from_cells(2, 2),
+            "from_cells must succeed for small cells",
+        );
         let input = BallisticInput {
             origin,
             angle_millidegrees: 0,
@@ -838,13 +926,17 @@ mod tests {
         };
         assert_eq!(
             integrate(&input, &attack, &mask, &[]),
-            Err(SimError::OutOfRange { field: "power_basis_points" })
+            Err(SimError::OutOfRange {
+                field: "power_basis_points"
+            })
         );
 
         input.power_basis_points = 10_001;
         assert_eq!(
             integrate(&input, &attack, &mask, &[]),
-            Err(SimError::OutOfRange { field: "power_basis_points" })
+            Err(SimError::OutOfRange {
+                field: "power_basis_points"
+            })
         );
     }
 
@@ -888,6 +980,9 @@ mod tests {
         let first = must_succeed(integrate(&input, &attack, &mask, &characters));
         let second = must_succeed(integrate(&input, &attack, &mask, &characters));
 
-        assert_eq!(first, second, "identical input must produce byte-identical output");
+        assert_eq!(
+            first, second,
+            "identical input must produce byte-identical output"
+        );
     }
 }

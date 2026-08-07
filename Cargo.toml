@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/db-sim-core", "crates/db-sim-wasm"]
+members = ["crates/db-sim-core", "crates/db-sim-ffi", "crates/db-sim-wasm"]
 
 [workspace.package]
 version = "0.1.0"

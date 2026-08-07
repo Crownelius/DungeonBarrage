@@ -4,6 +4,31 @@
 **Primary decision:** Ship the website/PWA first; treat Chrome, Steam, and console as adapters around a stable game and protocol  
 **Related product rules:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md)
 
+> ## ⚠️ LARGELY SUPERSEDED — read this first
+>
+> [ADR 0004](./adr/0004-native-desktop-rust-csharp.md) reversed the web-first decision on
+> 2026-08-06. The canonical surface is now a **native desktop C# client** calling the Rust
+> core over a C ABI. Web delivery is dropped.
+>
+> | Section | Status |
+> |---|---|
+> | §1 Executive decision (web-first) | **Reversed** |
+> | §3 Why the website/PWA is canonical | **Reversed** |
+> | §9 Website and PWA plan | **Deleted** |
+> | §10 Chrome Manifest V3 path | **Dead** — presupposed a web client to companion |
+> | §11 Steam path | **Promoted** from post-MVP option to primary distribution |
+> | §12 Console path | Now materially closer; a native client ports far more plausibly |
+> | §13 Hosting roadmap | **Obsolete** — Cloudflare/D1/Vinext all removed |
+> | §6 Simulation architecture | **Still current**, and now implemented in Rust |
+> | §8 Platform service contract | **Still current** — the adapter boundary was the point |
+> | §14 Security and privacy | **Still current** — see `SECURITY_BASELINE.md` |
+> | §15 Build/test/release gates | **Still current**, minus the browser matrix |
+> | §17 What not to overbuild | **Still current** and still good advice |
+>
+> Retained unedited below as the record of what was decided and why, because the reasoning
+> in §6, §8, §14, and §15 outlived the platform choice it was written for.
+
+
 ## 1. Executive decision
 
 Dungeon Barrage is web-first.

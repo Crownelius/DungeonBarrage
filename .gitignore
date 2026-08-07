@@ -1,59 +1,44 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/.vinext/
-/out/
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
-.vercel
-
-# typescript
-next-env.d.ts
-/dist/
-/.wrangler/
-/outputs/
-/work/
-
-# dev server logs
-.devserver*.log
-
-# rust
+# Rust
 /target/
 **/target/
 Cargo.lock.bak
 
-# wasm build output
-/lib/wasm/pkg/
+# C# / .NET
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.userprefs
+.vs/
+.idea/
+*.csproj.user
+
+# Godot
+.godot/
+/client/export/
+export_presets.cfg
+
+# Build output
+/dist/
+/out/
 
 # Credentials — NEVER commit. See docs/SECURITY_BASELINE.md section 4.
 .github-token
 *.token
 *github_pat_*
-.env.local
+.env
+.env.*
+*.pem
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+.devserver*.log
+
+# Optional WASM output (dormant, see ADR 0004)
+/crates/db-sim-wasm/pkg/

@@ -6,7 +6,7 @@
 //!
 //! These functions are the *only* sanctioned way to multiply, divide, or scale spatial
 //! values. Open-coding the arithmetic elsewhere risks a rounding difference that breaks
-//! bit-exact parity with the TypeScript oracle.
+//! determinism across build targets, and silently invalidates the frozen golden vectors.
 //!
 //! Integer division is this module's entire purpose, so `clippy::integer_division` is
 //! allowed here and nowhere else. Every truncating divide below is deliberate and its
@@ -100,9 +100,9 @@ impl FixedPoint {
 
 /// Divides and rounds half away from zero.
 ///
-/// This is the exact rounding rule used by the TypeScript oracle's `roundDivide`, and
-/// parity depends on matching it precisely. Rust's `/` truncates toward zero and
-/// `div_euclid` floors; neither matches, so this must be used for every scaled divide.
+/// Rust's `/` truncates toward zero and `div_euclid` floors; neither is half-away-from-zero,
+/// so this must be used for every scaled divide. The rule is frozen by the golden vectors:
+/// changing it changes every trajectory and every historical replay.
 ///
 /// # Panics
 ///
@@ -146,7 +146,8 @@ pub const fn scale(value: i32, numerator: i32, denominator: i32) -> Option<i32> 
         return None;
     };
     match round_divide(product, denominator as i64) {
-        Some(scaled) if scaled >= i32::MIN as i64 && scaled <= i32::MAX as i64 => {
+        Some(scaled) if scaled >= i32::MIN as i64 && scaled <= i32::MAX as i64 =>
+        {
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "the match guard proves the value is within i32; try_from is not const"
@@ -239,7 +240,10 @@ mod tests {
 
     #[test]
     fn from_cells_reports_overflow_instead_of_wrapping() {
-        assert_eq!(FixedPoint::from_cells(2, 3), Some(FixedPoint::new(2048, 3072)));
+        assert_eq!(
+            FixedPoint::from_cells(2, 3),
+            Some(FixedPoint::new(2048, 3072))
+        );
         assert_eq!(FixedPoint::from_cells(i32::MAX, 0), None);
     }
 

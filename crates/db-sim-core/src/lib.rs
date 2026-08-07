@@ -20,11 +20,16 @@
 //!   before encoding ([`canonical`]).
 //! - **No panics on untrusted input.** Fallible operations return [`error::SimResult`].
 //!
-//! ## Parity
+//! ## Regression protection
 //!
-//! `lib/game/simulation.ts` is the reference oracle. Every behavior here is checked
-//! against it by the differential harness in `tests/parity/`, which is a merge gate. The
-//! TypeScript implementation is retired only once the full golden corpus is green.
+//! The TypeScript reference oracle was retired with the web surface (ADR 0004), so there is
+//! no second implementation to check against. Cross-implementation parity is replaced by
+//! **frozen golden vectors**: seeded command sequences and their resulting state hashes,
+//! committed and asserted in CI.
+//!
+//! This proves self-consistency — a refactor cannot silently change behavior — but it does
+//! **not** prove correctness against an independent implementation. The corpus freezes
+//! whatever it is given, bugs included, so it may only be generated from reviewed code.
 
 pub mod ballistics;
 pub mod canonical;

@@ -251,7 +251,20 @@ mod tests {
             reason = "test constant: u32::MAX / 2 is intentional"
         )]
         let bounds = [
-            1, 2, 3, 4, 5, 10, 16, 17, 100, 1000, 65535, 65536, u32::MAX / 2, u32::MAX,
+            1,
+            2,
+            3,
+            4,
+            5,
+            10,
+            16,
+            17,
+            100,
+            1000,
+            65535,
+            65536,
+            u32::MAX / 2,
+            u32::MAX,
         ];
 
         for bound in &bounds {
@@ -345,7 +358,10 @@ mod tests {
         for shift in 0..32u32 {
             let bound = 1u32 << shift;
             let threshold = bound.wrapping_neg() % bound;
-            assert_eq!(threshold, 0, "power-of-two bound {bound} must reject nothing");
+            assert_eq!(
+                threshold, 0,
+                "power-of-two bound {bound} must reject nothing"
+            );
         }
     }
 
@@ -355,13 +371,30 @@ mod tests {
         // widened-to-u64 reference computation of `2^32 mod bound` for
         // bounds that do not divide 2^32 evenly (the case the historical
         // off-by-one silently mishandled).
-        for bound in [3u32, 5, 6, 7, 9, 10, 100, 1_000, 65_535, 65_537, u32::MAX - 1, u32::MAX] {
+        for bound in [
+            3u32,
+            5,
+            6,
+            7,
+            9,
+            10,
+            100,
+            1_000,
+            65_535,
+            65_537,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
             let threshold = bound.wrapping_neg() % bound;
             // Widen the threshold to u64 for comparison rather than narrow
             // the reference to u32, so there is no fallible conversion (and
             // no unwrap/expect/panic) on the assertion path at all.
             let reference = (1u64 << 32) % u64::from(bound);
-            assert_eq!(u64::from(threshold), reference, "mismatch for bound {bound}");
+            assert_eq!(
+                u64::from(threshold),
+                reference,
+                "mismatch for bound {bound}"
+            );
         }
     }
 

@@ -10,20 +10,20 @@ Honest status, so nothing is described as further along than it is.
 | Area | State |
 |---|---|
 | Design documentation | Substantial and specific |
-| TypeScript simulation | Working, tested, fixed-point, deterministic — now the reference oracle |
-| React/canvas vertical slice | Renders and plays locally |
+| TypeScript | **Removed entirely** (ADR 0004). Oracle and client preserved in `reference/` |
+| C# client | **Not started.** Godot 4 + C#, per ADR 0004 |
 | Rust core foundation | `fixed`, `canonical`, `types`, `error` complete and tested |
 | Rust engine modules | Compile and test clean, but **behaviorally inert** — see §2 |
 | Effect resolvers | **3 of 22 implemented.** 8 of 9 characters do not function |
 | Turn scheduler, maps, spawns, status ticking, event log, reconnect | **Absent** |
-| TS↔Rust parity harness | **Not built, and blocked on ADR 0003.** Top technical risk |
-| WASM client integration | Not started |
-| Match server | Not started |
-| Persistence | Schema defined; D1 binding still `null` |
+| Golden-vector regression corpus | **Not built.** Replaces the retired parity harness |
+| Rust↔C# FFI boundary | Scaffolded (`db-sim-ffi`, 6 tests). No gameplay calls yet |
+| Match server | Not started. ASP.NET Core, per ADR 0004 |
+| Persistence | Drizzle/D1 schema retired to `reference/`; EF Core not started |
 | Progression / economy | Specified; not implemented |
 | Real-time PvP mode | Structurally provisioned only; deliberately not implemented |
 | Accounts, matchmaking, store | Not started |
-| Git remote | Configured (`Crownelius/DungeonBarrage`, private). **Repo not yet created** — token lacks Administration permission |
+| Git remote | Published: `Crownelius/DungeonBarrage` (public) |
 
 ## 2. Engine scope — corrected 2026-08-06
 
@@ -146,14 +146,19 @@ Foundation modules exist and are test-clean: `rng`, `terrain`, `character`, `has
 are **not** a working engine; see §2.
 
 Remaining, and both are oracle-side work:
-1. Update `lib/game/simulation.ts` to the canonical byte encoding (ADR 0001 §5).
-2. Update it to the shared quantized sine table (**ADR 0003**). The oracle's
-   `Math.sin`/`Math.cos` cannot be reproduced in fixed point *and* are not bit-identical
-   across JS engines — a latent determinism defect the port exposed rather than created.
-3. Build the differential harness over a golden corpus.
+Both oracle-side items are **cancelled** — the oracle was retired with the web surface
+(ADR 0004). What remains:
 
-**Gate:** thousands of seeded command sequences produce identical final state hashes in
-both implementations. Until this passes, the port is unverified and nothing depends on it.
+1. Build the **frozen golden-vector corpus**: seeded command sequences and their state
+   hashes, generated from the reviewed core, committed, and asserted in CI.
+
+**Gate:** thousands of seeded sequences reproduce their committed hashes across a clean
+build on both `x86_64` and `aarch64`.
+
+Note honestly what changed: this proves *self-consistency*, not correctness against an
+independent implementation. The corpus freezes whatever it is given, bugs included. That is
+weaker than the parity harness it replaces, and the weakening is a deliberate cost of
+ADR 0004, not an oversight.
 
 ### M1.5 — Effect resolver layer 🔴 *the actual blocker*
 
@@ -180,11 +185,13 @@ A useful secondary signal: the tenth character should cost close to 1,000 engine
 it costs 3,000, the resolver layer is not yet doing its job and the roster should not
 proceed.
 
-### M2 — WASM client integration
-`wasm-bindgen` boundary, the React client driving the Rust core, TS simulation retired
-from the runtime path (retained in `reference/`).
-**Gate:** the vertical slice plays identically on the Rust core; WASM payload ≤400 KB
-compressed; no regression against the performance budgets in `PLATFORM_STRATEGY.md` §15.
+### M2 — C# client shell and FFI integration
+Godot 4 + C# project, P/Invoke bindings over `db-sim-ffi`, terrain and sprite rendering,
+input mapping, match HUD. Godot's physics, collision, and RNG are **never** used for
+gameplay — the Rust core owns every authoritative value.
+**Gate:** a match runs end to end with the C# client driving the Rust core, and the same
+seed and command log reproduces the same final state hash from both the client host and a
+headless Rust harness.
 
 ### M3 — Vertical slice complete
 Nine starter characters playable, three maps, layered cosmetic compositing, complete
@@ -194,7 +201,7 @@ event replay.
 rematches without explanation.
 
 ### M4 — Authoritative match server
-Node/Colyseus rooms running the *natively compiled same core*, command validation,
+ASP.NET Core rooms running the *same native core* via P/Invoke, command validation,
 reconnect snapshots, private room codes, guest sessions.
 **Gate:** duplicate, late, reordered, malformed, and cross-player commands cannot alter
 state; disconnect/reconnect recovers during both planning and resolution.
@@ -207,14 +214,16 @@ economy ledger reconciles against cached balances; a client cannot assert its ow
 currency, or ownership.
 
 ### M6 — Web MVP
-2–4 player rooms, free-for-all and 2v2, matchmaking, mute/report, telemetry, PWA install,
-load testing.
-**Gate:** representative 100/500/1000-CCU load meets latency and event-loop targets;
-supported desktop browsers complete matches; backup restore rehearsed.
+2–4 player rooms, free-for-all and 2v2, matchmaking, mute/report, telemetry, load testing.
+**Gate:** representative 100/500/1000-CCU load meets latency and server-tick targets;
+matches complete on Windows, macOS, and Linux builds; backup restore rehearsed.
 
-### M7 — Retention, then distribution
-Only after retention data exists: more content, public matchmaking, balance seasons. Then
-the Chrome and Steam decision gates in `PLATFORM_STRATEGY.md` §10–§11.
+### M7 — Steam release and retention
+Steam is now the primary distribution channel, not a post-MVP option. Signed builds, store
+page, content survey, achievements, controller support.
+**Note:** ADR 0004 removed link-sharing onboarding, which was the web build's cheapest
+playtest loop. A frictionless path to get signed builds into testers' hands is a milestone
+requirement here, not an afterthought.
 
 ### M8 — Real-time PvP mode
 The Brawlhalla-like second mode. Implements `MatchScheduler` against the *already proven*
@@ -259,10 +268,10 @@ the turn-based loop is proven means debugging two schedulers against an unvalida
 5. **Ranked arsenal normalization** (`PROGRESSION.md` §5). Progression gates weapons;
    `PRODUCT_SPEC.md` §8 promises rated modes expose the full arsenal to everyone. The
    proposed boundary keeps both, but it is a product decision worth confirming explicitly.
-6. **Dependency advisories.** `npm audit` is down from 18 to 14; the remainder need
-   upgrades outside the pinned ranges of `vinext`, `vite`, and `@cloudflare/vite-plugin`.
-   Nearly all are dev/build-chain rather than shipped code, but they run on the developer
-   machine. Worth a deliberate upgrade pass once the vinext version is stable.
+6. **Dependency advisories — resolved by deletion.** The 14 outstanding `npm` advisories
+   left with the JavaScript toolchain (ADR 0004). The Rust workspace has zero third-party
+   dependencies in the core, and `cargo deny` gates advisories, licenses, and duplicate
+   versions. This will need revisiting once C# and NuGet enter the tree.
 
 7. **Character content backlog.** 15 of the 24 characters are unspecified, and 45 of the
    72 passives are undrafted (`CHARACTERS.md` §4, §7). Both are real scheduling

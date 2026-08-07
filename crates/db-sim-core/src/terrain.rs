@@ -3,7 +3,7 @@
 //! The authoritative collision and destruction system for terrain. One byte per cell
 //! holds a [`Material`], and operations remove cells according to shape and material mask.
 //!
-//! Parity with `lib/game/simulation.ts`: this module reimplements `createTerrainMask`,
+//! Parity with the retired TypeScript oracle (`reference/simulation-oracle-retired.ts`): this module reimplements `createTerrainMask`,
 //! `cloneTerrainMask`, `terrainCell`, `setTerrainCell`, `applyTerrainOperation`,
 //! `subtractCircle`, `subtractCapsule`, and `pointInCapsule` bit-exactly, except that
 //! the TS version stores 0/1 while this stores [`Material`] bytes.
@@ -150,14 +150,12 @@ pub fn is_solid_at(mask: &TerrainMask, pos: FixedPoint) -> bool {
 ///
 /// Only iterates the bounding box of the operation, not the entire mask.
 #[must_use]
-pub fn apply_operation(
-    mask: &mut TerrainMask,
-    operation: &TerrainOperation,
-) -> u32 {
+pub fn apply_operation(mask: &mut TerrainMask, operation: &TerrainOperation) -> u32 {
     match operation.shape {
-        TerrainShape::SubtractCircle { center, radius_cells } => {
-            subtract_circle(mask, center, radius_cells, operation.material_mask)
-        }
+        TerrainShape::SubtractCircle {
+            center,
+            radius_cells,
+        } => subtract_circle(mask, center, radius_cells, operation.material_mask),
         TerrainShape::SubtractCapsule {
             start,
             end,
@@ -277,19 +275,27 @@ fn point_in_capsule(
     let point_x = (px as i64).saturating_sub(start_x as i64);
     let point_y = (py as i64).saturating_sub(start_y as i64);
 
-    let length_squared = line_x.saturating_mul(line_x).saturating_add(line_y.saturating_mul(line_y));
+    let length_squared = line_x
+        .saturating_mul(line_x)
+        .saturating_add(line_y.saturating_mul(line_y));
 
     // Degenerate case: start == end; treat as a circle
     if length_squared == 0 {
-        let dist_squared = point_x.saturating_mul(point_x).saturating_add(point_y.saturating_mul(point_y));
+        let dist_squared = point_x
+            .saturating_mul(point_x)
+            .saturating_add(point_y.saturating_mul(point_y));
         return dist_squared <= radius_squared;
     }
 
-    let dot = point_x.saturating_mul(line_x).saturating_add(point_y.saturating_mul(line_y));
+    let dot = point_x
+        .saturating_mul(line_x)
+        .saturating_add(point_y.saturating_mul(line_y));
 
     // Point projects before the segment start
     if dot <= 0 {
-        let dist_squared = point_x.saturating_mul(point_x).saturating_add(point_y.saturating_mul(point_y));
+        let dist_squared = point_x
+            .saturating_mul(point_x)
+            .saturating_add(point_y.saturating_mul(point_y));
         return dist_squared <= radius_squared;
     }
 
@@ -297,7 +303,9 @@ fn point_in_capsule(
     if dot >= length_squared {
         let end_x_diff = (px as i64).saturating_sub(end_x as i64);
         let end_y_diff = (py as i64).saturating_sub(end_y as i64);
-        let dist_squared = end_x_diff.saturating_mul(end_x_diff).saturating_add(end_y_diff.saturating_mul(end_y_diff));
+        let dist_squared = end_x_diff
+            .saturating_mul(end_x_diff)
+            .saturating_add(end_y_diff.saturating_mul(end_y_diff));
         return dist_squared <= radius_squared;
     }
 
@@ -305,7 +313,9 @@ fn point_in_capsule(
     // cross = pointX * lineY - pointY * lineX
     // distance_squared = cross^2 / length_squared
     // To avoid division, compare: cross^2 <= radius_squared * length_squared
-    let cross = point_x.saturating_mul(line_y).saturating_sub(point_y.saturating_mul(line_x));
+    let cross = point_x
+        .saturating_mul(line_y)
+        .saturating_sub(point_y.saturating_mul(line_x));
     let cross_squared = cross.saturating_mul(cross);
     let max_dist_squared = radius_squared.saturating_mul(length_squared);
 
@@ -332,19 +342,34 @@ mod tests {
     #[test]
     fn create_mask_rejects_zero_width() {
         let result = create_mask(0, 10, Material::Empty);
-        assert!(matches!(result, Err(SimError::OutOfRange { field: "terrain dimensions" })));
+        assert!(matches!(
+            result,
+            Err(SimError::OutOfRange {
+                field: "terrain dimensions"
+            })
+        ));
     }
 
     #[test]
     fn create_mask_rejects_zero_height() {
         let result = create_mask(10, 0, Material::Empty);
-        assert!(matches!(result, Err(SimError::OutOfRange { field: "terrain dimensions" })));
+        assert!(matches!(
+            result,
+            Err(SimError::OutOfRange {
+                field: "terrain dimensions"
+            })
+        ));
     }
 
     #[test]
     fn create_mask_rejects_overflow() {
         let result = create_mask(u32::MAX, u32::MAX, Material::Empty);
-        assert!(matches!(result, Err(SimError::OutOfRange { field: "terrain cell count" })));
+        assert!(matches!(
+            result,
+            Err(SimError::OutOfRange {
+                field: "terrain cell count"
+            })
+        ));
     }
 
     #[test]
@@ -400,7 +425,10 @@ mod tests {
 
     #[test]
     fn is_solid_at_converts_fixed_point_to_cells() {
-        if let (Ok(mut mask), Some(pos)) = (create_mask(10, 10, Material::Empty), FixedPoint::from_cells(2, 3)) {
+        if let (Ok(mut mask), Some(pos)) = (
+            create_mask(10, 10, Material::Empty),
+            FixedPoint::from_cells(2, 3),
+        ) {
             let _ = set_material(&mut mask, 2, 3, Material::Wood);
             assert!(is_solid_at(&mask, pos));
 
@@ -416,7 +444,10 @@ mod tests {
 
     #[test]
     fn subtract_circle_removes_cells_within_radius() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(20, 20, Material::Soil), FixedPoint::from_cells(10, 10)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(20, 20, Material::Soil),
+            FixedPoint::from_cells(10, 10),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -442,7 +473,10 @@ mod tests {
 
     #[test]
     fn subtract_circle_at_origin_handles_bounds() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(10, 10, Material::Wood), FixedPoint::from_cells(0, 0)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(10, 10, Material::Wood),
+            FixedPoint::from_cells(0, 0),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -524,7 +558,10 @@ mod tests {
 
     #[test]
     fn subtract_circle_respects_material_mask_all() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(10, 10, Material::ReinforcedStone), FixedPoint::from_cells(5, 5)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(10, 10, Material::ReinforcedStone),
+            FixedPoint::from_cells(5, 5),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -577,7 +614,10 @@ mod tests {
 
     #[test]
     fn subtract_capsule_degenerate_zero_length() {
-        if let (Ok(mut mask), Some(pos)) = (create_mask(15, 15, Material::Soil), FixedPoint::from_cells(7, 7)) {
+        if let (Ok(mut mask), Some(pos)) = (
+            create_mask(15, 15, Material::Soil),
+            FixedPoint::from_cells(7, 7),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCapsule {
@@ -657,7 +697,10 @@ mod tests {
 
     #[test]
     fn circle_radius_zero() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(5, 5, Material::Soil), FixedPoint::from_cells(2, 2)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(5, 5, Material::Soil),
+            FixedPoint::from_cells(2, 2),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -679,7 +722,10 @@ mod tests {
 
     #[test]
     fn large_circle_respects_mask_bounds() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(10, 10, Material::Soil), FixedPoint::from_cells(5, 5)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(10, 10, Material::Soil),
+            FixedPoint::from_cells(5, 5),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -700,7 +746,10 @@ mod tests {
 
     #[test]
     fn reinforced_stone_survives_soft_mask() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(5, 5, Material::ReinforcedStone), FixedPoint::from_cells(2, 2)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(5, 5, Material::ReinforcedStone),
+            FixedPoint::from_cells(2, 2),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -721,7 +770,10 @@ mod tests {
 
     #[test]
     fn reinforced_stone_removed_with_all_mask() {
-        if let (Ok(mut mask), Some(center)) = (create_mask(5, 5, Material::ReinforcedStone), FixedPoint::from_cells(2, 2)) {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(5, 5, Material::ReinforcedStone),
+            FixedPoint::from_cells(2, 2),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -822,9 +874,10 @@ mod tests {
     fn circle_radius_one_removes_exactly_the_plus_pentomino() {
         // Hand-verified discrete circle: dx=0 gives dy in [-1,1] (3 cells), dx=+-1 gives
         // dy=0 only (1 cell each) = 5 cells total, the classic "plus" shape.
-        if let (Ok(mut mask), Some(center)) =
-            (create_mask(11, 11, Material::Soil), FixedPoint::from_cells(5, 5))
-        {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(11, 11, Material::Soil),
+            FixedPoint::from_cells(5, 5),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -855,9 +908,10 @@ mod tests {
         // Hand-verified discrete circle count for radius 3, far enough from every edge that
         // the bounding box is never clipped: dx=0 -> 7, dx=+-1 -> 5 each, dx=+-2 -> 5 each,
         // dx=+-3 -> 1 each == 7 + 10 + 10 + 2 == 29.
-        if let (Ok(mut mask), Some(center)) =
-            (create_mask(25, 25, Material::Soil), FixedPoint::from_cells(12, 12))
-        {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(25, 25, Material::Soil),
+            FixedPoint::from_cells(12, 12),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {
@@ -938,9 +992,10 @@ mod tests {
     fn subtract_circle_huge_radius_u16_max_does_not_overflow() {
         // Exercises radius_cells at its u16 extreme; radius_squared alone is ~4.3e9, which
         // must not overflow or panic on the way to being widened and compared as i64.
-        if let (Ok(mut mask), Some(center)) =
-            (create_mask(4, 4, Material::Soil), FixedPoint::from_cells(2, 2))
-        {
+        if let (Ok(mut mask), Some(center)) = (
+            create_mask(4, 4, Material::Soil),
+            FixedPoint::from_cells(2, 2),
+        ) {
             let op = TerrainOperation {
                 sequence: 0,
                 shape: TerrainShape::SubtractCircle {

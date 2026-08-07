@@ -1,0 +1,36 @@
+[package]
+name = "db-sim-ffi"
+description = "C ABI boundary exposing the Dungeon Barrage simulation core to C# (client and server)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib for P/Invoke from C#; rlib so Rust integration tests can link it directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+db-sim-core = { path = "../db-sim-core" }
+
+[lints.rust]
+# This crate is the ONE place `unsafe` is permitted (ADR 0001 §1, ADR 0004), because a C ABI
+# cannot be expressed without it. The workspace `forbid`s it everywhere else.
+#
+# `allow` rather than `warn`: with `-D warnings` in CI a warn-level lint fails the build on
+# every `unsafe extern` and `#[unsafe(no_mangle)]`, i.e. on the crate's entire reason to
+# exist. The real controls are elsewhere and are stronger than a lint level here:
+#   - CI greps that `unsafe` appears in NO other crate (.github/workflows/ci.yml)
+#   - clippy::undocumented_unsafe_blocks below forces a SAFETY comment on every block
+#   - clippy::missing_safety_doc forces a documented contract on every unsafe fn
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+# The determinism lints do not apply here — this crate contains no gameplay logic, only
+# marshalling. The float ban is kept anyway: nothing crossing this boundary should be a
+# float, and the lint documents that.
+float_arithmetic = "deny"
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

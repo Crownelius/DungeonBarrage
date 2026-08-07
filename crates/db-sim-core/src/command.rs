@@ -323,9 +323,13 @@ fn resolve_ability(
                     .map(|p| (p.id.clone(), p.position, BODY_WIDTH))
                     .collect();
 
-                let result =
-                    crate::ballistics::integrate(&input, &projectile, &state.terrain, &character_hitboxes)
-                        .map_err(|_| CommandRejection::InvalidTarget)?;
+                let result = crate::ballistics::integrate(
+                    &input,
+                    &projectile,
+                    &state.terrain,
+                    &character_hitboxes,
+                )
+                .map_err(|_| CommandRejection::InvalidTarget)?;
                 let impact_position = result.impact.position;
                 let hit_character = matches!(result.impact.cause, ImpactCause::Character);
                 samples.extend(result.samples);
@@ -424,7 +428,13 @@ fn resolve_ability(
     // could suppress the other.
     let backlash_total = apply_backlash(state, ability, &command.player_id, &mut damage_by_player);
 
-    award_gauge(state, &command.player_id, dealt_to_others, backlash_total, healed_total);
+    award_gauge(
+        state,
+        &command.player_id,
+        dealt_to_others,
+        backlash_total,
+        healed_total,
+    );
 
     // The RNG state advances exactly as far as the rolls actually made this action, and
     // only the seeded generator ever moves — no wall clock, no ambient entropy.
@@ -438,7 +448,9 @@ fn resolve_ability(
         .processed_command_ids
         .binary_search_by(|existing| existing.as_str().cmp(command.command_id.as_str()))
     {
-        state.processed_command_ids.insert(idx, command.command_id.clone());
+        state
+            .processed_command_ids
+            .insert(idx, command.command_id.clone());
     }
 
     state.turn_number = state.turn_number.saturating_add(1);
@@ -649,7 +661,14 @@ fn apply_backlash(
     for effect in ability.effects {
         if effect.kind == EffectKind::SelfDamage {
             let hp = magnitude_percent_to_hp(effect.magnitude);
-            let actual = deal_damage(state, damage_by_player, actor_id, hp, DamageField::Backlash, false);
+            let actual = deal_damage(
+                state,
+                damage_by_player,
+                actor_id,
+                hp,
+                DamageField::Backlash,
+                false,
+            );
             total = total.saturating_add(u32::from(actual));
         }
     }
@@ -663,7 +682,8 @@ fn apply_backlash(
 /// launch ability, whose `crit_damage_percent` equals `damage_percent`), so RNG state
 /// consumption is exactly proportional to how many crit-capable strikes actually happened.
 fn roll_crit(rng: &mut Rng, crit_chance_basis_points: u16) -> bool {
-    crit_chance_basis_points > 0 && rng.bounded(CRIT_ROLL_BOUND) < u32::from(crit_chance_basis_points)
+    crit_chance_basis_points > 0
+        && rng.bounded(CRIT_ROLL_BOUND) < u32::from(crit_chance_basis_points)
 }
 
 /// The hit-point damage for one resolution of `ability`, non-critical or critical per
@@ -673,7 +693,11 @@ fn roll_crit(rng: &mut Rng, crit_chance_basis_points: u16) -> bool {
 /// credible for any launch-roster percentage) degrades to zero damage rather than
 /// wrapping into a heal.
 fn resolved_damage_hp(ability: &AbilityDefinition, is_crit: bool) -> u16 {
-    let raw = if is_crit { ability.crit_damage() } else { ability.damage() };
+    let raw = if is_crit {
+        ability.crit_damage()
+    } else {
+        ability.damage()
+    };
     raw.and_then(|value| u16::try_from(value).ok()).unwrap_or(0)
 }
 
@@ -786,7 +810,10 @@ fn damage_entry<'a>(
 /// belongs to the player's character) without an explicit order for the surrounding
 /// authorization checks; this mirrors [`validate_ability`]'s order for the checks both
 /// share, on the same "duplicate and identity first" security reasoning.
-pub fn apply_passive_choice(state: &mut SimulationState, command: &PassiveChoiceCommand) -> CommandResult {
+pub fn apply_passive_choice(
+    state: &mut SimulationState,
+    command: &PassiveChoiceCommand,
+) -> CommandResult {
     match validate_passive_choice(state, command) {
         Ok(character) => {
             let mut working = state.clone();
@@ -831,7 +858,11 @@ fn validate_passive_choice(
         return Err(CommandRejection::UnknownCharacter);
     };
 
-    if !character.passives.iter().any(|passive| passive.id == command.passive_id) {
+    if !character
+        .passives
+        .iter()
+        .any(|passive| passive.id == command.passive_id)
+    {
         // The chosen id does not belong to this character's own pool — a client cannot
         // legally offer a passive from a different character's kit. Security event.
         return Err(CommandRejection::InvalidPassive);
@@ -857,7 +888,9 @@ fn resolve_passive_choice(
         .processed_command_ids
         .binary_search_by(|existing| existing.as_str().cmp(command.command_id.as_str()))
     {
-        state.processed_command_ids.insert(idx, command.command_id.clone());
+        state
+            .processed_command_ids
+            .insert(idx, command.command_id.clone());
     }
 
     // Choosing a passive is not an attack: it does not consume the turn or the
@@ -1034,7 +1067,10 @@ mod tests {
         state.phase = MatchPhase::PassiveSelection;
         let command = ability_command("cmd-1", Some("defender"));
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::WrongPhase));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::WrongPhase)
+        );
     }
 
     #[test]
@@ -1084,7 +1120,10 @@ mod tests {
         let mut command = ability_command("cmd-1", Some("defender"));
         command.slot = AbilitySlot::Special;
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::GaugeNotReady));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::GaugeNotReady)
+        );
     }
 
     #[test]
@@ -1096,7 +1135,10 @@ mod tests {
         let mut command = ability_command("cmd-1", Some("defender"));
         command.slot = AbilitySlot::Special;
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::GaugeNotReady));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::GaugeNotReady)
+        );
     }
 
     #[test]
@@ -1105,7 +1147,10 @@ mod tests {
         state.has_attacked_this_turn = true;
         let command = ability_command("cmd-1", Some("defender"));
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::AlreadyAttacked));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::AlreadyAttacked)
+        );
     }
 
     #[test]
@@ -1114,7 +1159,10 @@ mod tests {
         let mut command = ability_command("cmd-1", Some("defender"));
         command.angle_millidegrees = -1;
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::InputOutOfRange));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::InputOutOfRange)
+        );
         assert!(CommandRejection::InputOutOfRange.is_security_event());
     }
 
@@ -1124,7 +1172,10 @@ mod tests {
         let mut command = ability_command("cmd-1", Some("defender"));
         command.angle_millidegrees = 360_000;
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::InputOutOfRange));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::InputOutOfRange)
+        );
     }
 
     #[test]
@@ -1133,7 +1184,10 @@ mod tests {
         let mut command = ability_command("cmd-1", Some("defender"));
         command.power_basis_points = 10_001;
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::InputOutOfRange));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::InputOutOfRange)
+        );
     }
 
     #[test]
@@ -1153,7 +1207,10 @@ mod tests {
         let state = base_state();
         let command = ability_command("cmd-1", Some("nobody"));
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::InvalidTarget));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::InvalidTarget)
+        );
     }
 
     #[test]
@@ -1164,7 +1221,10 @@ mod tests {
         }
         let command = ability_command("cmd-1", Some("defender"));
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::InvalidTarget));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::InvalidTarget)
+        );
     }
 
     #[test]
@@ -1173,7 +1233,10 @@ mod tests {
         let mut command = ability_command("cmd-1", Some("defender"));
         command.secondary_target_player_id = Some("defender".to_string());
 
-        assert_eq!(validate_ability(&state, &command), Err(CommandRejection::InvalidTarget));
+        assert_eq!(
+            validate_ability(&state, &command),
+            Err(CommandRejection::InvalidTarget)
+        );
     }
 
     #[test]
@@ -1206,7 +1269,10 @@ mod tests {
 
         let result = apply_ability(&mut mutable_state, &command);
 
-        assert_eq!(result, CommandResult::Rejected(CommandRejection::NotActivePlayer));
+        assert_eq!(
+            result,
+            CommandResult::Rejected(CommandRejection::NotActivePlayer)
+        );
         assert_eq!(mutable_state, before);
     }
 
@@ -1224,7 +1290,10 @@ mod tests {
 
         let result = apply_passive_choice(&mut state, &command);
 
-        assert_eq!(result, CommandResult::Rejected(CommandRejection::InvalidPassive));
+        assert_eq!(
+            result,
+            CommandResult::Rejected(CommandRejection::InvalidPassive)
+        );
         assert_eq!(state, before);
     }
 
@@ -1316,7 +1385,10 @@ mod tests {
         let after_first = state.clone();
         let second = apply_passive_choice(&mut state, &command);
 
-        assert_eq!(second, CommandResult::Rejected(CommandRejection::DuplicateCommand));
+        assert_eq!(
+            second,
+            CommandResult::Rejected(CommandRejection::DuplicateCommand)
+        );
         assert_eq!(state, after_first);
     }
 
@@ -1333,9 +1405,19 @@ mod tests {
         }
         let mut damage = BTreeMap::new();
 
-        let actual = deal_damage(&mut state, &mut damage, "defender", 999, DamageField::Direct, true);
+        let actual = deal_damage(
+            &mut state,
+            &mut damage,
+            "defender",
+            999,
+            DamageField::Direct,
+            true,
+        );
 
-        assert_eq!(actual, 10, "actual damage must be capped at the player's pre-hit health");
+        assert_eq!(
+            actual, 10,
+            "actual damage must be capped at the player's pre-hit health"
+        );
         let Some(defender) = state.player("defender") else {
             panic!("defender must exist");
         };
@@ -1378,7 +1460,10 @@ mod tests {
 
         let total = apply_backlash(&mut state, &ability, "attacker", &mut damage);
 
-        assert_eq!(total, 5, "backlash must be capped at the actor's own pre-hit health");
+        assert_eq!(
+            total, 5,
+            "backlash must be capped at the actor's own pre-hit health"
+        );
         let Some(attacker) = state.player("attacker") else {
             panic!("attacker must exist");
         };
@@ -1433,7 +1518,10 @@ mod tests {
 
         let actual = heal(&mut state, &mut damage, "defender", 50);
 
-        assert_eq!(actual, 9, "heal must be capped at missing health, not the raw magnitude");
+        assert_eq!(
+            actual, 9,
+            "heal must be capped at missing health, not the raw magnitude"
+        );
         let Some(defender) = state.player("defender") else {
             panic!("defender must exist");
         };
@@ -1477,7 +1565,10 @@ mod tests {
 
         let healed = apply_support_effects(&mut state, &mut damage, &ability, &command);
 
-        assert_eq!(healed, 9, "transfer must be capped so the actor keeps at least 1 HP");
+        assert_eq!(
+            healed, 9,
+            "transfer must be capped so the actor keeps at least 1 HP"
+        );
         let Some(attacker) = state.player("attacker") else {
             panic!("attacker must exist");
         };
@@ -1554,7 +1645,10 @@ mod tests {
                 passive_id: "huck-immovable".to_string(),
             };
             let result = apply_passive_choice(&mut state, &command);
-            assert!(matches!(result, CommandResult::Accepted(_)), "command {id} must be accepted");
+            assert!(
+                matches!(result, CommandResult::Accepted(_)),
+                "command {id} must be accepted"
+            );
             assert!(
                 state
                     .processed_command_ids

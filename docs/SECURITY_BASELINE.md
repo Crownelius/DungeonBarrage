@@ -208,7 +208,7 @@ A change cannot merge unless all of these pass. These are the enforceable core o
 | `cargo clippy -- -D warnings` | Lint cleanliness in the core |
 | `forbid(unsafe_code)` present in `db-sim-core` | ADR 0001 memory-safety invariant |
 | `cargo test` | Simulation correctness |
-| TS↔Rust parity harness | ADR 0001 determinism contract |
+| Frozen golden vectors | ADR 0001 determinism contract (ADR 0004 replaced parity) |
 | `cargo deny check` | Advisories, licenses, duplicate crates |
 | `npm audit` threshold | JS dependency advisories |
 | Secret scan | No credentials, keys, or tokens in the tree |

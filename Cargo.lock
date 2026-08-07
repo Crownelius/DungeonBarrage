@@ -7,6 +7,13 @@ name = "db-sim-core"
 version = "0.1.0"
 
 [[package]]
+name = "db-sim-ffi"
+version = "0.1.0"
+dependencies = [
+ "db-sim-core",
+]
+
+[[package]]
 name = "db-sim-wasm"
 version = "0.1.0"
 dependencies = [

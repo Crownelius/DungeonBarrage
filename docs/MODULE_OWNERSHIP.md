@@ -65,11 +65,15 @@ suggestions; a violation fails the build.
 
 ## Parity obligation
 
-`lib/game/simulation.ts` is the reference oracle (ADR 0001). A module that reimplements
-oracle behaviour must match it **bit-exactly**, including rounding. Where this port
-deliberately diverges — the character-kit model replacing the loadout (ADR 0002), and the canonical
-encoding replacing `JSON.stringify` — the divergence is recorded in ADR 0001 §5–§6 and the
-oracle is updated to match, not the other way round.
+The TypeScript reference oracle was retired with the web surface (ADR 0004). There is no
+second implementation to check against, so the obligation changed shape rather than
+disappearing.
 
-Any *other* divergence discovered during implementation is a finding to report, not a
-liberty to take.
+**Frozen golden vectors** replace cross-implementation parity: seeded command sequences and
+their state hashes, committed and asserted in CI. A module must not change a committed
+vector. If a change is genuinely correct and the vector is genuinely wrong, regenerate it in
+a separate, clearly-labelled commit that says why — never fold a vector change into a
+feature commit, because that is indistinguishable from silently breaking determinism.
+
+The corpus freezes whatever it is given, including bugs. It is only as good as the review
+that preceded generation.
