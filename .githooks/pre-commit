@@ -1,0 +1,67 @@
+#!/bin/sh
+#
+# Blocks credential material from ever entering a commit.
+#
+# `.gitignore` alone is not sufficient: `git add -f` overrides it, a future edit to
+# `.gitignore` silently un-ignores the file, and `git add -A` from a different working
+# directory can behave unexpectedly. The product owner's instruction was "DO NOT EVER
+# upload to git, even if the repo is private", and an instruction that strong deserves an
+# enforcement mechanism rather than a convention.
+#
+# This runs on the staged set, so it catches the file regardless of how it got staged.
+#
+# Install (already done, but recorded so a fresh clone can repeat it):
+#   git config core.hooksPath .githooks
+#
+# This hook is committed deliberately. It contains no secrets — only patterns.
+
+set -e
+
+fail() {
+    echo ""
+    echo "=============================================================="
+    echo " COMMIT BLOCKED — credential material detected"
+    echo "=============================================================="
+    echo " $1"
+    echo ""
+    echo " Nothing has been committed. Unstage it with:"
+    echo "   git restore --staged <file>"
+    echo ""
+    echo " If a secret was ALREADY committed in an earlier commit, removing"
+    echo " it now is not enough — rotate the credential at its source."
+    echo "=============================================================="
+    exit 1
+}
+
+# 1. Filenames that are credential stores by convention.
+staged_names=$(git diff --cached --name-only --diff-filter=ACM)
+for path in $staged_names; do
+    case "$path" in
+        .github-token|*.token|*github_pat_*|.env|.env.*|*.pem|*id_rsa*|*.p12|*.pfx)
+            fail "Staged file looks like a credential store: $path"
+            ;;
+    esac
+done
+
+# 2. Staged CONTENT matching known credential shapes, wherever it lives.
+#    Catches a token pasted into an otherwise innocent file — the case a filename
+#    check cannot see.
+#
+#    The patterns are written so this hook does not match itself: each is split so the
+#    literal prefix never appears intact in this file.
+if [ -n "$staged_names" ]; then
+    for pattern in \
+        'github_''pat_[A-Za-z0-9_]\{20,\}' \
+        'gh''p_[A-Za-z0-9]\{36\}' \
+        'gh''[osur]_[A-Za-z0-9]\{36\}' \
+        'AKIA[0-9A-Z]\{16\}' \
+        '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+        'sk-[A-Za-z0-9]\{32,\}'
+    do
+        if git diff --cached -U0 | grep -qE "^\+.*$(printf '%s' "$pattern" | sed 's/\\{/{/g; s/\\}/}/g')" 2>/dev/null; then
+            fail "Staged content matches a credential pattern."
+        fi
+    done
+fi
+
+exit 0

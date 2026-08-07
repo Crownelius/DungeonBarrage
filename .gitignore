@@ -51,3 +51,9 @@ Cargo.lock.bak
 
 # wasm build output
 /lib/wasm/pkg/
+
+# Credentials — NEVER commit. See docs/SECURITY_BASELINE.md section 4.
+.github-token
+*.token
+*github_pat_*
+.env.local
