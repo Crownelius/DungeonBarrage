@@ -230,6 +230,42 @@ The Brawlhalla-like second mode. Implements `MatchScheduler` against the *alread
 shared terrain, collision, damage, and knockback. Deliberately last: building it before
 the turn-based loop is proven means debugging two schedulers against an unvalidated core.
 
+### Deferred to post-launch — player-created champions
+
+The product owner proposed a creator programme: community-authored champions sold in game,
+one per year, with revenue going to the creator. **Deferred until well after publication**,
+by owner decision.
+
+Deferring costs nothing, which is why it is safe to defer. `SECURITY_BASELINE.md` §6 already
+prohibits runtime-loaded code, and nothing in the current design moves toward permitting it,
+so there is no drift to guard against while this sits.
+
+Recorded now so the analysis is not redone later:
+
+| Tier | Model | Risk |
+|---|---|---|
+| 1 — data champions | Creator composes a `CharacterDefinition` from the existing closed effect vocabulary. No code. | **Safe.** `validate_roster` already enforces it |
+| 2 — reviewed contribution | Creator writes real engine code, submitted and reviewed, compiled into the build | **Safe with process.** This is the annual model |
+| 3 — runtime-loaded scripts | Downloaded code executes on players' machines | **Breaks the invariant.** Not an option |
+
+The key insight, so it is not lost: **at one champion per year, no sandbox is needed.** A
+review process is sufficient, and it preserves every security property. A sandbox would be
+months of work, a permanent attack surface, and would still require human review for balance.
+If scripting is ever revisited, Ruby is specifically disqualified — `$SAFE` was removed in
+Ruby 3.0 because it never worked, and there is no supported way to sandbox Ruby.
+
+Commercial terms need legal drafting, not a spec: "all funds to the creator" and "2% for
+life" conflict as stated; profit-based shares are hard to audit and gross-revenue shares are
+what creators trust; perpetual obligations need per-champion revenue attribution that
+survives company changes; IP assignment is mandatory or a creator can later demand removal;
+and balance authority must be explicitly retained.
+
+**Ruby's actual place** is tooling — content pipeline, definition authoring and validation,
+balance analysis, build scripts. Zero security exposure, since none of it runs on a player's
+machine or the match server. Ruby is not a candidate for the engine or any runtime path:
+it cannot express the determinism contract, and `ruby2d` is an SDL2 wrapper rather than an
+engine.
+
 ## 5. Standing practices
 
 - **Commit every meaningful change**, with a message stating *why*, not just what.
