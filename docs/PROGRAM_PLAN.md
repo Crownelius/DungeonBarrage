@@ -21,7 +21,7 @@ Honest status, so nothing is described as further along than it is.
 | Progression / economy | Specified; not implemented |
 | Real-time PvP mode | Structurally provisioned only; deliberately not implemented |
 | Accounts, matchmaking, store | Not started |
-| Git remote | **None configured** — commits are local only |
+| Git remote | Configured (`Crownelius/DungeonBarrage`, private). **Repo not yet created** — token lacks Administration permission |
 
 ## 2. Team model
 
@@ -130,9 +130,13 @@ the turn-based loop is proven means debugging two schedulers against an unvalida
 
 ## 5. Open items for the product owner
 
-1. **Git remote.** No remote is configured, so "upload to git with every change" is
-   currently local commits only. A GitHub remote plus authorization is needed; the GitHub
-   connector in this environment is unauthenticated.
+1. **Create the GitHub repo.** The supplied fine-grained PAT authenticates and can push,
+   but cannot *create* repositories (403 — it lacks Administration: write). Create
+   `DungeonBarrage` as **private** at <https://github.com/new>, then `git push -u origin main`
+   works immediately; the remote and credential helper are already configured.
+   **Rotate that token** — it was transmitted as a plaintext file and through a chat
+   context, so it must be considered compromised. Scope the replacement to this one
+   repository rather than all 28.
 2. **The reference screenshot** described in `PRODUCT_SPEC.md` §12 was supplied in an
    earlier session and is not present in the current one. Art-direction work that depends
    on it needs it re-attached.

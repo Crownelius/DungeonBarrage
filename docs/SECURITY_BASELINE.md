@@ -94,6 +94,31 @@ purchase confirmation, another player's command, or a completed-match result.
 - Token secrets and signing keys come from the environment or a managed secret store. A secret in
   the repository is a **build failure** (§10), not a code-review comment.
 
+### 4.1 Local developer credentials
+
+A GitHub personal access token is held at `.github-token` in the working tree at the product
+owner's instruction. It is **never** committed, and three independent mechanisms enforce that:
+
+1. `.gitignore` covers `.github-token`, `*.token`, `*github_pat_*`, and `.env.local`.
+2. `.githooks/pre-commit` blocks any commit whose staged set contains a credential-shaped
+   **filename** or credential-shaped **content**, wherever it lives. Wired via
+   `core.hooksPath`. `.gitignore` alone is insufficient — `git add -f` overrides it, a later
+   edit can silently un-ignore the file, and neither sees a token pasted into an innocent file.
+3. The `gitleaks` CI gate (§10) scans full history, so a secret that somehow lands is caught
+   before it can spread.
+
+Both hook paths were adversarially tested when installed: a force-added token file was blocked,
+and the same token pasted into a `.js` file was blocked.
+
+**Git itself never receives the token.** `gh auth login` stores it in the OS keyring and acts as
+git's credential helper, so the remote URL is a plain `https://github.com/...` with no embedded
+credential and `.git/config` contains no secret. A token in a remote URL is a common leak: it
+appears in `git remote -v`, in shell history, in CI logs, and in any screenshot of a terminal.
+
+**Rotation.** Any credential that has been transmitted through a chat interface, an email, or a
+plaintext file is compromised and must be rotated regardless of subsequent handling. Rotation is
+cheap; assuming a shared token is still private is not.
+
 ## 5. Authorization
 
 Every authoritative operation re-derives authority server-side from the session. It never trusts
