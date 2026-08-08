@@ -1,0 +1,155 @@
+//! Effect resolution — the layer that turns a validated command into a game.
+//!
+//! `command.rs` decides whether an action is *permitted*. This module decides what it
+//! *does*. The distinction is why 19 of 22 [`EffectKind`] variants were declared, validated,
+//! and completely inert: the command boundary was specified as "validation + application"
+//! and delivered exactly that (`PROGRAM_PLAN.md` §2).
+//!
+//! # The one rule
+//!
+//! **Every [`EffectKind`] variant must have a resolver arm.** [`resolve_effect`] matches
+//! exhaustively with no `_ =>` catch-all, so adding a variant to the enum fails compilation
+//! until it is resolved somewhere. That is deliberate: a silent fallthrough is precisely how
+//! the inert-effect gap happened, and the compiler is a better gate than a review checklist.
+//!
+//! # Amortization
+//!
+//! Effects are grouped into families sharing their hard parts — displacement geometry,
+//! target selection, object lifetime. This is what makes a new character cost ~1,000 engine
+//! lines instead of ~3,000: character #10 composes existing resolvers rather than
+//! re-deriving knockback for the tenth time.
+
+pub mod attack_mods;
+pub mod displacement;
+pub mod objects;
+pub mod relocation;
+pub mod status;
+
+use crate::error::SimResult;
+use crate::fixed::FixedPoint;
+use crate::rng::Rng;
+use crate::types::{
+    DamageEvent, EffectKind, PersistentObject, SimulationState, SpecialEffect, TerrainOperation,
+};
+use std::collections::BTreeMap;
+
+/// Everything a resolver may read or mutate.
+///
+/// Passed by `&mut` rather than returned-and-merged so that effects compose in declaration
+/// order and each one observes the results of those before it — Natomica's `WallImpact`
+/// must see where `Push` actually left the target.
+pub struct ResolveContext<'a> {
+    /// Authoritative match state. Resolvers mutate this directly.
+    pub state: &'a mut SimulationState,
+    /// The seeded generator. The **only** entropy source; never use another.
+    pub rng: &'a mut Rng,
+    /// Who is acting.
+    pub actor_id: &'a str,
+    /// Player-selected primary target, where the ability takes one.
+    pub primary_target_id: Option<&'a str>,
+    /// Player-selected secondary target (Huck's Body Throw destination).
+    pub secondary_target_id: Option<&'a str>,
+    /// Where the attack landed. Origin of radial effects.
+    pub impact_point: FixedPoint,
+    /// Itemized damage and healing, keyed by player id. `BTreeMap` for deterministic
+    /// iteration — a `HashMap` here would make the state hash allocator-dependent.
+    pub damage: &'a mut BTreeMap<String, DamageEvent>,
+    /// Terrain mutations produced by this action, in sequence order.
+    pub terrain_ops: &'a mut Vec<TerrainOperation>,
+    /// Persistent objects created by this action.
+    pub objects_created: &'a mut Vec<PersistentObject>,
+}
+
+impl ResolveContext<'_> {
+    /// Returns the itemized damage entry for `player_id`, inserting a zeroed one if this is
+    /// the first effect to touch them this action.
+    pub fn damage_entry(&mut self, player_id: &str) -> &mut DamageEvent {
+        self.damage
+            .entry(player_id.to_owned())
+            .or_insert_with(|| DamageEvent {
+                player_id: player_id.to_owned(),
+                direct: 0,
+                splash: 0,
+                backlash: 0,
+                hazard: 0,
+                wall_impact: 0,
+                healed: 0,
+                was_critical: false,
+                knockback: FixedPoint::ZERO,
+                eliminated: false,
+            })
+    }
+
+    /// Ids of every living player other than the actor, in deterministic (sorted) order.
+    ///
+    /// Sorted because several effects draw a random target from this list, and an unsorted
+    /// candidate set would make the draw depend on storage order rather than on the seed.
+    #[must_use]
+    pub fn living_opponent_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated() && player.id != self.actor_id)
+            .map(|player| player.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Next persistent-object sequence number, advancing the counter.
+    ///
+    /// Sequence order is what makes Aleph's dagger chains resolve identically everywhere,
+    /// so it must come from here and never from insertion order.
+    pub fn next_object_sequence(&mut self) -> u32 {
+        let sequence = self.state.next_object_sequence;
+        self.state.next_object_sequence = sequence.saturating_add(1);
+        sequence
+    }
+
+    /// Next terrain-operation sequence number, advancing the counter.
+    pub fn next_terrain_sequence(&mut self) -> u32 {
+        let sequence = self.state.next_terrain_sequence;
+        self.state.next_terrain_sequence = sequence.saturating_add(1);
+        sequence
+    }
+}
+
+/// Resolves one effect.
+///
+/// The match is **exhaustive by design** — no catch-all arm. Adding an [`EffectKind`]
+/// variant breaks this build until a resolver exists for it.
+///
+/// # Errors
+///
+/// Returns [`crate::error::SimError`] when an effect's parameters are out of range or a
+/// fixed-point computation would overflow. A resolver never panics on hostile input.
+pub fn resolve_effect(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResult<()> {
+    match effect.kind {
+        EffectKind::Knockback
+        | EffectKind::Push
+        | EffectKind::Pull
+        | EffectKind::Recoil
+        | EffectKind::WallImpact => displacement::resolve(ctx, effect),
+
+        EffectKind::Teleport | EffectKind::Relocate | EffectKind::Obscure => {
+            relocation::resolve(ctx, effect)
+        }
+
+        EffectKind::SpawnTurret | EffectKind::EmbedProjectile | EffectKind::ChainDetonate => {
+            objects::resolve(ctx, effect)
+        }
+
+        EffectKind::Chill | EffectKind::Lockdown | EffectKind::Embers => status::resolve(ctx, effect),
+
+        EffectKind::MultiStrike
+        | EffectKind::GuaranteeCrit
+        | EffectKind::Cluster
+        | EffectKind::Return
+        | EffectKind::Tunnel => attack_mods::resolve(ctx, effect),
+
+        // Already resolved inside `command.rs` before this layer existed. Left there rather
+        // than moved, so this change adds behavior without altering behavior that works.
+        EffectKind::Heal | EffectKind::HealthTransfer | EffectKind::SelfDamage => Ok(()),
+    }
+}

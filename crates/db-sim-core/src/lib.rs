@@ -38,6 +38,7 @@ pub mod command;
 pub mod error;
 pub mod fixed;
 pub mod hash;
+pub mod resolve;
 pub mod rng;
 pub mod terrain;
 pub mod types;
