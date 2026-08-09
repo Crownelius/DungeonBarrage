@@ -13,8 +13,8 @@ Honest status, so nothing is described as further along than it is.
 | TypeScript | **Removed entirely** (ADR 0004). Oracle and client preserved in `reference/` |
 | C# client | **Not started.** Godot 4 + C#, per ADR 0004 |
 | Rust core foundation | `fixed`, `canonical`, `types`, `error` complete and tested |
-| Rust engine modules | Compile and test clean, but **behaviorally inert** — see §2 |
-| Effect resolvers | **3 of 22 implemented.** 8 of 9 characters do not function |
+| Rust engine modules | Resolver layer complete; scheduler/movement/maps still absent — see §2 |
+| Effect resolvers | **22 of 22 implemented** (M1.5). 282 tests; not yet wired into `command.rs` |
 | Turn scheduler, maps, spawns, status ticking, event log, reconnect | **Absent** |
 | Golden-vector regression corpus | **Not built.** Replaces the retired parity harness |
 | Rust↔C# FFI boundary | Scaffolded (`db-sim-ffi`, 6 tests). No gameplay calls yet |
@@ -49,20 +49,36 @@ data. Each one lands real engine work.
 `SelfDamage`. The other nineteen are declared in the type system, referenced by character
 definitions, and enforced by roster validation, and then **nothing acts on them**.
 
-| Character | Signature mechanic | Functions? |
-|---|---|---|
-| Arzum | Teleport chain-strike | ✗ `Teleport` inert |
-| Emi | Cube turret | ✗ `SpawnTurret` inert |
-| Karl | Three strikes per turn | ✗ `MultiStrike` inert |
-| Huck | Body throw | ✗ `Relocate` inert |
-| Numa | Harpoon pull, Pin | ✗ `Pull`, `Lockdown` inert |
-| Aleph | Dagger chain | ✗ `EmbedProjectile`, `ChainDetonate` inert |
-| Zeke | Heal / Lifeshare | ✓ works |
-| Roberto | Knockback grenade | ✗ `Knockback` inert |
-| Natomica | Repulse, wall impact | ✗ `Push`, `WallImpact` inert |
+| Character | Signature mechanic | Before M1.5 | After M1.5 |
+|---|---|---|---|
+| Arzum | Teleport chain-strike | ✗ `Teleport` inert | ✓ |
+| Emi | Cube turret | ✗ `SpawnTurret` inert | ✓ |
+| Karl | Three strikes per turn | ✓ *already worked* — see below | ✓ |
+| Huck | Body throw | ✗ `Relocate` inert | ✓ |
+| Numa | Harpoon pull, Pin | ✗ `Pull`, `Lockdown` inert | ✓ |
+| Aleph | Dagger chain | ✗ `EmbedProjectile`, `ChainDetonate` inert | ✓ |
+| Zeke | Heal / Lifeshare | ✓ works | ✓ |
+| Roberto | Knockback grenade | ✗ `Knockback` inert | ✓ |
+| Natomica | Repulse, wall impact | ✗ `Push`, `WallImpact` inert | ✓ |
 
-**One of nine starters functions end to end.** The roster is data-complete and almost
-entirely non-functional. Also absent outright: turn scheduler, map and spawn system, status
+**Two corrections to this section's own earlier claims**, found while implementing M1.5:
+
+1. **Karl was never broken.** His three strikes resolve through
+   `AbilityDefinition::strikes_per_turn` in `command.rs`, with independent per-strike crit
+   rolls — not through `EffectKind::MultiStrike`. The earlier table asserted he did not
+   function; that was wrong. Two of nine starters worked before M1.5, not one.
+2. **Eight of the nineteen unresolved effects were referenced by no character at all** —
+   `Recoil`, `Chill`, `Embers`, `MultiStrike`, `Cluster`, `Return`, `Tunnel`, `SelfDamage`.
+   They were inert *and* unused. The player-facing gap was **twelve in-use effects** lacking
+   resolvers, not nineteen. All twenty-two now have resolvers, so the distinction matters
+   only for how the earlier severity was stated: it was overstated.
+
+Neither correction changes the conclusion — the roster was mostly non-functional and the
+cause was the module brief — but a plan that overstates a gap is as untrustworthy as one
+that understates it.
+
+**Two of nine starters functioned end to end before M1.5.** The roster was data-complete and
+almost entirely non-functional. Still absent outright: turn scheduler, map and spawn system, status
 ticking, persistent-object lifecycle, event log / replay, reconnect snapshot. Movement and
 victory-condition fields exist and are hashed, but nothing implements the behavior.
 
@@ -316,6 +332,18 @@ engine.
    brief's 33%; Numa's harpoon direction threshold; Zeke's 22 HP heal reading; and whether
    Arzum's 50–200% ultimate roll should narrow in rated play. Karl's crit *chance* is
    additionally an unsourced 20% placeholder flagged during review.
+
+9. **Blast occlusion is unimplemented, engine-wide.** `terrain::subtract_circle` is purely
+   radial with no line-of-sight test, so solid terrain does not shield material or characters
+   behind it from an explosion. Surfaced by a Tunnel test that had assumed otherwise
+   (`resolve/attack_mods.rs::tunnel_detonation_is_radial_and_does_not_treat_stone_as_cover`
+   now documents the behaviour deliberately). Whether cover *should* block blasts is a real
+   design question, but it is global to crater semantics — solving it in one resolver would
+   make that ability inconsistent with every other explosion in the game.
+10. **`terrain_cells_removed` is discarded by resolvers.** `terrain::apply_operation` returns
+    the count, `CommandOutcome::terrain_cells_removed` needs it for the Excavator XP bonus
+    (`PROGRESSION.md` §2), and `ResolveContext` currently has nowhere to accumulate it. To be
+    threaded when `resolve_effect` is wired into `command.rs`.
 
 ## 7. Note for external review
 

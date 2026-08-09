@@ -140,7 +140,9 @@ pub fn resolve_effect(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> S
             objects::resolve(ctx, effect)
         }
 
-        EffectKind::Chill | EffectKind::Lockdown | EffectKind::Embers => status::resolve(ctx, effect),
+        EffectKind::Chill | EffectKind::Lockdown | EffectKind::Embers => {
+            status::resolve(ctx, effect)
+        }
 
         EffectKind::MultiStrike
         | EffectKind::GuaranteeCrit
