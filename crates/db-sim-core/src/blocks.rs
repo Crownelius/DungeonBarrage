@@ -30,7 +30,7 @@
 
 use crate::fixed::{BASIS_POINTS, scale};
 use crate::terrain::{material_at, set_material};
-use crate::types::{Material, TerrainMask};
+use crate::types::{ErosionAxis, Material, TerrainMask};
 
 /// A rectangle of terrain cells with hit points (ADR 0005).
 ///
@@ -57,6 +57,12 @@ pub struct TerrainBlock {
     /// Health at full integrity. [`solid_columns`] treats zero here as a degenerate
     /// block with no solid columns, since dividing by it is meaningless.
     pub max_health: u16,
+    /// Which way this block erodes as it loses health.
+    ///
+    /// Set by whatever ammunition last damaged it, and stored rather than passed per-hit:
+    /// erosion is recomputed from health every time, so the axis has to survive between
+    /// hits or a later shell would undo an earlier drill's shape.
+    pub erosion_axis: ErosionAxis,
 }
 
 /// Ceiling division for non-negative integers: `ceil(numerator / denominator)`.
@@ -329,6 +335,7 @@ mod tests {
             material,
             health,
             max_health,
+            erosion_axis: ErosionAxis::default(),
         }
     }
 

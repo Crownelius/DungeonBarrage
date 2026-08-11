@@ -212,6 +212,7 @@ mod tests {
     use super::*;
     use crate::blocks::solid_columns;
     use crate::terrain::material_at;
+    use crate::types::ErosionAxis;
     use crate::types::Material;
 
     #[expect(
@@ -240,6 +241,7 @@ mod tests {
             material,
             health,
             max_health,
+            erosion_axis: ErosionAxis::default(),
         }
     }
 

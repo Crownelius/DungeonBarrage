@@ -19,7 +19,7 @@ use crate::blocks::TerrainBlock;
 use crate::error::SimResult;
 use crate::fixed::FixedPoint;
 use crate::terrain;
-use crate::types::{Material, TerrainMask};
+use crate::types::{ErosionAxis, Material, TerrainMask};
 
 /// A map's static layout: dimensions, destructible blocks, and spawn points.
 ///
@@ -150,6 +150,7 @@ pub fn horizontal_test_array() -> MapDefinition {
             material: Material::Soil,
             health: ROW_BLOCK_MAX_HEALTH,
             max_health: ROW_BLOCK_MAX_HEALTH,
+            erosion_axis: ErosionAxis::default(),
         });
 
         let spawn_x = origin_x.saturating_add(i32::from(ROW_SPAWN_X_OFFSET_CELLS));
@@ -265,10 +266,10 @@ mod tests {
     #[test]
     fn build_mask_rejects_zero_width() {
         let map = MapDefinition {
+            blocks: Vec::new(),
             id: "degenerate",
             width_cells: 0,
             height_cells: 10,
-            blocks: Vec::new(),
             spawn_points: Vec::new(),
         };
         assert!(build_mask(&map).is_err());
@@ -285,6 +286,7 @@ mod tests {
             material: Material::Wood,
             health: 100,
             max_health: 100,
+            erosion_axis: ErosionAxis::default(),
         };
         let map = MapDefinition {
             id: "clipped",

@@ -610,6 +610,7 @@ mod tests {
 
     fn sample_state() -> SimulationState {
         SimulationState {
+            blocks: Vec::new(),
             simulation_version: 2,
             content_version: 1,
             tick: 100,

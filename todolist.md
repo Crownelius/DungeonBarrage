@@ -41,7 +41,7 @@ one concept is how effects go inert.
 
 ---
 
-## ✅ P2 — `terrain_cells_removed` never reaches game state — RESOLVED 2026-08-07
+## 🟠 P2 — `terrain_cells_removed` reaches state from `command.rs` only — PARTIAL
 
 **The problem.** `terrain::apply_operation` returns the count of cells destroyed.
 `CommandOutcome::terrain_cells_removed` needs it — the Excavator XP bonus
@@ -63,10 +63,18 @@ an absent one: it looks implemented.
 
 **Do both at once with P1** — the count has nowhere to go until the wiring exists.
 
-**Resolved as recommended.** `ResolveContext` gained the accumulator; `command.rs` seeds it
-and copies the total into `CommandOutcome`. The field addition broke all five family test
-harnesses, exactly as predicted when the work was briefed — the agent correctly reported the
-blocker rather than editing files it did not own, and the integrator fixed them.
+**Half done, and the half that is missing is the half that matters.** `ResolveContext` gained
+the accumulator and `command.rs` seeds it and copies the total into `CommandOutcome` — but
+**four resolver call sites still discard the count**: `attack_mods.rs` ×3 (cluster crater,
+tunnel bore, tunnel detonation) and `objects.rs` ×1, all still `let _removed = …`. Those are
+the resolvers that actually destroy terrain, so the Excavator bonus still reads zero for every
+ability that goes through them.
+
+This was closed prematurely on 2026-08-07 after verifying `command.rs` alone. Recorded rather
+than quietly amended: **verifying the consumer is not verifying the producers.** The remaining
+fix is mechanical — accumulate into `*ctx.terrain_cells_removed` at each of the four sites —
+and is folded into the P3 crater-routing work, since those call sites are exactly the ones
+being rerouted.
 
 ---
 
@@ -101,9 +109,23 @@ undo later.
 **Trap:** erosion order must be deterministic and documented. A random or
 iteration-order-dependent erosion breaks replay and the state hash.
 
-**Solution 1 implemented** (`blocks.rs`, `map.rs`, `resolve/terrain_damage.rs`, ADR 0005).
-Column erosion, impact-directed, recomputed from health rather than accumulated.
-`map::horizontal_test_array` demonstrates it across eight blocks.
+**Solution 1 implemented as a library, and that is the problem.** `blocks.rs`, `map.rs`, and
+`resolve/terrain_damage.rs` are correct and well tested — column erosion, impact-directed,
+recomputed from health — but on 2026-08-07 an audit found the system was **unreachable from
+actual gameplay**:
+
+- `SimulationState` had **no `blocks` field**, so block health had no home in authoritative
+  match state.
+- Blocks were **absent from the state hash**, which ADR 0005 explicitly requires.
+- `damage_blocks_in_radius` took `&mut [TerrainBlock]` and was called from **nowhere** but its
+  own tests.
+- `map::horizontal_test_array` was referenced only by tests.
+
+The mechanic worked in a test tube. In a real match no block existed and nothing could damage
+one. This is the *third* occurrence of the project's signature failure — correct, tested,
+unreachable code — and it passed review because the agent's evidence was true but scoped to
+the library rather than the game. **When a report says a behaviour is proven, check what calls
+it, not just what tests it.**
 
 **WHAT REMAINS — this is why P3 is still open.** Crater operations
 (`terrain::apply_operation`) still write cells directly inside a block's span without

@@ -460,6 +460,7 @@ mod tests {
             players.sort_by(|a, b| a.id.cmp(&b.id));
             Self {
                 state: SimulationState {
+                    blocks: Vec::new(),
                     simulation_version: 2,
                     content_version: 1,
                     tick: 0,

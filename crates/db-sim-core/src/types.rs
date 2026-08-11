@@ -11,6 +11,7 @@
 //! ballistics, damage, and knockback carry over untouched. Only the owner of an attack
 //! changed, from "a weapon a player equipped" to "an ability a character has".
 
+use crate::blocks::TerrainBlock;
 use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
 
 /// Reference value that every damage percentage scales from (`CHARACTERS.md` §2).
@@ -496,6 +497,36 @@ pub struct TerrainMask {
     pub cells: Vec<u8>,
 }
 
+/// Which way a damaged block loses its cells.
+///
+/// Most ammunition shortens a platform horizontally, because a shrinking ledge reads
+/// clearly to a player deciding whether they can still stand there. Penetrating weapons —
+/// drills, heavy shells — instead punch through it, thinning the platform from the impact
+/// side rather than narrowing it.
+///
+/// Stored on the block rather than passed per-hit: erosion is recomputed from health every
+/// time (ADR 0005 §2), so the axis has to survive between hits or a later shell would undo
+/// an earlier drill's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ErosionAxis {
+    /// Erode whole columns — the platform gets narrower. The default.
+    #[default]
+    Columns,
+    /// Erode whole rows — the platform gets thinner. Penetrating ammunition.
+    Rows,
+}
+
+impl ErosionAxis {
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Columns => "columns",
+            Self::Rows => "rows",
+        }
+    }
+}
+
 /// An ordered, replicable terrain mutation.
 ///
 /// Clients apply these in strict `sequence` order; a gap triggers recovery rather than
@@ -795,8 +826,13 @@ pub struct SimulationState {
     pub movement_remaining: i32,
     /// Whether the active player has already committed their attack this turn.
     pub has_attacked_this_turn: bool,
-    /// Terrain occupancy.
+    /// Terrain occupancy. Derived from `blocks` wherever a block covers a cell.
     pub terrain: TerrainMask,
+    /// Destructible blocks, kept sorted by `id` so iteration is deterministic.
+    ///
+    /// Block health is authoritative; the cells in `terrain` are recomputed from it
+    /// (ADR 0005). A cell covered by no block is background terrain and is carved directly.
+    pub blocks: Vec<TerrainBlock>,
     /// Players, kept sorted by `id` so iteration is deterministic.
     pub players: Vec<PlayerState>,
     /// Persistent objects, kept sorted by `sequence`.
