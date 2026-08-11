@@ -11,7 +11,7 @@ and [`docs/BUILD_LOG.md`](docs/BUILD_LOG.md) (history).
 
 ---
 
-## 🔴 P1 — `resolve_effect` is not wired into `command.rs`
+## ✅ P1 — `resolve_effect` is not wired into `command.rs` — RESOLVED 2026-08-07
 
 **The problem.** All 22 effect resolvers exist and pass 282 tests, but **nothing calls them
 from a real command.** `command.rs::apply_ability` resolves damage and the three legacy
@@ -35,9 +35,13 @@ is correct, tested, and unreachable. Tests passing is not the same as the game w
 **Trap:** do not leave the legacy three in `command.rs` "for now". Two resolution paths for
 one concept is how effects go inert.
 
+**Resolved as recommended.** `apply_ability` builds one `ResolveContext` and iterates
+`ability.effects` in declaration order. `Heal`, `HealthTransfer`, and `SelfDamage` moved to
+`resolve/support.rs` in the same change, so there is exactly one resolution path.
+
 ---
 
-## 🔴 P2 — `terrain_cells_removed` never reaches game state
+## ✅ P2 — `terrain_cells_removed` never reaches game state — RESOLVED 2026-08-07
 
 **The problem.** `terrain::apply_operation` returns the count of cells destroyed.
 `CommandOutcome::terrain_cells_removed` needs it — the Excavator XP bonus
@@ -59,9 +63,14 @@ an absent one: it looks implemented.
 
 **Do both at once with P1** — the count has nowhere to go until the wiring exists.
 
+**Resolved as recommended.** `ResolveContext` gained the accumulator; `command.rs` seeds it
+and copies the total into `CommandOutcome`. The field addition broke all five family test
+harnesses, exactly as predicted when the work was briefed — the agent correctly reported the
+blocker rather than editing files it did not own, and the integrator fixed them.
+
 ---
 
-## 🔴 P3 — Terrain is binary; blocks have no hit points
+## 🟠 P3 — Terrain blocks have hit points, but craters still bypass them
 
 **The problem.** `TerrainMask` stores one `Material` byte per cell. A cell is solid or empty,
 full stop. The product requirement is that **destructible blocks have HP, and remaining HP
@@ -91,6 +100,22 @@ undo later.
 
 **Trap:** erosion order must be deterministic and documented. A random or
 iteration-order-dependent erosion breaks replay and the state hash.
+
+**Solution 1 implemented** (`blocks.rs`, `map.rs`, `resolve/terrain_damage.rs`, ADR 0005).
+Column erosion, impact-directed, recomputed from health rather than accumulated.
+`map::horizontal_test_array` demonstrates it across eight blocks.
+
+**WHAT REMAINS — this is why P3 is still open.** Crater operations
+(`terrain::apply_operation`) still write cells directly inside a block's span without
+reducing its health. A block can therefore be holed while reporting full health, which is
+the exact drift the block model exists to prevent. Two fixes:
+
+1. **Route crater operations through block damage.** *(Recommended.)* When a crater
+   intersects a block, convert the overlap into block damage and let erosion decide the
+   cells. Keeps one authority. Costs a rework of how craters interact with `apply_operation`.
+2. **Let craters carve freely and treat block health as advisory** for rendering and UI only.
+   Cheaper, but abandons "percent health equals percent surface" the moment any explosion
+   lands, which is the requirement itself.
 
 **Open sub-question for the owner:** should erosion be edge-inward (platform shrinks
 horizontally), top-down (platform thins), or ammunition-dependent? Recommendation is
