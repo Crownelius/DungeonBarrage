@@ -42,33 +42,42 @@
 //!   (covers both "hit the one thing I aimed at" and "push everyone within N BW" kits).
 //! - Crit rolls, using the ability's own `crit_chance_basis_points` against the seeded
 //!   match RNG, independently per `strikes_per_turn` iteration.
-//! - Backlash ([`EffectKind::SelfDamage`] and [`StrikeAttack::self_damage`]): applied
-//!   unconditionally, computed from pre-mutation health so it lands the same turn as (and
-//!   independently of) target damage, and never special-cased to spare the actor from
-//!   elimination.
-//! - [`EffectKind::Heal`] and [`EffectKind::HealthTransfer`], generically: flat
-//!   hit-point magnitudes (matching how `character.rs` actually encodes Zeke's kit),
-//!   applied to the chosen target or the actor when none is given, with the documented
-//!   guard that a `HealthTransfer` never reduces the actor below 1 HP.
+//! - Backlash from [`StrikeAttack::self_damage`]: applied unconditionally, computed from
+//!   pre-mutation health so it lands the same turn as (and independently of) target
+//!   damage, and never special-cased to spare the actor from elimination.
 //! - Terrain reshaping via `terrain::apply_operation` for any [`TerrainProfile::Crater`]
 //!   or [`TerrainProfile::Dig`] on the resolved attack, using [`MaterialMask::SOFT`] —
 //!   nothing in the launch roster asks for [`MaterialMask::ALL`] (Breach Pick only).
+//! - **Every effect on the resolved ability**, in declaration order, via
+//!   [`resolve::resolve_effect`] (`todolist.md` P1): after the direct attack and its own
+//!   terrain reshaping resolve, this module builds a [`resolve::ResolveContext`] once and
+//!   feeds it `ability.effects` in the order the character definition declares them —
+//!   order is load-bearing, since a later effect (Natomica's `WallImpact`) must observe
+//!   where an earlier one (`Push`) actually left its target. This is the **only** place
+//!   any effect resolves; there is no second, inline copy of `Heal`, `HealthTransfer`, or
+//!   `SelfDamage` here any more (they moved to `resolve::support` in the same change that
+//!   wired this loop in, so there is exactly one resolution path for every `EffectKind`).
 //! - Gauge award per `CHARACTERS.md` §2's per-action rates, through
 //!   [`PlayerState::add_gauge`] so the per-action and full-gauge caps are enforced by the
 //!   single already-reviewed implementation of that cap rather than a second copy of it.
+//!   The "dealt" rate is still computed only from the direct-hit resolution above (no
+//!   launch ability's effects add further direct damage, so this is unobserved today —
+//!   flagged as a judgement call rather than silently assumed correct for a future
+//!   ability that does); the "taken" and "healed" rates are read back from the itemized
+//!   damage map after every effect has resolved, since `Heal`/`HealthTransfer`/
+//!   `SelfDamage` no longer return their totals directly to this module.
 //! - Sorted, idempotent `processed_command_ids` insertion.
 //!
-//! **Deliberately out of scope**, and left for a follow-up once the corresponding data or
-//! sibling modules exist: splash-damage falloff (`DamageEvent::splash` is always `0` here
-//! — `fixed.rs` forbids `sqrt`, so a distance-based falloff needs a formula that isn't
-//! specified anywhere in `CHARACTERS.md`, and inventing one is exactly the guess this
-//! module's rules warn against), persistent-object creation (`CommandOutcome::objects_created`
-//! is always empty — turrets and embedded knives need a lifecycle owner this module does
-//! not have), status-effect application beyond damage/heal (`Lockdown`, `Chill`, `Obscure`,
-//! and friends are validated as legal commands but do not yet write a [`StatusEffect`]),
-//! and hazard/wall-impact damage lines. None of these gaps affect the security-critical
-//! surface: replay protection, turn/phase/gauge/authorization checks, and atomicity are
-//! complete and covered by the tests below.
+//! **Deliberately out of scope**, and left for a follow-up once the corresponding data
+//! exists: splash-damage falloff from the *direct* ballistic/strike hit
+//! (`DamageEvent::splash` from that hit is always `0` here — `fixed.rs` forbids `sqrt`, so
+//! a distance-based falloff needs a formula that isn't specified anywhere in
+//! `CHARACTERS.md`, and inventing one is exactly the guess this module's rules warn
+//! against; note that `EffectKind::ChainDetonate`'s own splash damage *does* now apply,
+//! since it resolves through `resolve::resolve_effect` like every other effect). None of
+//! this affects the security-critical surface: replay protection,
+//! turn/phase/gauge/authorization checks, and atomicity are complete and covered by the
+//! tests below.
 //!
 //! # Cross-module dependencies still in flight
 //!
@@ -82,6 +91,7 @@
 use crate::character;
 use crate::fixed::{self, BODY_WIDTH, FixedPoint};
 use crate::hash;
+use crate::resolve;
 use crate::rng::Rng;
 use crate::terrain;
 use crate::types::*;
@@ -300,7 +310,13 @@ fn resolve_ability(
     let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
     let mut terrain_cells_removed: u32 = 0;
     let mut damage_by_player: BTreeMap<String, DamageEvent> = BTreeMap::new();
+    let mut objects_created: Vec<PersistentObject> = Vec::new();
     let mut dealt_to_others: u32 = 0;
+    // Where the attack itself landed — the origin `ResolveContext::impact_point` gives
+    // every effect below. Defaults to the actor's own position so a targetless area
+    // ability (Natomica's Repulse with no target named) centres its effects on the caster,
+    // matching `resolve_strike_point`'s own no-target reading.
+    let mut impact_point = actor_position;
 
     match ability.attack {
         Attack::Projectile(projectile) => {
@@ -334,6 +350,10 @@ fn resolve_ability(
                 let hit_character = matches!(result.impact.cause, ImpactCause::Character);
                 samples.extend(result.samples);
                 impact = Some(result.impact);
+                // Overwritten on every iteration of a multi-strike projectile, same as
+                // `impact` above — the effects loop below sees only the final strike's
+                // landing point, matching how `impact`/`terrain_ops` already behave.
+                impact_point = impact_position;
 
                 if hit_character {
                     // Direct hit: nearest living, non-actor character within one body
@@ -375,6 +395,7 @@ fn resolve_ability(
         }
         Attack::Strike(strike) => {
             let strike_point = resolve_strike_point(state, command, strike, actor_position)?;
+            impact_point = strike_point;
 
             let targets: Vec<String> = if let Some(target_id) = &command.target_player_id {
                 vec![target_id.clone()]
@@ -421,12 +442,57 @@ fn resolve_ability(
         }
     }
 
-    let healed_total = apply_support_effects(state, &mut damage_by_player, ability, command);
-    // Backlash resolves simultaneously with target damage and is never gated on whether
-    // the actor survived hitting anyone else — both are computed from independent
-    // pre-mutation reads and applied unconditionally, so there is no ordering in which one
-    // could suppress the other.
-    let backlash_total = apply_backlash(state, ability, &command.player_id, &mut damage_by_player);
+    // Backlash from the attack's own `StrikeAttack::self_damage` field (not an
+    // `EffectKind`, so it is not part of the effects loop below) resolves simultaneously
+    // with target damage and is never gated on whether the actor survived hitting anyone
+    // else — both are computed from independent pre-mutation reads and applied
+    // unconditionally, so there is no ordering in which one could suppress the other.
+    apply_backlash(state, ability, &command.player_id, &mut damage_by_player);
+
+    // Every effect on the resolved ability, in declaration order — the P1 wiring. Order is
+    // load-bearing: a later effect must observe what an earlier one already did (Natomica's
+    // `WallImpact` reading where `Push` left the target is the canonical example), which is
+    // exactly why one `ResolveContext` is built once and threaded through every iteration
+    // rather than rebuilt per effect. A resolver failure here means this action cannot be
+    // legally resolved against the current board state; mapped to `InvalidTarget` for the
+    // same reason the ballistics failure above is (no dedicated `CommandRejection` variant
+    // exists for an internal resolution fault, and `types.rs` is frozen). `working` (this
+    // whole `state`) is discarded by the caller on any `Err`, so a failure partway through
+    // this loop — even after damage has already landed in this clone — leaves the real
+    // state untouched; see `effect_resolution_failure_leaves_state_untouched` below.
+    {
+        let mut ctx = resolve::ResolveContext {
+            state: &mut *state,
+            rng: &mut rng,
+            actor_id: command.player_id.as_str(),
+            primary_target_id: command.target_player_id.as_deref(),
+            secondary_target_id: command.secondary_target_player_id.as_deref(),
+            impact_point,
+            damage: &mut damage_by_player,
+            terrain_ops: &mut terrain_ops,
+            objects_created: &mut objects_created,
+            terrain_cells_removed: &mut terrain_cells_removed,
+        };
+        for effect in ability.effects {
+            resolve::resolve_effect(&mut ctx, effect)
+                .map_err(|_| CommandRejection::InvalidTarget)?;
+        }
+    }
+
+    // `Heal`, `HealthTransfer`, and `SelfDamage` no longer return their totals directly to
+    // this module (they resolve inside the loop above, alongside every other effect), so
+    // the itemized damage map — the single source of truth every resolver in this action
+    // wrote into — is summed instead. `healed`/`backlash` are written only by those three
+    // effects and by `apply_backlash` just above, so this sum is exact, not an
+    // approximation.
+    let healed_total: u32 = damage_by_player
+        .values()
+        .map(|event| u32::from(event.healed))
+        .sum();
+    let backlash_total: u32 = damage_by_player
+        .values()
+        .map(|event| u32::from(event.backlash))
+        .sum();
 
     award_gauge(
         state,
@@ -463,8 +529,7 @@ fn resolve_ability(
         impact,
         terrain_ops,
         damage: damage_by_player.into_values().collect(),
-        // Persistent-object creation is out of scope here; see the module doc comment.
-        objects_created: Vec::new(),
+        objects_created,
         gauge_gained: gauge_gained(state, &command.player_id),
         terrain_cells_removed,
         final_state_hash: hash::hash_state(state),
@@ -558,81 +623,15 @@ fn apply_terrain_profile(
     terrain_ops.push(op);
 }
 
-/// Applies the ability's [`EffectKind::Heal`] and [`EffectKind::HealthTransfer`] effects,
-/// if any, and returns the total hit points healed (for gauge award).
-///
-/// Magnitudes for both are flat hit points, matching how `character.rs` actually encodes
-/// them (Zeke's `ZEKE_HEAL` magnitude of `22` is documented there as "22 HP", not 22% of
-/// anything).
-fn apply_support_effects(
-    state: &mut SimulationState,
-    damage_by_player: &mut BTreeMap<String, DamageEvent>,
-    ability: &AbilityDefinition,
-    command: &AbilityCommand,
-) -> u32 {
-    let mut healed_total: u32 = 0;
-
-    for effect in ability.effects {
-        match effect.kind {
-            EffectKind::Heal => {
-                let target = command
-                    .target_player_id
-                    .clone()
-                    .unwrap_or_else(|| command.player_id.clone());
-                let amount = u16::try_from(effect.magnitude).unwrap_or(0);
-                let actual = heal(state, damage_by_player, &target, amount);
-                healed_total = healed_total.saturating_add(u32::from(actual));
-            }
-            EffectKind::HealthTransfer => {
-                let magnitude = u16::try_from(effect.magnitude).unwrap_or(0);
-                if let Some(target_id) = &command.target_player_id {
-                    // Transfer is conserving: health leaves the actor only if the target
-                    // can actually receive it. The amount is bounded by three things at
-                    // once — the effect's magnitude, what the actor can spare above 1 HP
-                    // (`CHARACTERS.md`'s guard against a support killing themselves with a
-                    // mis-click), and what the target is actually missing.
-                    //
-                    // Debiting before checking the third bound destroys health outright:
-                    // a transfer aimed at a full-health ally would cost the actor their
-                    // hit points and heal nobody. That is never what a support player
-                    // intends, and it is invisible in the result panel because the heal
-                    // line simply reads zero.
-                    let sparable = state
-                        .player(&command.player_id)
-                        .map_or(0, |actor| actor.health.saturating_sub(1));
-                    let receivable = state
-                        .player(target_id)
-                        .map_or(0, |target| target.max_health.saturating_sub(target.health));
-                    let transferred = magnitude.min(sparable).min(receivable);
-
-                    if transferred > 0 {
-                        if let Some(actor) = state.player_mut(&command.player_id) {
-                            actor.health = actor.health.saturating_sub(transferred);
-                        }
-                        let actual = heal(state, damage_by_player, target_id, transferred);
-                        // `heal` cannot return less than `transferred` here, because
-                        // `receivable` already bounded it — but the total is accumulated
-                        // from the actual credit so the invariant is enforced by the code
-                        // rather than by this comment.
-                        healed_total = healed_total.saturating_add(u32::from(actual));
-                    }
-                } else {
-                    // Restore: heal the actor from their own pool.
-                    let actor_id = command.player_id.clone();
-                    let actual = heal(state, damage_by_player, &actor_id, magnitude);
-                    healed_total = healed_total.saturating_add(u32::from(actual));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    healed_total
-}
-
-/// Applies backlash from both mechanisms the type contract offers — a `Strike`'s own
-/// [`StrikeAttack::self_damage`] field, and any attached [`EffectKind::SelfDamage`] effect
-/// (which can attach to either attack shape) — and returns the total backlash dealt.
+/// Applies backlash from a [`StrikeAttack`]'s own `self_damage` field — the one backlash
+/// mechanism this module still resolves directly. [`EffectKind::SelfDamage`] (the type
+/// contract's other backlash mechanism, attachable to either attack shape) now resolves
+/// through [`resolve::resolve_effect`] alongside every other effect
+/// (`resolve::support::resolve`, called from the effects loop in [`resolve_ability`]), not
+/// here — see the module doc comment's "Scope of ability resolution" section. Returns the
+/// amount dealt, still asserted directly by this module's own unit test; the effects loop's
+/// caller does not use the return value, since it sums the itemized damage map instead
+/// once every effect (including any `SelfDamage`) has also run.
 ///
 /// Applied unconditionally and never special-cased to spare the actor: backlash can
 /// eliminate its own user, exactly as `StrikeAttack::self_damage`'s doc comment states.
@@ -656,21 +655,6 @@ fn apply_backlash(
             false,
         );
         total = total.saturating_add(u32::from(actual));
-    }
-
-    for effect in ability.effects {
-        if effect.kind == EffectKind::SelfDamage {
-            let hp = magnitude_percent_to_hp(effect.magnitude);
-            let actual = deal_damage(
-                state,
-                damage_by_player,
-                actor_id,
-                hp,
-                DamageField::Backlash,
-                false,
-            );
-            total = total.saturating_add(u32::from(actual));
-        }
     }
 
     total
@@ -699,15 +683,6 @@ fn resolved_damage_hp(ability: &AbilityDefinition, is_crit: bool) -> u16 {
         ability.damage()
     };
     raw.and_then(|value| u16::try_from(value).ok()).unwrap_or(0)
-}
-
-/// Converts a [`SpecialEffect::magnitude`] expressed as percent-of-[`BASE_ATTACK`] (the
-/// convention `character.rs` uses for its percent-based effects, e.g. Aleph's chain
-/// detonation at magnitude `70`) into hit points.
-fn magnitude_percent_to_hp(magnitude: i32) -> u16 {
-    fixed::scale(BASE_ATTACK, magnitude, 100)
-        .and_then(|value| u16::try_from(value).ok())
-        .unwrap_or(0)
 }
 
 /// Which itemized [`DamageEvent`] field a call to [`deal_damage`] contributes to.
@@ -752,31 +727,6 @@ fn deal_damage(
     }
     entry.was_critical = entry.was_critical || is_crit;
     entry.eliminated = eliminated_now;
-
-    actual
-}
-
-/// Restores `player_id`'s health by up to `amount`, capped at their max health, and
-/// records the actual amount healed into their itemized [`DamageEvent`]. Returns the
-/// actual amount healed, for gauge accounting.
-fn heal(
-    state: &mut SimulationState,
-    damage_by_player: &mut BTreeMap<String, DamageEvent>,
-    player_id: &str,
-    amount: u16,
-) -> u16 {
-    if amount == 0 {
-        return 0;
-    }
-    let Some(player) = state.player_mut(player_id) else {
-        return 0;
-    };
-    let missing = player.max_health.saturating_sub(player.health);
-    let actual = amount.min(missing);
-    player.health = player.health.saturating_add(actual);
-
-    let entry = damage_entry(damage_by_player, player_id);
-    entry.healed = entry.healed.saturating_add(actual);
 
     actual
 }
@@ -968,6 +918,32 @@ mod tests {
             has_attacked_this_turn: false,
             terrain: empty_terrain(),
             players: vec![attacker, defender],
+            objects: Vec::new(),
+            processed_command_ids: Vec::new(),
+            next_terrain_sequence: 0,
+            next_object_sequence: 0,
+            rng_state: 12345,
+        }
+    }
+
+    /// Same shape as [`base_state`] (turn 1, `AimingAndSelection`, empty terrain), but for
+    /// tests that need `active_player_id` and the roster kit behind it to be something
+    /// other than Huck — Zeke's Lifeshare/Mending Bolt, Natomica's Repulse, Arzum's Chain
+    /// Strike — so the P1 wiring can be exercised end to end through the real
+    /// [`apply_ability`] entry point rather than by calling a resolver directly.
+    fn state_with_players(active_player_id: &str, players: Vec<PlayerState>) -> SimulationState {
+        SimulationState {
+            simulation_version: 2,
+            content_version: 1,
+            tick: 0,
+            turn_number: 1,
+            phase: MatchPhase::AimingAndSelection,
+            active_player_id: active_player_id.to_string(),
+            wind_per_tick: 0,
+            movement_remaining: 0,
+            has_attacked_this_turn: false,
+            terrain: empty_terrain(),
+            players,
             objects: Vec::new(),
             processed_command_ids: Vec::new(),
             next_terrain_sequence: 0,
@@ -1477,9 +1453,15 @@ mod tests {
     }
 
     #[test]
-    fn backlash_via_self_damage_effect_uses_percent_of_base_attack() {
-        let mut state = base_state();
-        let ability = AbilityDefinition {
+    fn self_damage_effect_still_deals_backlash_after_moving_into_the_resolver_layer() {
+        // No launch character attaches `EffectKind::SelfDamage` (`character.rs` grepped:
+        // zero hits), so this cannot go through the public `apply_ability` entry point
+        // (which always resolves a real roster ability). It calls the private
+        // `resolve_ability` — the same function `apply_ability` calls once validation has
+        // passed — with a synthetic ability, matching the precedent every regression test
+        // in this module already sets. See `resolve::support::tests` for the same effect
+        // exercised in isolation.
+        const ABILITY: AbilityDefinition = AbilityDefinition {
             id: "test-effect-backlash",
             display_name: "Test Effect Backlash",
             slot: AbilitySlot::Basic,
@@ -1500,79 +1482,122 @@ mod tests {
                 duration_turns: 0,
             }],
         };
-        let mut damage = BTreeMap::new();
+        let mut state = base_state();
+        let command = ability_command("cmd-1", None);
 
-        let total = apply_backlash(&mut state, &ability, "attacker", &mut damage);
+        let result = resolve_ability(&mut state, &command, &ABILITY);
 
-        assert_eq!(total, 10);
+        let Ok(outcome) = result else {
+            panic!("expected the ability to resolve: {result:?}");
+        };
+        let Some(event) = outcome
+            .damage
+            .iter()
+            .find(|event| event.player_id == "attacker")
+        else {
+            panic!("attacker must have a backlash damage entry");
+        };
+        assert_eq!(
+            event.backlash, 10,
+            "moved into the resolver layer, the percent-of-BASE_ATTACK backlash convention \
+             must be unchanged"
+        );
     }
 
     #[test]
-    fn heal_caps_at_max_health() {
-        let mut state = base_state();
-        if let Some(defender) = state.player_mut("defender") {
-            defender.health = 990;
-            defender.max_health = 999;
-        }
-        let mut damage = BTreeMap::new();
-
-        let actual = heal(&mut state, &mut damage, "defender", 50);
-
-        assert_eq!(
-            actual, 9,
-            "heal must be capped at missing health, not the raw magnitude"
+    fn heal_effect_still_heals_after_moving_into_the_resolver_layer() {
+        // Zeke's Mending Bolt (Basic) carries `ZEKE_HEAL`: a real roster ability, so this
+        // proves the behaviour survives the move all the way through the public
+        // `apply_ability` entry point. `EffectKind::Heal` targets whoever the *command*
+        // names, independent of where the bolt itself lands (`command.rs`'s own direct-hit
+        // selection for a projectile never consults `command.target_player_id`), so the
+        // target is placed far beyond any tier's maximum reach — well outside the terrain
+        // bounds entirely — to rule out the bolt also landing a direct hit on it and
+        // muddying the expected health delta.
+        let mut target = player(
+            "target",
+            "huck",
+            FixedPoint::new(500 * fixed::POSITION_SCALE, 0),
         );
-        let Some(defender) = state.player("defender") else {
-            panic!("defender must exist");
+        target.health = 100;
+        target.max_health = 220;
+        let mut state = state_with_players(
+            "actor",
+            vec![player("actor", "zeke", FixedPoint::new(0, 0)), target],
+        );
+        let command = AbilityCommand {
+            command_id: "cmd-1".to_string(),
+            player_id: "actor".to_string(),
+            expected_turn_number: 1,
+            slot: AbilitySlot::Basic,
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("target".to_string()),
+            secondary_target_player_id: None,
         };
-        assert_eq!(defender.health, 999);
+
+        let result = apply_ability(&mut state, &command);
+
+        let CommandResult::Accepted(_outcome) = result else {
+            panic!("expected Zeke's Mending Bolt to be accepted: {result:?}");
+        };
+        let Some(target) = state.player("target") else {
+            panic!("target must exist");
+        };
+        assert_eq!(
+            target.health, 122,
+            "Mending Bolt's Heal effect must actually restore its 22 HP, regardless of \
+             whether the bolt itself connects"
+        );
     }
 
     #[test]
     fn health_transfer_never_reduces_actor_below_one_hp() {
-        let mut state = base_state();
-        if let Some(attacker) = state.player_mut("attacker") {
-            attacker.health = 10;
-        }
+        // Zeke's Lifeshare (Special): a real roster ability, exercised end to end through
+        // `apply_ability` — the same regression `resolve::support::tests` covers in
+        // isolation for the resolver itself.
+        let mut actor = player("actor", "zeke", FixedPoint::new(0, 0));
+        actor.health = 10;
+        actor.special_gauge = GAUGE_FULL;
         // The target must actually be missing health, or the conserving transfer has
         // nothing to move and the actor-floor cap is never exercised.
-        if let Some(defender) = state.player_mut("defender") {
-            defender.health = 100;
-        }
-        let ability = AbilityDefinition {
-            id: "test-lifeshare",
-            display_name: "Test Lifeshare",
+        let mut target = player(
+            "target",
+            "huck",
+            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
+        );
+        target.health = 100;
+        let mut state = state_with_players("actor", vec![actor, target]);
+        let command = AbilityCommand {
+            command_id: "cmd-1".to_string(),
+            player_id: "actor".to_string(),
+            expected_turn_number: 1,
             slot: AbilitySlot::Special,
-            damage_percent: 0,
-            crit_damage_percent: 0,
-            crit_chance_basis_points: 0,
-            strikes_per_turn: 1,
-            attack: Attack::Strike(StrikeAttack {
-                range: 100_000,
-                terrain: TerrainProfile::None,
-                self_damage: 0,
-            }),
-            effects: &[SpecialEffect {
-                trigger: EffectTrigger::OnFire,
-                kind: EffectKind::HealthTransfer,
-                magnitude: 100,
-                magnitude_secondary: 0,
-                duration_turns: 0,
-            }],
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("target".to_string()),
+            secondary_target_player_id: None,
         };
-        let command = ability_command("cmd-1", Some("defender"));
-        let mut damage = BTreeMap::new();
 
-        let healed = apply_support_effects(&mut state, &mut damage, &ability, &command);
+        let result = apply_ability(&mut state, &command);
 
+        let CommandResult::Accepted(_outcome) = result else {
+            panic!("expected Zeke's Lifeshare to be accepted: {result:?}");
+        };
+        let Some(actor) = state.player("actor") else {
+            panic!("actor must exist");
+        };
         assert_eq!(
-            healed, 9,
+            actor.health, 1,
             "transfer must be capped so the actor keeps at least 1 HP"
         );
-        let Some(attacker) = state.player("attacker") else {
-            panic!("attacker must exist");
+        let Some(target) = state.player("target") else {
+            panic!("target must exist");
         };
-        assert_eq!(attacker.health, 1);
+        assert_eq!(
+            target.health, 109,
+            "exactly what left the actor must arrive"
+        );
     }
 
     #[test]
@@ -1580,50 +1605,195 @@ mod tests {
         // Regression: the transfer used to debit the actor before checking what the
         // target could receive, so aiming Lifeshare at a healthy ally destroyed the
         // actor's hit points and healed nobody. Health must be conserved — what leaves
-        // the actor is exactly what arrives.
-        let mut state = base_state();
-        if let Some(attacker) = state.player_mut("attacker") {
-            attacker.health = 200;
+        // the actor is exactly what arrives. Exercised end to end through `apply_ability`
+        // with Zeke's real Lifeshare, so the fix is proven to have survived the move into
+        // the resolver layer, not merely to hold in isolation.
+        let mut actor = player("actor", "zeke", FixedPoint::new(0, 0));
+        actor.health = 200;
+        let target = player(
+            "target",
+            "huck",
+            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
+        );
+        let mut state = state_with_players("actor", vec![actor, target]);
+        if let Some(actor) = state.player_mut("actor") {
+            actor.special_gauge = GAUGE_FULL;
         }
-
-        let before_actor = state.player("attacker").map(|player| player.health);
-        let before_target = state.player("defender").map(|player| player.health);
-
-        let ability = AbilityDefinition {
-            id: "test-lifeshare",
-            display_name: "Test Lifeshare",
+        let before_actor = state.player("actor").map(|player| player.health);
+        let before_target = state.player("target").map(|player| player.health);
+        let command = AbilityCommand {
+            command_id: "cmd-1".to_string(),
+            player_id: "actor".to_string(),
+            expected_turn_number: 1,
             slot: AbilitySlot::Special,
-            damage_percent: 0,
-            crit_damage_percent: 0,
-            crit_chance_basis_points: 0,
-            strikes_per_turn: 1,
-            attack: Attack::Strike(StrikeAttack {
-                range: 100_000,
-                terrain: TerrainProfile::None,
-                self_damage: 0,
-            }),
-            effects: &[SpecialEffect {
-                trigger: EffectTrigger::OnFire,
-                kind: EffectKind::HealthTransfer,
-                magnitude: 100,
-                magnitude_secondary: 0,
-                duration_turns: 0,
-            }],
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("target".to_string()),
+            secondary_target_player_id: None,
         };
-        let command = ability_command("cmd-1", Some("defender"));
-        let mut damage = BTreeMap::new();
 
-        let healed = apply_support_effects(&mut state, &mut damage, &ability, &command);
+        let result = apply_ability(&mut state, &command);
 
-        assert_eq!(healed, 0, "a full-health ally can receive nothing");
+        let CommandResult::Accepted(_outcome) = result else {
+            panic!("expected Zeke's Lifeshare to be accepted: {result:?}");
+        };
         assert_eq!(
-            state.player("attacker").map(|player| player.health),
+            state.player("actor").map(|player| player.health),
             before_actor,
             "the actor must not lose health that nobody received",
         );
         assert_eq!(
-            state.player("defender").map(|player| player.health),
+            state.player("target").map(|player| player.health),
             before_target,
+            "a full-health ally can receive nothing",
+        );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // P1: `resolve_effect` is now reachable from a real command, for every effect kind —
+    // not just the three `command.rs` used to resolve inline.
+    // -----------------------------------------------------------------------------------
+
+    #[test]
+    fn teleport_effect_actually_relocates_arzum_through_apply_ability() {
+        // The flagship example the wiring gap was named for (`todolist.md` P1): "In a real
+        // match Arzum still does not teleport." This proves she now does, submitted as a
+        // real command through the public entry point — not by calling
+        // `relocation::resolve` directly, the way `relocation.rs`'s own tests do.
+        let mut actor = player("actor", "arzum", FixedPoint::new(0, 0));
+        actor.special_gauge = GAUGE_FULL;
+        let target_position = FixedPoint::new(5 * fixed::POSITION_SCALE, 0);
+        let target = player("target", "huck", target_position);
+        let mut state = state_with_players("actor", vec![actor, target]);
+        let command = AbilityCommand {
+            command_id: "cmd-1".to_string(),
+            player_id: "actor".to_string(),
+            expected_turn_number: 1,
+            slot: AbilitySlot::Special,
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("target".to_string()),
+            secondary_target_player_id: None,
+        };
+
+        let result = apply_ability(&mut state, &command);
+
+        let CommandResult::Accepted(_outcome) = result else {
+            panic!("expected Arzum's Chain Strike to be accepted: {result:?}");
+        };
+        let Some(actor) = state.player("actor") else {
+            panic!("actor must still exist");
+        };
+        // The only living opponent is `target` itself, so Chain Strike's "random nearby
+        // enemy within 12 BW of the first target" draw has exactly one candidate — the
+        // first target, trivially 0 BW from itself — making the destination deterministic
+        // regardless of the RNG seed.
+        assert_eq!(
+            actor.position, target_position,
+            "Chain Strike's Teleport effect must actually relocate the actor, not just \
+             validate the command"
+        );
+    }
+
+    #[test]
+    fn push_effect_actually_displaces_the_target_through_apply_ability() {
+        // No launch character attaches `EffectKind::Knockback` itself (`character.rs`
+        // grepped: zero hits — `displacement.rs`'s own module doc comment naming
+        // `ROBERTO_KNOCKBACK` as a live caller is stale). Natomica's Repulse attaches
+        // `Push`, which shares the exact same resolver
+        // (`resolve::displacement::resolve_radial_displacement`) as `Knockback` — both are
+        // dispatched to it by `resolve_effect`'s own match arm. This proves that resolver
+        // family is now reachable from a real command, submitted through the public
+        // `apply_ability` entry point rather than by calling `displacement::resolve`
+        // directly.
+        let mut actor = player("actor", "natomica", FixedPoint::new(0, 0));
+        actor.special_gauge = GAUGE_FULL;
+        let target = player(
+            "target",
+            "natomica",
+            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
+        );
+        let mut state = state_with_players("actor", vec![actor, target]);
+        let before = state.player("target").map(|p| p.position);
+        let command = AbilityCommand {
+            command_id: "cmd-1".to_string(),
+            player_id: "actor".to_string(),
+            expected_turn_number: 1,
+            slot: AbilitySlot::Special,
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: None,
+            secondary_target_player_id: None,
+        };
+
+        let result = apply_ability(&mut state, &command);
+
+        let CommandResult::Accepted(_outcome) = result else {
+            panic!("expected Natomica's Repulse to be accepted: {result:?}");
+        };
+        let after = state.player("target").map(|p| p.position);
+        assert_ne!(
+            before, after,
+            "Push must have actually displaced the target, not merely validated the command"
+        );
+    }
+
+    #[test]
+    fn terrain_destroying_ability_reports_nonzero_terrain_cells_removed() {
+        // Huck's Haymaker (`ability_command`'s own default) carves a crater on impact.
+        // `base_state`'s terrain starts fully `Empty`, which would make this vacuous, so
+        // solid ground is seeded around the defender first.
+        let mut state = base_state();
+        for y in 0..5i32 {
+            for x in 0..5i32 {
+                let _ = terrain::set_material(&mut state.terrain, x, y, Material::Soil);
+            }
+        }
+        let command = ability_command("cmd-1", Some("defender"));
+
+        let result = apply_ability(&mut state, &command);
+
+        let CommandResult::Accepted(outcome) = result else {
+            panic!("expected Haymaker to be accepted: {result:?}");
+        };
+        assert!(
+            outcome.terrain_cells_removed > 0,
+            "a terrain-destroying ability must report the cells it actually destroyed, not \
+             the always-zero value from before P2"
+        );
+    }
+
+    #[test]
+    fn effect_resolution_failure_leaves_state_untouched() {
+        // Huck's Body Throw (Special) needs both a primary and a secondary target for its
+        // `Relocate` effect. Submitting it with only a primary is a legal *command* —
+        // neither target field is individually required by `validate_ability`, and the
+        // primary alone is enough to pass the reach check — but an *unresolvable* action:
+        // the effects loop fails partway through, after this same command's own direct
+        // damage (40% to the primary) has already landed in the cloned working copy
+        // `resolve_ability` operates on. Proves `apply_ability`'s clone-and-discard
+        // atomicity still holds even when the failure originates deep in the new effects
+        // loop, not just at validation, and does so through the public entry point with a
+        // real roster ability rather than a synthetic one.
+        let mut state = base_state();
+        if let Some(attacker) = state.player_mut("attacker") {
+            attacker.special_gauge = GAUGE_FULL;
+        }
+        let before = state.clone();
+        let mut command = ability_command("cmd-1", Some("defender"));
+        command.slot = AbilitySlot::Special;
+        // Deliberately no `secondary_target_player_id`: `Relocate` needs one.
+
+        let result = apply_ability(&mut state, &command);
+
+        assert_eq!(
+            result,
+            CommandResult::Rejected(CommandRejection::InvalidTarget)
+        );
+        assert_eq!(
+            state, before,
+            "a failure inside the effects loop, after damage already landed in the working \
+             clone, must still leave the real state byte-identical"
         );
     }
 

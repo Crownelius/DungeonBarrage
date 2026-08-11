@@ -697,6 +697,7 @@ mod tests {
         state: SimulationState,
         rng: Rng,
         damage: BTreeMap<String, DamageEvent>,
+        terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         objects_created: Vec<PersistentObject>,
     }
@@ -707,6 +708,7 @@ mod tests {
                 state: test_state(players),
                 rng: Rng::from_state(seed),
                 damage: BTreeMap::new(),
+                terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 objects_created: Vec::new(),
             }
@@ -727,6 +729,7 @@ mod tests {
                 secondary_target_id,
                 impact_point,
                 damage: &mut self.damage,
+                terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 objects_created: &mut self.objects_created,
             }

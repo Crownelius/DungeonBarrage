@@ -642,6 +642,7 @@ mod tests {
         let effect = teleport_effect(50, 200);
 
         {
+            let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
                 state: &mut state,
                 rng: &mut rng,
@@ -650,6 +651,7 @@ mod tests {
                 secondary_target_id: None,
                 impact_point: FixedPoint::ZERO,
                 damage: &mut damage,
+                terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 objects_created: &mut objects_created,
             };
@@ -700,6 +702,7 @@ mod tests {
         let mut objects_created: Vec<PersistentObject> = Vec::new();
         let effect = teleport_effect(50, 200);
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -708,6 +711,7 @@ mod tests {
             secondary_target_id: None,
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };
@@ -736,6 +740,7 @@ mod tests {
         let mut objects_created: Vec<PersistentObject> = Vec::new();
         let effect = teleport_effect(radius, 0);
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -744,6 +749,7 @@ mod tests {
             secondary_target_id: None,
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };
@@ -774,6 +780,7 @@ mod tests {
             let mut damage = BTreeMap::new();
             let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
             let mut objects_created: Vec<PersistentObject> = Vec::new();
+            let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
                 state: &mut state,
                 rng: &mut rng,
@@ -782,6 +789,7 @@ mod tests {
                 secondary_target_id: None,
                 impact_point: FixedPoint::ZERO,
                 damage: &mut damage,
+                terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 objects_created: &mut objects_created,
             };
@@ -808,6 +816,7 @@ mod tests {
             let mut damage = BTreeMap::new();
             let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
             let mut objects_created: Vec<PersistentObject> = Vec::new();
+            let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
                 state: &mut state,
                 rng: &mut rng,
@@ -816,6 +825,7 @@ mod tests {
                 secondary_target_id: None,
                 impact_point: FixedPoint::ZERO,
                 damage: &mut damage,
+                terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 objects_created: &mut objects_created,
             };
@@ -862,6 +872,7 @@ mod tests {
             let mut damage = BTreeMap::new();
             let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
             let mut objects_created: Vec<PersistentObject> = Vec::new();
+            let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
                 state: &mut state,
                 rng: &mut rng,
@@ -870,6 +881,7 @@ mod tests {
                 secondary_target_id: None,
                 impact_point: FixedPoint::ZERO,
                 damage: &mut damage,
+                terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 objects_created: &mut objects_created,
             };
@@ -910,6 +922,7 @@ mod tests {
         let mut objects_created: Vec<PersistentObject> = Vec::new();
         let effect = relocate_effect(25);
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -918,6 +931,7 @@ mod tests {
             secondary_target_id: Some("destination"),
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };
@@ -965,6 +979,7 @@ mod tests {
         let mut objects_created: Vec<PersistentObject> = Vec::new();
         let effect = relocate_effect(25);
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -973,6 +988,7 @@ mod tests {
             secondary_target_id: Some("destination"),
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };
@@ -1009,6 +1025,7 @@ mod tests {
         let mut objects_created: Vec<PersistentObject> = Vec::new();
         let effect = relocate_effect(25);
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -1017,6 +1034,7 @@ mod tests {
             secondary_target_id: Some("destination"),
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };
@@ -1050,6 +1068,7 @@ mod tests {
         let mut objects_created: Vec<PersistentObject> = Vec::new();
         let effect = obscure_effect(radius, 2);
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -1058,6 +1077,7 @@ mod tests {
             secondary_target_id: None,
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };
@@ -1103,6 +1123,7 @@ mod tests {
             duration_turns: 0,
         };
 
+        let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
             state: &mut state,
             rng: &mut rng,
@@ -1111,6 +1132,7 @@ mod tests {
             secondary_target_id: None,
             impact_point: FixedPoint::ZERO,
             damage: &mut damage,
+            terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
         };

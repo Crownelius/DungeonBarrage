@@ -32,12 +32,14 @@
 //! whatever it is given, bugs included, so it may only be generated from reviewed code.
 
 pub mod ballistics;
+pub mod blocks;
 pub mod canonical;
 pub mod character;
 pub mod command;
 pub mod error;
 pub mod fixed;
 pub mod hash;
+pub mod map;
 pub mod resolve;
 pub mod rng;
 pub mod terrain;

@@ -1,9 +1,13 @@
 //! Effect resolution — the layer that turns a validated command into a game.
 //!
 //! `command.rs` decides whether an action is *permitted*. This module decides what it
-//! *does*. The distinction is why 19 of 22 [`EffectKind`] variants were declared, validated,
-//! and completely inert: the command boundary was specified as "validation + application"
-//! and delivered exactly that (`PROGRAM_PLAN.md` §2).
+//! *does*. The distinction is why 19 of 22 [`EffectKind`] variants were, for a time,
+//! declared, validated, and completely inert: the command boundary was specified as
+//! "validation + application" and delivered exactly that (`PROGRAM_PLAN.md` §2). As of
+//! `todolist.md` P1, `command.rs::apply_ability` calls [`resolve_effect`] for every effect
+//! on the resolved ability, in declaration order, after damage resolution — so every
+//! variant this module can resolve is now actually reachable from a real command, not just
+//! from a resolver's own unit tests.
 //!
 //! # The one rule
 //!
@@ -24,6 +28,8 @@ pub mod displacement;
 pub mod objects;
 pub mod relocation;
 pub mod status;
+pub mod support;
+pub mod terrain_damage;
 
 use crate::error::SimResult;
 use crate::fixed::FixedPoint;
@@ -58,6 +64,14 @@ pub struct ResolveContext<'a> {
     pub terrain_ops: &'a mut Vec<TerrainOperation>,
     /// Persistent objects created by this action.
     pub objects_created: &'a mut Vec<PersistentObject>,
+    /// Terrain cells removed by this action, accumulated across every
+    /// `terrain::apply_operation` call any resolver makes. Seeded by
+    /// `command.rs::apply_ability` from the primary attack's own terrain removal and
+    /// copied into `CommandOutcome::terrain_cells_removed` once every effect has resolved
+    /// — this is what feeds the Excavator XP bonus (`docs/PROGRESSION.md` §2,
+    /// `todolist.md` P2). A resolver that calls `terrain::apply_operation` must add the
+    /// returned count here rather than discarding it with `let _removed = …`.
+    pub terrain_cells_removed: &'a mut u32,
 }
 
 impl ResolveContext<'_> {
@@ -150,8 +164,12 @@ pub fn resolve_effect(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> S
         | EffectKind::Return
         | EffectKind::Tunnel => attack_mods::resolve(ctx, effect),
 
-        // Already resolved inside `command.rs` before this layer existed. Left there rather
-        // than moved, so this change adds behavior without altering behavior that works.
-        EffectKind::Heal | EffectKind::HealthTransfer | EffectKind::SelfDamage => Ok(()),
+        // Formerly resolved inline inside `command.rs`, with this arm routed to a silent
+        // `Ok(())` — two resolution paths for one concept, and precisely the shape of bug
+        // that left the other 19 kinds inert. `command.rs` no longer resolves these three
+        // itself; `resolve::support` is now the only place they resolve (`todolist.md` P1).
+        EffectKind::Heal | EffectKind::HealthTransfer | EffectKind::SelfDamage => {
+            support::resolve(ctx, effect)
+        }
     }
 }
