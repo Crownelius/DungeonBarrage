@@ -138,6 +138,7 @@ pub fn check_and_finalize(state: &mut SimulationState) -> SimResult<MatchOutcome
 mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
+    use crate::types::TurnEndReason;
     use crate::types::{Appearance, Material, PersistentObjectKind, PlayerState, TerrainMask};
 
     // -----------------------------------------------------------------------------------
@@ -173,6 +174,8 @@ mod tests {
 
     fn base_state(players: Vec<PlayerState>) -> SimulationState {
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             simulation_version: 1,
             content_version: 1,
             tick: 0,

@@ -39,6 +39,7 @@ use db_sim_core::hash::hash_state;
 use db_sim_core::match_host::MatchHost;
 use db_sim_core::types::{
     AbilityCommand, AbilitySlot, Appearance, MatchPhase, PlayerState, SimulationState,
+    TurnEndReason,
 };
 use db_sim_core::{CONTENT_VERSION, SIMULATION_VERSION, map};
 
@@ -105,6 +106,8 @@ fn duel(seed: u64, left: &str, right: &str, health: u16, opponent_spawn: usize) 
     players.sort_by(|l, r| l.id.cmp(&r.id));
 
     SimulationState {
+        pending_turn_end_reason: TurnEndReason::Passed,
+        last_turn_end_reason: TurnEndReason::Passed,
         simulation_version: SIMULATION_VERSION,
         content_version: CONTENT_VERSION,
         tick: 0,
@@ -229,8 +232,11 @@ fn assert_vector(name: &str, actual: &str, expected: &str) {
 // ---------------------------------------------------------------------------
 // The corpus.
 //
-// Generated 2026-08-07 from the engine at SIMULATION_VERSION 3. Every hash below was
-// produced by reviewed code; see the module docs for the regeneration rule.
+// REGENERATED 2026-08-07 at SIMULATION_VERSION 4. `pending_turn_end_reason` and
+// `last_turn_end_reason` joined the hashed metadata (`todolist.md` P11), so every vector
+// moved. Previous values are recorded per-vector below. The scripts and their assertions are
+// unchanged — only the encoding is — which is exactly the case the regeneration rule exists
+// to make visible rather than silent.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -239,7 +245,8 @@ fn golden_all_passes_terminates_identically() {
     // and the forced draw. This is the one that catches a change to match termination.
     let script = vec![Step::Pass; 64];
     let actual = run(duel(1, "arzum", "emi", 300, 5), &script);
-    assert_vector("all_passes", &actual, "e828d490e955f3d7");
+    // Was "e828d490e955f3d7" at SIMULATION_VERSION 3.
+    assert_vector("all_passes", &actual, "876de8693b5b75a8");
 }
 
 #[test]
@@ -254,7 +261,8 @@ fn golden_walking_duel() {
         Step::Pass,
     ];
     let actual = run(duel(7, "arzum", "natomica", 300, 5), &script);
-    assert_vector("walking_duel", &actual, "35636b623102bbed");
+    // Was "35636b623102bbed" at SIMULATION_VERSION 3.
+    assert_vector("walking_duel", &actual, "b28768a38619df88");
 }
 
 #[test]
@@ -282,7 +290,8 @@ fn golden_firing_duel() {
         outcome.total_health_lost > 0,
         "a firing vector must actually deal damage, or it covers nothing: {outcome:?}",
     );
-    assert_vector("firing_duel", &actual, "7b49a0275beafc1f");
+    // Was "7b49a0275beafc1f" at SIMULATION_VERSION 3.
+    assert_vector("firing_duel", &actual, "2fbdca99f94c944c");
 }
 
 #[test]
@@ -308,7 +317,8 @@ fn golden_mixed_actions() {
         outcome.turns_elapsed > 1,
         "a mixed script must advance several turns: {outcome:?}",
     );
-    assert_vector("mixed_actions", &actual, "112717b8831056f8");
+    // Was "112717b8831056f8" at SIMULATION_VERSION 3.
+    assert_vector("mixed_actions", &actual, "765e76572c02b6b9");
 }
 
 #[test]
@@ -328,7 +338,8 @@ fn golden_low_health_duel_reaches_a_decision() {
         outcome.total_health_lost > 0,
         "the decision vector must actually damage somebody: {outcome:?}",
     );
-    assert_vector("low_health_duel", &actual, "b88af74446995c79");
+    // Was "b88af74446995c79" at SIMULATION_VERSION 3.
+    assert_vector("low_health_duel", &actual, "06db50b907568060");
 }
 
 #[test]

@@ -372,6 +372,7 @@ pub fn settle(state: &mut SimulationState) -> SimResult<u32> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, EffectKind, MatchPhase, Material, PlayerState, SimulationState, StatusEffect,
         TerrainMask,
@@ -408,6 +409,8 @@ mod tests {
         let mut players = players;
         players.sort_by(|a, b| a.id.cmp(&b.id));
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             simulation_version: 2,
             content_version: 1,
             tick: 0,

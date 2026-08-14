@@ -234,6 +234,7 @@ mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
     use crate::terrain::create_mask;
+    use crate::types::TurnEndReason;
     use crate::types::{ErosionAxis, MatchPhase, Material, MaterialMask};
 
     fn state_with(blocks: Vec<TerrainBlock>, fill: Material) -> SimulationState {
@@ -241,6 +242,8 @@ mod tests {
             panic!("fixture invariant: mask must build");
         };
         let mut state = SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             simulation_version: 2,
             content_version: 1,
             tick: 0,

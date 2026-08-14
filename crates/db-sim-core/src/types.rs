@@ -824,11 +824,13 @@ pub enum MatchOutcome {
 /// Recorded so the result panel and replay can distinguish a committed attack from a
 /// timeout, which look identical in the resulting state but mean very different things
 /// about the player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TurnEndReason {
     /// The player committed their one attack.
     Attacked,
-    /// The player explicitly passed.
+    /// The player explicitly passed. The default: a turn that ends without anyone saying
+    /// why was, behaviourally, a pass.
+    #[default]
     Passed,
     /// The planning deadline expired and the server applied a timeout action.
     TimedOut,
@@ -880,6 +882,20 @@ pub struct SimulationState {
     pub next_object_sequence: u32,
     /// PRNG state. Advanced only through the seeded generator.
     pub rng_state: u64,
+    /// Why the turn currently being wound down is ending.
+    ///
+    /// Set by the orchestrator *before* it drives the scheduler, because the orchestrator is
+    /// the only layer that knows whether a turn ended by attack, pass, or timeout. The
+    /// scheduler reads it when it commits the turn. Separate from `last_turn_end_reason`
+    /// because this is an intent and that is a record — conflating them would mean a
+    /// half-driven turn reports a reason that never happened.
+    pub pending_turn_end_reason: TurnEndReason,
+    /// Why the most recently completed turn ended.
+    ///
+    /// Written by `scheduler::end_turn`, hashed like any other gameplay field. Turn-timeout
+    /// rate is a named launch metric (`PRODUCT_SPEC.md` §10) and cannot be measured from
+    /// state that never records it.
+    pub last_turn_end_reason: TurnEndReason,
 }
 
 impl SimulationState {

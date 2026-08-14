@@ -57,7 +57,7 @@ use crate::fixed::FixedPoint;
 use crate::types::{
     AbilitySlot, EffectKind, EffectTrigger, ErosionAxis, MatchPhase, Material, MaterialMask,
     MovementClass, PersistentObject, PersistentObjectKind, PlayerState, RangeTier, SimulationState,
-    StatusEffect, TerrainMask, TerrainOperation, TerrainShape,
+    StatusEffect, TerrainMask, TerrainOperation, TerrainShape, TurnEndReason,
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +80,19 @@ const OBJECTS_DOMAIN_TAG: u8 = 0x05;
 /// Local for the same reason [`OBJECTS_DOMAIN_TAG`] is: `canonical::domain` predates
 /// blocks and adding to it would be a cross-module change for a tag only this file uses.
 const BLOCKS_DOMAIN_TAG: u8 = 0x06;
+
+/// Stable discriminants for [`TurnEndReason`].
+///
+/// Hand-assigned, never `as u8`: reordering the enum would otherwise silently change every
+/// historical hash.
+const fn turn_end_reason_discriminant(reason: TurnEndReason) -> u8 {
+    match reason {
+        TurnEndReason::Attacked => 0x00,
+        TurnEndReason::Passed => 0x01,
+        TurnEndReason::TimedOut => 0x02,
+        TurnEndReason::Eliminated => 0x03,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Enum discriminant mappings
@@ -521,6 +534,12 @@ impl Canonical for SimulationState {
         hasher.write_u32(self.next_terrain_sequence);
         hasher.write_u32(self.next_object_sequence);
         hasher.write_u64(self.rng_state);
+        // Both turn-end reasons are gameplay state: `last_turn_end_reason` feeds the result
+        // panel and the turn-timeout metric, and `pending_turn_end_reason` decides what the
+        // scheduler will record next. Two states differing only in these are different
+        // states (`todolist.md` P11).
+        hasher.write_u8(turn_end_reason_discriminant(self.pending_turn_end_reason));
+        hasher.write_u8(turn_end_reason_discriminant(self.last_turn_end_reason));
 
         hasher.write_domain_separator(domain::PLAYERS);
         // Defensive sort by id: see the top-level "sort order" rule.
@@ -663,6 +682,8 @@ mod tests {
 
     fn sample_state() -> SimulationState {
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             blocks: Vec::new(),
             simulation_version: 2,
             content_version: 1,
@@ -1155,7 +1176,12 @@ mod tests {
 
     #[test]
     fn known_answer_vector_sample_state() {
-        // REGENERATED 2026-08-07 when the destructible-block section was added to the state
+        // REGENERATED 2026-08-07 (second time) when pending_turn_end_reason and
+        // last_turn_end_reason joined the metadata section (todolist.md P11 -- turn-timeout
+        // rate is a named launch metric and cannot be measured from unrecorded state).
+        // Previous value was "f79a8a6acbc1fa38". SIMULATION_VERSION moved 3 -> 4.
+        //
+        // REGENERATED 2026-08-07 (first time) when the destructible-block section was added to the state
         // encoding (ADR 0005 requires block health to be hashed, since the terrain cells are
         // derived from it). The previous value was "40c9ceef445ae69d".
         //
@@ -1164,7 +1190,7 @@ mod tests {
         // `SIMULATION_VERSION` moved 2 -> 3 in the same commit, so no replay can be
         // misinterpreted across the boundary. `MODULE_OWNERSHIP.md` forbids regenerating a
         // vector *silently* -- this comment and that version bump are what make it not silent.
-        assert_eq!(hash_state(&sample_state()), "f79a8a6acbc1fa38");
+        assert_eq!(hash_state(&sample_state()), "1ff6ff01d76463ce");
     }
 
     #[test]

@@ -411,6 +411,7 @@ fn resolve_wall_impact(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> 
 mod tests {
     use super::*;
     use crate::rng::Rng;
+    use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PersistentObject,
         PlayerState, SimulationState, StatusEffect, TerrainMask, TerrainOperation,
@@ -460,6 +461,8 @@ mod tests {
             players.sort_by(|a, b| a.id.cmp(&b.id));
             Self {
                 state: SimulationState {
+                    pending_turn_end_reason: TurnEndReason::Passed,
+                    last_turn_end_reason: TurnEndReason::Passed,
                     blocks: Vec::new(),
                     simulation_version: 2,
                     content_version: 1,

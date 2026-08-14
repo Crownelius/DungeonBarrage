@@ -924,6 +924,8 @@ mod tests {
         let attacker = player("attacker", "huck", FixedPoint::new(0, 0));
         let defender = player("defender", "huck", FixedPoint::new(1024, 0));
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             blocks: Vec::new(),
             simulation_version: 2,
             content_version: 1,
@@ -951,6 +953,8 @@ mod tests {
     /// [`apply_ability`] entry point rather than by calling a resolver directly.
     fn state_with_players(active_player_id: &str, players: Vec<PlayerState>) -> SimulationState {
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             blocks: Vec::new(),
             simulation_version: 2,
             content_version: 1,

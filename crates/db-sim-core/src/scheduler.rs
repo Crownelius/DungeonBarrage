@@ -161,7 +161,10 @@ fn leave_victory_check(state: &mut SimulationState) -> SimResult<MatchPhase> {
     }
 
     if matches!(outcome, MatchOutcome::InProgress) {
-        end_turn(state, TurnEndReason::Attacked)?;
+        // `todolist.md` P11: this used to hardcode `Attacked`, which made a pass, a
+        // timeout, and a committed attack indistinguishable downstream. The orchestrator
+        // declares the real reason on the state before driving the cycle.
+        end_turn(state, state.pending_turn_end_reason)?;
         // `end_turn` deliberately leaves `state.phase` alone (see its own doc comment) —
         // this is the one call site responsible for choosing what phase the new turn
         // starts in.
@@ -219,12 +222,16 @@ pub fn end_turn(state: &mut SimulationState, reason: TurnEndReason) -> SimResult
     // silently folded into "just another turn end" — the same discipline `resolve_effect`
     // uses for `EffectKind`. A future replay or telemetry consumer is the intended reader of
     // this parameter; this module is not that consumer.
+    // Recorded rather than discarded (`todolist.md` P11). Matched exhaustively above its
+    // assignment so a newly added variant still fails this build rather than being folded
+    // silently into "just another turn end".
     match reason {
         TurnEndReason::Attacked
         | TurnEndReason::Passed
         | TurnEndReason::TimedOut
         | TurnEndReason::Eliminated => {}
     }
+    state.last_turn_end_reason = reason;
 
     let Some(next_id) = next_active_player(state) else {
         return Err(SimError::OutOfRange {
@@ -388,6 +395,8 @@ mod tests {
 
     fn base_state(players: Vec<PlayerState>) -> SimulationState {
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             simulation_version: 2,
             content_version: 1,
             tick: 0,

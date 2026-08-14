@@ -58,7 +58,7 @@ pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSIT
 /// Incremented whenever a change could alter the outcome of a replayed match — including
 /// a change to the canonical encoding. Every match records the version it ran under so
 /// old replays stay interpretable (`PLATFORM_STRATEGY.md` §6).
-pub const SIMULATION_VERSION: u32 = 3;
+pub const SIMULATION_VERSION: u32 = 4;
 
 /// Version of the gameplay content tables (weapons, maps, modes).
 pub const CONTENT_VERSION: u32 = 1;

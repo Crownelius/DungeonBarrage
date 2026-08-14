@@ -73,6 +73,17 @@ impl MatchHost {
         if self.state.phase == MatchPhase::TurnStart {
             scheduler::advance_phase(&mut self.state)?;
         }
+        // `todolist.md` P12: a gauge can fill from damage *taken* during someone else's turn,
+        // or from being healed. Raising the prompt only for whoever just acted meant such a
+        // player reached a full gauge and was never offered their one-time choice until they
+        // next attacked — `CHARACTERS.md` §2 says it happens the first time the gauge fills.
+        //
+        // Prompted at the start of the owed player's own turn rather than the instant the
+        // gauge fills, because `MatchPhase` is global: only one player can be choosing at a
+        // time, and interrupting someone else's turn to ask a third party would need a
+        // per-player phase this design does not have.
+        let actor = self.state.active_player_id.clone();
+        self.raise_passive_selection_if_due(&actor);
         Ok(())
     }
 
@@ -230,14 +241,15 @@ impl MatchHost {
     /// an eliminated team never produced a winner. Do not reintroduce that: drive the
     /// scheduler, never duplicate it.
     ///
-    /// `reason` is accepted and threaded for the API's sake but the scheduler currently
-    /// hardcodes `TurnEndReason::Attacked` internally, so pass, timeout, and attack are
-    /// indistinguishable downstream. Recorded in `todolist.md` rather than papered over.
-    ///
     /// Bounded rather than looped-until-done: a phase machine that cannot progress must
     /// surface as a stuck match, not a hung process.
-    fn finish_turn(&mut self, _reason: TurnEndReason) -> SimResult<()> {
+    fn finish_turn(&mut self, reason: TurnEndReason) -> SimResult<()> {
         const MAX_PHASE_STEPS: u32 = 32;
+
+        // Declare why this turn is ending before driving the cycle. The scheduler commits it
+        // when it reaches `end_turn`; this layer is the only one that knows the difference
+        // between an attack, a pass, and a timeout (`todolist.md` P11).
+        self.state.pending_turn_end_reason = reason;
 
         let mut steps = 0u32;
         loop {
@@ -306,6 +318,8 @@ mod tests {
         players.sort_by(|left, right| left.id.cmp(&right.id));
 
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             simulation_version: crate::SIMULATION_VERSION,
             content_version: crate::CONTENT_VERSION,
             tick: 0,

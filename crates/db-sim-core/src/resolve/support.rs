@@ -209,6 +209,7 @@ mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
     use crate::rng::Rng;
+    use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObject, PlayerState,
         SimulationState, TerrainMask, TerrainOperation,
@@ -233,6 +234,8 @@ mod tests {
 
     fn test_state(players: Vec<PlayerState>) -> SimulationState {
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             blocks: Vec::new(),
             simulation_version: 2,
             content_version: 1,

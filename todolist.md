@@ -256,7 +256,7 @@ tree. The workflow runtime's failure record lives in a transcript, not the repos
 
 ---
 
-## 🟠 P11 — `TurnEndReason` is accepted everywhere and recorded nowhere
+## ✅ P11 — `TurnEndReason` is accepted everywhere and recorded nowhere — RESOLVED 2026-08-07
 
 **The problem.** `scheduler::end_turn` takes a `TurnEndReason` and matches it exhaustively,
 but every arm does the same thing, and `leave_victory_check` hardcodes
@@ -283,7 +283,7 @@ nothing reads as intentional design until you follow it to the call site.
 
 ---
 
-## 🟠 P12 — Nothing raises the passive-selection prompt except the host
+## ✅ P12 — The passive prompt only fired for the acting player — RESOLVED 2026-08-07
 
 **The problem.** `MatchPhase::PassiveSelection` is now set by `MatchHost::submit_ability`
 when an actor's gauge fills for the first time — but that is the *only* producer. A gauge

@@ -514,6 +514,7 @@ fn cell_to_position(cell: (i32, i32)) -> SimResult<FixedPoint> {
 )]
 mod tests {
     use super::*;
+    use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, EffectTrigger, MatchPhase, Material, PlayerState, SimulationState,
         StatusEffect, TerrainOperation,
@@ -549,6 +550,8 @@ mod tests {
 
     fn make_state(terrain: TerrainMask, players: Vec<PlayerState>) -> SimulationState {
         SimulationState {
+            pending_turn_end_reason: TurnEndReason::Passed,
+            last_turn_end_reason: TurnEndReason::Passed,
             blocks: Vec::new(),
             simulation_version: 1,
             content_version: 1,
