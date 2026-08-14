@@ -146,7 +146,7 @@ reads clearly to a player deciding whether they can still stand there.
 
 ---
 
-## 🟠 P4 — No turn scheduler; matches cannot progress
+## ✅ P4 — No turn scheduler; matches cannot progress — RESOLVED 2026-08-07
 
 **The problem.** `MatchPhase` exists as an enum and is hashed. Nothing advances it. There is
 no turn cycle, no timer, no next-player selection, no victory check.
@@ -159,9 +159,18 @@ no turn cycle, no timer, no next-player selection, no victory check.
 2. **A concrete state machine in `scheduler.rs` with no trait**, added later if the second mode
    materializes. Less abstraction now; a refactor of a load-bearing file later.
 
+**Resolved via solution 2**, plus `match_host.rs` as the orchestrator that drives it. The
+trait can be extracted when the real-time mode actually needs it; extracting it now would be
+an abstraction with one implementation.
+
+**A match runs end to end.** `MatchHost` sequences scheduler, movement, command, victory, and
+block damage. Proven by tests that start a real map with real characters, walk, pass, rotate,
+eliminate a team, and reach a terminal state — including one that asserts a match of nothing
+but passes still terminates via the hard turn limit.
+
 ---
 
-## 🟠 P5 — No movement, maps, or spawns
+## ✅ P5 — No movement, maps, or spawns — RESOLVED 2026-08-07
 
 **The problem.** `movement_remaining` is tracked and hashed; walking, jumping, slopes, and
 falls are unimplemented. There is no map definition, no loading, and no spawn placement.
@@ -173,6 +182,11 @@ falls are unimplemented. There is no map definition, no loading, and no spawn pl
    never ends up inside terrain; locomotion should not re-derive it.
 2. **Fold movement into the scheduler** as part of the `Movement` phase. Fewer files, but it
    couples locomotion to turn structure and the real-time mode would have to unpick it.
+
+**Resolved via solution 1.** `movement.rs` reuses the swept-collision technique proven in
+`resolve/displacement.rs` rather than deriving a second one — two collision models would
+disagree and one of them would let a player into a wall. `map.rs` supplies definitions,
+spawns, and the eight-block horizontal test array.
 
 ---
 
@@ -225,6 +239,56 @@ tree. The workflow runtime's failure record lives in a transcript, not the repos
    produced nothing.** *(Recommended.)* Three of four "failed" M1.5 agents had complete files.
 2. **Write run outcomes to the repository** so a delegation failure is auditable from git
    rather than from a transcript that expires.
+
+---
+
+---
+
+## 🟠 P11 — `TurnEndReason` is accepted everywhere and recorded nowhere
+
+**The problem.** `scheduler::end_turn` takes a `TurnEndReason` and matches it exhaustively,
+but every arm does the same thing, and `leave_victory_check` hardcodes
+`TurnEndReason::Attacked` regardless of how the turn actually ended. `MatchHost` threads the
+real reason in and it is discarded. So a pass, a timeout, and a committed attack are
+indistinguishable downstream.
+
+**Why it matters.** `PRODUCT_SPEC.md` §2 wants the result panel and replay to distinguish a
+timeout from a deliberate action — they look identical in the resulting state but say very
+different things about the player. Turn-timeout rate is also a named launch metric
+(`PRODUCT_SPEC.md` §10), and it cannot be measured from state that never records it.
+
+**Solutions.**
+
+1. **Record it on `SimulationState`** as `last_turn_end_reason`, hashed like any other
+   gameplay field, and have `leave_victory_check` take the reason from its caller instead of
+   hardcoding. *(Recommended.)* Small, and it makes the existing parameter honest.
+2. **Emit it as a match event** rather than state, once an event log exists (P6 territory).
+   Better long-term home — replay and telemetry both want events, not snapshots — but it
+   depends on a system that does not exist yet.
+
+**Trap:** the parameter currently *looks* wired. An exhaustive match on a value that changes
+nothing reads as intentional design until you follow it to the call site.
+
+---
+
+## 🟠 P12 — Nothing raises the passive-selection prompt except the host
+
+**The problem.** `MatchPhase::PassiveSelection` is now set by `MatchHost::submit_ability`
+when an actor's gauge fills for the first time — but that is the *only* producer. A gauge
+that fills from damage **taken** during another player's turn does not raise it, so a player
+can reach a full gauge and never be offered the one-time passive choice until they next
+attack.
+
+**Why it matters.** `CHARACTERS.md` §2 says the choice happens the first time the gauge
+fills, not the first time the player attacks afterwards.
+
+**Solutions.**
+
+1. **Check every player's gauge at the `StatusResolution` boundary**, not just the actor's,
+   and raise the interrupt for whoever is owed a choice. *(Recommended.)* Catches gauge fills
+   from damage taken and from healing an ally.
+2. **Check at turn start for the incoming player only.** Simpler, but delays the prompt until
+   that player's own turn, which is a visible lag between "gauge full" and "choose".
 
 ---
 

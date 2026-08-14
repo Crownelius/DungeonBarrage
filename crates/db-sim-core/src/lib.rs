@@ -41,6 +41,7 @@ pub mod error;
 pub mod fixed;
 pub mod hash;
 pub mod map;
+pub mod match_host;
 pub mod movement;
 pub mod resolve;
 pub mod rng;
