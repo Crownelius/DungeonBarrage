@@ -365,7 +365,12 @@ fn resolve_cluster(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimR
         // Cell count discarded: `ResolveContext` has nowhere to accumulate it until
         // `resolve_effect` is wired into `command.rs`. Tracked in PROGRAM_PLAN §6 —
         // `CommandOutcome::terrain_cells_removed` feeds the Excavator XP bonus.
-        let _removed = terrain::apply_operation(&mut ctx.state.terrain, &crater_op);
+        // Routed through `block_ops` so block health stays the authority inside a
+        // block span (ADR 0005), and the count is accumulated rather than discarded
+        // (`todolist.md` P2 -- it feeds the Excavator XP bonus).
+        *ctx.terrain_cells_removed = ctx
+            .terrain_cells_removed
+            .saturating_add(crate::block_ops::apply_operation(ctx.state, &crater_op));
         ctx.terrain_ops.push(crater_op);
 
         if let Some(target_id) = nearest_living_target(ctx.state, &opponent_ids, landing) {
@@ -553,7 +558,12 @@ fn resolve_tunnel(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
     // Cell count discarded: `ResolveContext` has nowhere to accumulate it until
     // `resolve_effect` is wired into `command.rs`. Tracked in PROGRAM_PLAN §6 —
     // `CommandOutcome::terrain_cells_removed` feeds the Excavator XP bonus.
-    let _removed = terrain::apply_operation(&mut ctx.state.terrain, &bore_op);
+    // Routed through `block_ops` so block health stays the authority inside a
+    // block span (ADR 0005), and the count is accumulated rather than discarded
+    // (`todolist.md` P2 -- it feeds the Excavator XP bonus).
+    *ctx.terrain_cells_removed = ctx
+        .terrain_cells_removed
+        .saturating_add(crate::block_ops::apply_operation(ctx.state, &bore_op));
     ctx.terrain_ops.push(bore_op);
 
     let detonation_op = TerrainOperation {
@@ -567,7 +577,12 @@ fn resolve_tunnel(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
     // Cell count discarded: `ResolveContext` has nowhere to accumulate it until
     // `resolve_effect` is wired into `command.rs`. Tracked in PROGRAM_PLAN §6 —
     // `CommandOutcome::terrain_cells_removed` feeds the Excavator XP bonus.
-    let _removed = terrain::apply_operation(&mut ctx.state.terrain, &detonation_op);
+    // Routed through `block_ops` so block health stays the authority inside a
+    // block span (ADR 0005), and the count is accumulated rather than discarded
+    // (`todolist.md` P2 -- it feeds the Excavator XP bonus).
+    *ctx.terrain_cells_removed = ctx
+        .terrain_cells_removed
+        .saturating_add(crate::block_ops::apply_operation(ctx.state, &detonation_op));
     ctx.terrain_ops.push(detonation_op);
 
     if let Some(target_id) = ctx.primary_target_id {

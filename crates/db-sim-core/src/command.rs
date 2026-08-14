@@ -93,7 +93,6 @@ use crate::fixed::{self, BODY_WIDTH, FixedPoint};
 use crate::hash;
 use crate::resolve;
 use crate::rng::Rng;
-use crate::terrain;
 use crate::types::*;
 use std::collections::BTreeMap;
 
@@ -618,7 +617,11 @@ fn apply_terrain_profile(
     };
     // Monotonic per-match sequence; a client never supplies this.
     state.next_terrain_sequence = state.next_terrain_sequence.saturating_add(1);
-    let removed = terrain::apply_operation(&mut state.terrain, &op);
+    // Routed through `block_ops` rather than `terrain::apply_operation` so block health
+    // stays the authority inside a block span (ADR 0005). Carving cells directly here would
+    // hole a block while it still reported full health, which is the drift the block model
+    // exists to prevent. Background terrain still receives a literal crater.
+    let removed = crate::block_ops::apply_operation(state, &op);
     *terrain_cells_removed = terrain_cells_removed.saturating_add(removed);
     terrain_ops.push(op);
 }
@@ -870,6 +873,7 @@ fn resolve_passive_choice(
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::terrain;
 
     // -----------------------------------------------------------------------------------
     // Fixtures

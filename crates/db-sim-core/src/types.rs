@@ -801,6 +801,41 @@ impl MatchPhase {
     }
 }
 
+/// How a match ended, or that it has not.
+///
+/// Checked after every action and at each turn boundary. `Draw` exists because sudden
+/// death can eliminate the last two players simultaneously — a match must always reach a
+/// terminal state (`PRODUCT_SPEC.md` §2), and "nobody won" is a legal one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOutcome {
+    /// Still playing.
+    InProgress,
+    /// One team remains.
+    Victory {
+        /// The surviving team index.
+        team: u8,
+    },
+    /// No team remains, or the match hit its hard duration bound with no winner.
+    Draw,
+}
+
+/// Why a turn ended.
+///
+/// Recorded so the result panel and replay can distinguish a committed attack from a
+/// timeout, which look identical in the resulting state but mean very different things
+/// about the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEndReason {
+    /// The player committed their one attack.
+    Attacked,
+    /// The player explicitly passed.
+    Passed,
+    /// The planning deadline expired and the server applied a timeout action.
+    TimedOut,
+    /// The active player was eliminated mid-turn.
+    Eliminated,
+}
+
 /// The complete authoritative match state.
 ///
 /// Everything needed to reproduce the match deterministically from a seed and a command

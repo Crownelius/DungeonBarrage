@@ -51,12 +51,13 @@
 //! before [`CanonicalHasher::write_u32`] — a widening conversion, never a truncating
 //! `as` cast, so it needs no `#[expect(clippy::cast_possible_truncation)]`.
 
+use crate::blocks::TerrainBlock;
 use crate::canonical::{Canonical, CanonicalHasher, domain, hash_canonical};
 use crate::fixed::FixedPoint;
 use crate::types::{
-    AbilitySlot, EffectKind, EffectTrigger, MatchPhase, Material, MaterialMask, MovementClass,
-    PersistentObject, PersistentObjectKind, PlayerState, RangeTier, SimulationState, StatusEffect,
-    TerrainMask, TerrainOperation, TerrainShape,
+    AbilitySlot, EffectKind, EffectTrigger, ErosionAxis, MatchPhase, Material, MaterialMask,
+    MovementClass, PersistentObject, PersistentObjectKind, PlayerState, RangeTier, SimulationState,
+    StatusEffect, TerrainMask, TerrainOperation, TerrainShape,
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,12 @@ use crate::types::{
 /// any byte, not only the named constants) with a value that does not collide with any
 /// tag in `canonical::domain` (`0x01`–`0x04`).
 const OBJECTS_DOMAIN_TAG: u8 = 0x05;
+
+/// Domain separator for the destructible-block section.
+///
+/// Local for the same reason [`OBJECTS_DOMAIN_TAG`] is: `canonical::domain` predates
+/// blocks and adding to it would be a cross-module change for a tag only this file uses.
+const BLOCKS_DOMAIN_TAG: u8 = 0x06;
 
 // ---------------------------------------------------------------------------
 // Enum discriminant mappings
@@ -458,6 +465,43 @@ impl Canonical for PlayerState {
     }
 }
 
+/// Stable discriminants for [`ErosionAxis`].
+///
+/// Hand-assigned rather than `as u8`, for the reason stated at the top of this module:
+/// reordering the enum would otherwise silently change every historical hash.
+const fn erosion_axis_discriminant(axis: ErosionAxis) -> u8 {
+    match axis {
+        ErosionAxis::Columns => 0x00,
+        ErosionAxis::Rows => 0x01,
+    }
+}
+
+impl Canonical for ErosionAxis {
+    fn write_canonical(&self, hasher: &mut CanonicalHasher) {
+        hasher.write_u8(erosion_axis_discriminant(*self));
+    }
+}
+
+impl Canonical for TerrainBlock {
+    /// Writes id, origin, extent, material, health, max health, and erosion axis.
+    ///
+    /// Health is hashed because it is authoritative: the cells in the mask are derived from
+    /// it (ADR 0005), so two states whose masks happen to agree but whose block health
+    /// differs are genuinely different states and must hash differently. The erosion axis is
+    /// hashed for the same reason -- it decides the shape the next hit produces.
+    fn write_canonical(&self, hasher: &mut CanonicalHasher) {
+        hasher.write_u32(self.id);
+        hasher.write_i32(self.origin_cell_x);
+        hasher.write_i32(self.origin_cell_y);
+        hasher.write_u32(u32::from(self.width_cells));
+        hasher.write_u32(u32::from(self.height_cells));
+        self.material.write_canonical(hasher);
+        hasher.write_u32(u32::from(self.health));
+        hasher.write_u32(u32::from(self.max_health));
+        self.erosion_axis.write_canonical(hasher);
+    }
+}
+
 impl Canonical for SimulationState {
     /// See this module's top-level docs for the full section table. Summary: metadata,
     /// then players (sorted by `id`), then objects (sorted by `sequence`), then terrain
@@ -494,6 +538,15 @@ impl Canonical for SimulationState {
         hasher.write_length(sorted_objects.len());
         for object in sorted_objects {
             object.write_canonical(hasher);
+        }
+
+        hasher.write_domain_separator(BLOCKS_DOMAIN_TAG);
+        // Defensive sort by id: see the top-level "sort order" rule.
+        let mut sorted_blocks: Vec<&TerrainBlock> = self.blocks.iter().collect();
+        sorted_blocks.sort_by_key(|block| block.id);
+        hasher.write_length(sorted_blocks.len());
+        for block in sorted_blocks {
+            block.write_canonical(hasher);
         }
 
         // TerrainMask::write_canonical writes domain::TERRAIN itself.
@@ -1102,7 +1155,16 @@ mod tests {
 
     #[test]
     fn known_answer_vector_sample_state() {
-        assert_eq!(hash_state(&sample_state()), "40c9ceef445ae69d");
+        // REGENERATED 2026-08-07 when the destructible-block section was added to the state
+        // encoding (ADR 0005 requires block health to be hashed, since the terrain cells are
+        // derived from it). The previous value was "40c9ceef445ae69d".
+        //
+        // This vector failing was correct behaviour, not an obstacle: it exists to catch a
+        // silent change to the hash format, and the format genuinely changed.
+        // `SIMULATION_VERSION` moved 2 -> 3 in the same commit, so no replay can be
+        // misinterpreted across the boundary. `MODULE_OWNERSHIP.md` forbids regenerating a
+        // vector *silently* -- this comment and that version bump are what make it not silent.
+        assert_eq!(hash_state(&sample_state()), "f79a8a6acbc1fa38");
     }
 
     #[test]

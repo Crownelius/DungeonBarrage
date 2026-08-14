@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{SimError, SimResult};
 use crate::fixed::{self, FixedPoint};
-use crate::terrain;
 use crate::types::{
     BASE_ATTACK, EffectKind, MaterialMask, PersistentObject, PersistentObjectKind, SpecialEffect,
     TerrainOperation, TerrainShape,
@@ -284,7 +283,12 @@ fn chain_detonate(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
             },
             material_mask: MaterialMask::SOFT,
         };
-        let _removed_cells = terrain::apply_operation(&mut ctx.state.terrain, &op);
+        // Routed through `block_ops` so block health stays the authority inside a
+        // block span (ADR 0005), and the count is accumulated rather than discarded
+        // (`todolist.md` P2 -- it feeds the Excavator XP bonus).
+        *ctx.terrain_cells_removed = ctx
+            .terrain_cells_removed
+            .saturating_add(crate::block_ops::apply_operation(ctx.state, &op));
         ctx.terrain_ops.push(op);
 
         // Propagation: any other still-embedded, not-yet-detonated knife caught in this
@@ -360,6 +364,7 @@ fn radius_to_terrain_cells(radius: i32) -> SimResult<u16> {
 mod tests {
     use super::*;
     use crate::rng::Rng;
+    use crate::terrain;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PlayerState, SimulationState,
         TerrainMask,
