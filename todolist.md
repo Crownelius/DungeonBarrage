@@ -190,7 +190,7 @@ spawns, and the eight-block horizontal test array.
 
 ---
 
-## 🟠 P6 — No golden-vector regression corpus
+## ✅ P6 — No golden-vector regression corpus — RESOLVED 2026-08-07
 
 **The problem.** The TypeScript parity oracle was retired (ADR 0004) and its replacement was
 never built. There is currently **no protection against a refactor silently changing game
@@ -206,6 +206,18 @@ behaviour**.
 
 **Honest limitation:** golden vectors freeze whatever they are given, bugs included. Generate
 them only from reviewed code, and never regenerate one inside a feature commit.
+
+**Resolved via solution 1**, in `crates/db-sim-core/tests/golden_vectors.rs`. Five scripted
+matches driven through `MatchHost` — the top of the engine, not individual helpers, so a
+vector proves the whole loop still composes rather than that one function still behaves.
+
+**The corpus guards itself against being vacuous.** Every vector asserts the script actually
+changed the world, advanced turns, and (for combat vectors) dealt damage. That guard
+immediately earned itself: the first "firing duel" fired three shots, hashed perfectly
+stably, and dealt **zero damage** — it would have been frozen as combat coverage that covered
+no combat. Two structural tests back it up: the same script hashes identically twice in one
+process, and different seeds produce different matches (without which a corpus of identical
+hashes looks green while testing nothing).
 
 ---
 

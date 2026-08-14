@@ -331,10 +331,18 @@ fn resolve_ability(
                 // iteration of a multi-strike ability (Karl's three-hit basic) so a target
                 // eliminated by an earlier strike this turn is correctly excluded from the
                 // next one.
+                //
+                // THE SHOOTER IS EXCLUDED. `ballistics::integrate` checks every character it
+                // is given uniformly, with no notion of who fired — its own docs say so. A
+                // projectile launched from inside the shooter's own hitbox therefore
+                // terminated on tick 1 with `ImpactCause::Character`, every single shot, so
+                // nothing in the game could ever hit anything. Neither module was wrong on
+                // its own; the contract between them was, which is why only an end-to-end
+                // match surfaced it.
                 let character_hitboxes: Vec<(String, FixedPoint, i32)> = state
                     .players
                     .iter()
-                    .filter(|p| !p.is_eliminated())
+                    .filter(|p| !p.is_eliminated() && p.id != command.player_id)
                     .map(|p| (p.id.clone(), p.position, BODY_WIDTH))
                     .collect();
 
@@ -518,7 +526,12 @@ fn resolve_ability(
             .insert(idx, command.command_id.clone());
     }
 
-    state.turn_number = state.turn_number.saturating_add(1);
+    // `turn_number` is deliberately NOT advanced here. `scheduler::end_turn` owns turn
+    // progression, and when this module advanced it too, every action counted twice — turns
+    // went 1, 3, 5, 7. That desynchronises `expected_turn_number` validation from the turn a
+    // client can actually observe, so a well-behaved client's next command would be rejected
+    // as stale. Reported below as before/after so the outcome still describes the turn it
+    // resolved in; committing the increment is the scheduler's job.
 
     Ok(CommandOutcome {
         command_id: command.command_id.clone(),
