@@ -1,7 +1,7 @@
 # Dungeon Barrage program plan
 
 **Status:** Living plan. Updated at each milestone gate.
-**Related:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [CHARACTERS.md](./CHARACTERS.md) · [PLATFORM_STRATEGY.md](./PLATFORM_STRATEGY.md) · [adr/0001-rust-wasm-core.md](./adr/0001-rust-wasm-core.md) · [adr/0002-character-kits.md](./adr/0002-character-kits.md) · [adr/0003-shared-trig-table.md](./adr/0003-shared-trig-table.md) · [MODULE_OWNERSHIP.md](./MODULE_OWNERSHIP.md)
+**Related:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [CHARACTERS.md](./CHARACTERS.md) · [CLIENT_SPEC.md](./CLIENT_SPEC.md) · [PLATFORM_STRATEGY.md](./PLATFORM_STRATEGY.md) · [adr/0001-rust-wasm-core.md](./adr/0001-rust-wasm-core.md) · [adr/0002-character-kits.md](./adr/0002-character-kits.md) · [adr/0003-shared-trig-table.md](./adr/0003-shared-trig-table.md) · [MODULE_OWNERSHIP.md](./MODULE_OWNERSHIP.md)
 
 ## 1. Where the project actually is
 
@@ -11,7 +11,7 @@ Honest status, so nothing is described as further along than it is.
 |---|---|
 | Design documentation | Substantial and specific |
 | TypeScript | **Removed entirely** (ADR 0004). Oracle and client preserved in `reference/` |
-| C# client | **Not started.** Godot 4 + C#, per ADR 0004 |
+| C# client | **Not started.** Fully specified in [CLIENT_SPEC.md](./CLIENT_SPEC.md); Godot 4 + C#, per ADR 0004 |
 | Rust core foundation | `fixed`, `canonical`, `types`, `error` complete and tested |
 | Rust engine modules | Resolver layer complete; scheduler/movement/maps still absent — see §2 |
 | Effect resolvers | **22 of 22 implemented** (M1.5). 282 tests; not yet wired into `command.rs` |
