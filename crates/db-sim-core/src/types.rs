@@ -717,6 +717,72 @@ pub enum PersistentObjectKind {
     GasCloud,
 }
 
+/// Why a persistent object left authoritative state.
+///
+/// The cause is recorded by the producer that performs the removal. A consumer must never
+/// infer one from a missing post-snapshot: a replaced turret, a capacity eviction, and a
+/// detonated knife all have the same net shape but different gameplay meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentObjectRemovalCause {
+    /// A newly spawned singleton object displaced the owner's previous instance.
+    Replaced,
+    /// A per-owner object limit evicted the oldest instance.
+    CapacityEvicted,
+    /// An embedded projectile participated in a chain detonation.
+    Detonated,
+    /// A finite object lifetime reached zero.
+    ///
+    /// Reserved until the scheduler owns an explicit object-lifetime tick.
+    Expired,
+    /// Object health reached zero through an authoritative damage producer.
+    ///
+    /// Reserved until object targeting and damage exist.
+    Destroyed,
+    /// The owning player was eliminated, so their objects can no longer act.
+    OwnerEliminated,
+}
+
+impl PersistentObjectRemovalCause {
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Replaced => "replaced",
+            Self::CapacityEvicted => "capacityEvicted",
+            Self::Detonated => "detonated",
+            Self::Expired => "expired",
+            Self::Destroyed => "destroyed",
+            Self::OwnerEliminated => "ownerEliminated",
+        }
+    }
+}
+
+/// One producer-owned persistent-object lifecycle transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentObjectTransition {
+    /// The complete object entered authoritative state.
+    Spawned,
+    /// The complete last authoritative object left state for this exact reason.
+    Removed {
+        /// Source-owned reason for removal.
+        cause: PersistentObjectRemovalCause,
+    },
+}
+
+/// One ordered persistent-object lifecycle record.
+///
+/// This is deliberately one stream rather than separate creation/removal vectors. Emi's
+/// turret replacement removes then spawns, knife-cap eviction spawns then removes, and a
+/// chain can spawn and remove the landing knife inside one synchronous command. Only one
+/// ordered stream preserves all three without reconstructing causality from final state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentObjectChange {
+    /// Complete object at the moment it entered or immediately before it left state.
+    pub object: PersistentObject,
+    /// What happened to it.
+    pub transition: PersistentObjectTransition,
+}
+
 /// One character's authoritative state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerState {
@@ -1071,6 +1137,8 @@ pub enum CritRoll {
     Missed,
     /// A draw was taken and won.
     Landed,
+    /// An authoritative guarantee forced the critical hit without consuming an RNG draw.
+    Forced,
 }
 
 impl CritRoll {
@@ -1083,7 +1151,7 @@ impl CritRoll {
     /// Whether this strike resolved as a critical hit.
     #[must_use]
     pub const fn is_critical(self) -> bool {
-        matches!(self, Self::Landed)
+        matches!(self, Self::Landed | Self::Forced)
     }
 
     /// Stable wire identifier. Never localize these.
@@ -1093,6 +1161,7 @@ impl CritRoll {
             Self::NotEligible => "notEligible",
             Self::Missed => "missed",
             Self::Landed => "landed",
+            Self::Forced => "forced",
         }
     }
 }
@@ -1107,6 +1176,11 @@ pub enum StrikeDelivery {
     },
     /// Delivered by a close-range strike with no projectile.
     Melee,
+    /// Delivered by an authoritative effect rather than the ability's primary attack.
+    Effect {
+        /// The exact effect producer.
+        kind: EffectKind,
+    },
 }
 
 /// One authoritative strike resolution, recorded where it happened.
@@ -1239,8 +1313,11 @@ pub struct CommandOutcome {
     pub terrain_ops: Vec<TerrainOperation>,
     /// Damage and healing applied, sorted by `player_id`.
     pub damage: Vec<DamageEvent>,
-    /// Persistent objects created by this action.
-    pub objects_created: Vec<PersistentObject>,
+    /// Every persistent-object lifecycle transition, in exact producer order.
+    ///
+    /// Includes objects that enter and leave state inside this one command and therefore
+    /// appear in neither the pre- nor post-snapshot.
+    pub object_changes: Vec<PersistentObjectChange>,
     /// Every individual strike resolution, in the order the resolver produced them.
     ///
     /// Emitted at the point of resolution. A consumer must never reconstruct these from

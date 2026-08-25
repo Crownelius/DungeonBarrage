@@ -32,7 +32,7 @@
 use crate::error::SimResult;
 use crate::types::{
     AbilityCommand, CommandResult, GAUGE_FULL, MatchOutcome, MatchPhase, PassiveChoiceCommand,
-    SimulationState, StatusChange, TurnEndReason,
+    PersistentObjectChange, SimulationState, StatusChange, TurnEndReason,
 };
 use crate::{command, movement, scheduler, victory};
 
@@ -44,6 +44,13 @@ use crate::{command, movement, scheduler, victory};
 #[derive(Debug, Clone)]
 pub struct MatchHost {
     state: SimulationState,
+    /// Persistent-object lifecycle transitions produced by the most recent public host
+    /// call, in order.
+    ///
+    /// Cleared and surfaced exactly like [`Self::status_changes`], and for the same reason:
+    /// eliminating a player removes their objects during the scheduler lap that runs after
+    /// `command::apply_ability` has already returned, so the command layer cannot see it.
+    object_changes: Vec<PersistentObjectChange>,
     /// Status transitions produced by the most recent public host call, in order.
     ///
     /// Deliberately **not** part of [`SimulationState`]: it is a record of what happened
@@ -66,10 +73,18 @@ impl MatchHost {
         movement::settle(&mut state)?;
         let mut host = Self {
             state,
+            object_changes: Vec::new(),
             status_changes: Vec::new(),
         };
         host.open_turn()?;
         Ok(host)
+    }
+
+    /// Persistent-object lifecycle transitions produced by the most recent public host
+    /// call.
+    #[must_use]
+    pub fn object_changes(&self) -> &[PersistentObjectChange] {
+        &self.object_changes
     }
 
     /// Status transitions produced by the most recent public host call.
@@ -96,10 +111,15 @@ impl MatchHost {
             // advance cannot tick a status. The scratch vector is asserted empty rather
             // than discarded, so a future phase-graph change cannot silently drop expiries.
             let mut unreachable_changes = Vec::new();
-            scheduler::advance_phase(&mut self.state, &mut unreachable_changes)?;
+            let mut unreachable_objects = Vec::new();
+            scheduler::advance_phase(
+                &mut self.state,
+                &mut unreachable_changes,
+                &mut unreachable_objects,
+            )?;
             debug_assert!(
-                unreachable_changes.is_empty(),
-                "opening a turn must not tick statuses",
+                unreachable_changes.is_empty() && unreachable_objects.is_empty(),
+                "opening a turn must not tick statuses or remove objects",
             );
         }
         // `todolist.md` P12: a gauge can fill from damage *taken* during someone else's turn,
@@ -156,6 +176,7 @@ impl MatchHost {
     /// Propagates failures from [`movement::walk`] and [`movement::settle`].
     pub fn submit_move(&mut self, player_id: &str, dx: i32) -> SimResult<i32> {
         self.status_changes.clear();
+        self.object_changes.clear();
         if !scheduler::is_accepting_commands(&self.state)
             || player_id != self.state.active_player_id
         {
@@ -199,6 +220,7 @@ impl MatchHost {
     /// Propagates failures from settling and from the scheduler.
     pub fn submit_ability(&mut self, ability: &AbilityCommand) -> SimResult<CommandResult> {
         self.status_changes.clear();
+        self.object_changes.clear();
         if !scheduler::is_accepting_commands(&self.state) {
             return Ok(CommandResult::Rejected(
                 crate::types::CommandRejection::WrongPhase,
@@ -211,6 +233,8 @@ impl MatchHost {
             // expiries after them, so the host record stays in the order things happened.
             self.status_changes
                 .extend(outcome.status_changes.iter().cloned());
+            self.object_changes
+                .extend(outcome.object_changes.iter().cloned());
         }
         if matches!(result, CommandResult::Rejected(_)) {
             // A rejected command costs nothing. Ending the turn here would let a client
@@ -237,6 +261,7 @@ impl MatchHost {
             // outcome and `Self::status_changes` byte-identical, so the two can never
             // disagree about what happened.
             outcome.status_changes.clone_from(&self.status_changes);
+            outcome.object_changes.clone_from(&self.object_changes);
             outcome.turn_number_after = self.state.turn_number;
             outcome.final_state_hash = crate::hash::hash_state(&self.state);
         }
@@ -253,6 +278,7 @@ impl MatchHost {
         choice: &PassiveChoiceCommand,
     ) -> SimResult<CommandResult> {
         self.status_changes.clear();
+        self.object_changes.clear();
         let mut result = command::apply_passive_choice(&mut self.state, choice);
         if matches!(result, CommandResult::Rejected(_)) {
             return Ok(result);
@@ -262,6 +288,7 @@ impl MatchHost {
             // A passive choice attaches no statuses of its own, but resuming the turn it
             // interrupted still runs the end-of-turn tick, so expiries belong here too.
             outcome.status_changes.clone_from(&self.status_changes);
+            outcome.object_changes.clone_from(&self.object_changes);
             outcome.turn_number_after = self.state.turn_number;
             outcome.final_state_hash = crate::hash::hash_state(&self.state);
         }
@@ -276,6 +303,7 @@ impl MatchHost {
     /// otherwise propagates scheduler failures.
     pub fn pass_turn(&mut self) -> SimResult<()> {
         self.status_changes.clear();
+        self.object_changes.clear();
         if self.state.phase == MatchPhase::PassiveSelection {
             return Err(crate::error::SimError::OutOfRange {
                 field: "passive selection",
@@ -296,6 +324,7 @@ impl MatchHost {
     /// this prompt; an online passive-timeout policy must be defined before online play.
     pub fn time_out_turn(&mut self) -> SimResult<()> {
         self.status_changes.clear();
+        self.object_changes.clear();
         if self.state.phase == MatchPhase::PassiveSelection {
             return Err(crate::error::SimError::OutOfRange {
                 field: "passive selection",
@@ -344,13 +373,15 @@ impl MatchHost {
         // Collected locally, then moved onto the host: `advance_phase` needs `&mut
         // self.state`, so it cannot also borrow a field of `self`.
         let mut expiries: Vec<StatusChange> = Vec::new();
+        let mut removals: Vec<PersistentObjectChange> = Vec::new();
         let mut steps = 0u32;
         loop {
             if self.is_complete() {
                 self.status_changes.append(&mut expiries);
+                self.object_changes.append(&mut removals);
                 return Ok(());
             }
-            let phase = scheduler::advance_phase(&mut self.state, &mut expiries)?;
+            let phase = scheduler::advance_phase(&mut self.state, &mut expiries, &mut removals)?;
             steps = steps.saturating_add(1);
             if matches!(phase, MatchPhase::TurnStart | MatchPhase::MatchComplete) {
                 break;
@@ -360,6 +391,7 @@ impl MatchHost {
             }
         }
         self.status_changes.append(&mut expiries);
+        self.object_changes.append(&mut removals);
         if self.is_complete() {
             return Ok(());
         }
@@ -824,7 +856,8 @@ mod tests {
 
         // Reach in to eliminate: this test is about the host observing a terminal state, not
         // about how the damage arrived.
-        let Ok(()) = victory::eliminate(&mut host.state, &loser) else {
+        let mut object_changes = Vec::new();
+        let Ok(()) = victory::eliminate(&mut host.state, &loser, &mut object_changes) else {
             panic!("elimination must succeed");
         };
         let Ok(()) = host.pass_turn() else {

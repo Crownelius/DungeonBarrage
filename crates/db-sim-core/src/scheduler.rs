@@ -46,7 +46,9 @@
 use crate::character;
 use crate::error::{SimError, SimResult};
 use crate::resolve::status;
-use crate::types::{MatchOutcome, MatchPhase, SimulationState, StatusChange, TurnEndReason};
+use crate::types::{
+    MatchOutcome, MatchPhase, PersistentObjectChange, SimulationState, StatusChange, TurnEndReason,
+};
 use crate::victory;
 
 /// The turn at which sudden death triggers in a duel (`PRODUCT_SPEC.md` §2: "Sudden-death
@@ -120,6 +122,7 @@ pub fn begin_match(state: &mut SimulationState) -> SimResult<()> {
 pub fn advance_phase(
     state: &mut SimulationState,
     status_changes: &mut Vec<StatusChange>,
+    object_changes: &mut Vec<PersistentObjectChange>,
 ) -> SimResult<MatchPhase> {
     let next = match state.phase {
         MatchPhase::MatchIntro => MatchPhase::TurnStart,
@@ -132,12 +135,17 @@ pub fn advance_phase(
         MatchPhase::Settling => MatchPhase::StatusResolution,
         MatchPhase::StatusResolution => {
             // The only call site in the crate (see module docs): exactly one lap of
-            // `advance_phase` leaves `StatusResolution` exactly once, so this ticks every
-            // status by exactly one turn per lap — never zero, never two.
-            status_changes.extend(status::tick_statuses(state));
+            // `advance_phase` leaves `StatusResolution` exactly once, so the active
+            // player's statuses tick by exactly one turn per lap — never zero, never two.
+            //
+            // Scoped to the active player because a status lasts for *their* turns. Ticking
+            // everyone here would make a two-turn Chill expire after two commands submitted
+            // by anyone, which in a duel is one of the victim's own turns.
+            let active = state.active_player_id.clone();
+            status_changes.extend(status::tick_statuses(state, &active));
             MatchPhase::VictoryCheck
         }
-        MatchPhase::VictoryCheck => return leave_victory_check(state),
+        MatchPhase::VictoryCheck => return leave_victory_check(state, object_changes),
         MatchPhase::MatchComplete => MatchPhase::MatchComplete,
     };
     state.phase = next;
@@ -149,7 +157,10 @@ pub fn advance_phase(
 /// Split out because it has two exit paths — terminal, or rotate and continue — each of
 /// which already sets `state.phase` itself, unlike every other arm in [`advance_phase`]'s
 /// match, which share one assignment after the match.
-fn leave_victory_check(state: &mut SimulationState) -> SimResult<MatchPhase> {
+fn leave_victory_check(
+    state: &mut SimulationState,
+    object_changes: &mut Vec<PersistentObjectChange>,
+) -> SimResult<MatchPhase> {
     let mut outcome = victory::check_and_finalize(state)?;
 
     // The real bound on a stalled match is sudden death's hazard actually eliminating
@@ -159,7 +170,7 @@ fn leave_victory_check(state: &mut SimulationState) -> SimResult<MatchPhase> {
     // `MatchOutcome::Draw` for a simultaneous elimination, so there is no second notion of
     // "the match is over" for this path to get out of sync with.
     if matches!(outcome, MatchOutcome::InProgress) && state.turn_number >= HARD_TURN_LIMIT {
-        force_draw(state)?;
+        force_draw(state, object_changes)?;
         outcome = victory::check_and_finalize(state)?;
     }
 
@@ -189,7 +200,10 @@ fn leave_victory_check(state: &mut SimulationState) -> SimResult<MatchPhase> {
 ///
 /// The only caller is [`leave_victory_check`]'s [`HARD_TURN_LIMIT`] fallback; see its doc
 /// comment for why this exists.
-fn force_draw(state: &mut SimulationState) -> SimResult<()> {
+fn force_draw(
+    state: &mut SimulationState,
+    object_changes: &mut Vec<PersistentObjectChange>,
+) -> SimResult<()> {
     let living_ids: Vec<String> = state
         .players
         .iter()
@@ -197,7 +211,9 @@ fn force_draw(state: &mut SimulationState) -> SimResult<()> {
         .map(|player| player.id.clone())
         .collect();
     for id in living_ids {
-        victory::eliminate(state, &id)?;
+        // Eliminating an owner removes their persistent objects; those removals are
+        // recorded rather than left for a client to infer from a shrunken object list.
+        victory::eliminate(state, &id, object_changes)?;
     }
     Ok(())
 }
@@ -373,7 +389,7 @@ mod tests {
     /// These tests assert phase transitions, not status lifecycle; the tests that do assert
     /// on expiries call [`advance_phase`] directly and inspect what it collected.
     fn step(state: &mut SimulationState) -> SimResult<MatchPhase> {
-        advance_phase(state, &mut Vec::new())
+        advance_phase(state, &mut Vec::new(), &mut Vec::new())
     }
     use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
     use crate::types::{Appearance, EffectKind, Material, PlayerState, StatusEffect, TerrainMask};
@@ -731,7 +747,7 @@ mod tests {
     // -----------------------------------------------------------------------------------
 
     #[test]
-    fn a_two_turn_lockdown_survives_exactly_two_full_turn_cycles() {
+    fn a_two_turn_status_lasts_two_of_the_affected_players_own_turns() {
         let mut target = player("target", 1);
         target.statuses.push(StatusEffect {
             kind: EffectKind::Lockdown,
@@ -741,23 +757,81 @@ mod tests {
         let mut state = base_state(vec![player("actor", 0), target]);
         assert_eq!(begin_match(&mut state), Ok(()));
 
-        run_full_lap(&mut state); // turn 1 completes
-        let Some(target) = state.player("target") else {
-            panic!("target must still be present");
-        };
+        fn remaining(state: &SimulationState) -> Option<u8> {
+            let Some(target) = state.player("target") else {
+                panic!("target must still be present")
+            };
+            target.statuses.first().map(|status| status.turns_remaining)
+        }
+
+        // Lap 1 is the *actor's* turn. A status measured in the victim's turns must not
+        // erode while somebody else acts — otherwise a two-turn Lockdown in a four-player
+        // match would be spent before its victim ever got to move, and the same status
+        // would mean something different at every table size.
+        run_full_lap(&mut state);
         assert_eq!(
-            target.statuses.first().map(|s| s.turns_remaining),
-            Some(1),
-            "must still be present with exactly one turn remaining after one full cycle"
+            remaining(&state),
+            Some(2),
+            "another player's turn must not tick it"
         );
 
-        run_full_lap(&mut state); // turn 2 completes
+        // Lap 2 is the target's own turn, and it ends with exactly one decrement.
+        run_full_lap(&mut state);
+        assert_eq!(
+            remaining(&state),
+            Some(1),
+            "the victim's own turn ticks it once"
+        );
+
+        // Lap 3 is the actor again: still untouched.
+        run_full_lap(&mut state);
+        assert_eq!(
+            remaining(&state),
+            Some(1),
+            "and still not on the actor's turn"
+        );
+
+        // Lap 4 is the target's second turn, which spends the last one.
+        run_full_lap(&mut state);
+        assert_eq!(
+            remaining(&state),
+            None,
+            "gone after exactly two of the victim's own turns, not two laps",
+        );
+    }
+
+    #[test]
+    fn a_count_based_guarantee_crit_is_not_eroded_by_the_turn_tick() {
+        let mut target = player("target", 1);
+        // `GuaranteeCrit` stores remaining charges in `magnitude` and parks
+        // `turns_remaining` at the never-expires sentinel. A turn tick that decremented it
+        // would quietly convert "the next three attacks crit" into a countdown clock.
+        target.statuses.push(StatusEffect {
+            kind: EffectKind::GuaranteeCrit,
+            magnitude: 3,
+            turns_remaining: u8::MAX,
+        });
+        let mut state = base_state(vec![player("actor", 0), target]);
+        assert_eq!(begin_match(&mut state), Ok(()));
+
+        for _ in 0..4 {
+            run_full_lap(&mut state);
+        }
+
         let Some(target) = state.player("target") else {
-            panic!("target must still be present");
+            panic!("target must still be present")
         };
-        assert!(
-            target.statuses.is_empty(),
-            "must be gone after exactly two full cycles, not one and not three"
+        let Some(status) = target.statuses.first() else {
+            panic!("a count-based mark must survive turn ticking")
+        };
+        assert_eq!(
+            status.magnitude, 3,
+            "charges are spent by use, never by time"
+        );
+        assert_eq!(
+            status.turns_remaining,
+            u8::MAX,
+            "the sentinel must not erode"
         );
     }
 

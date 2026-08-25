@@ -316,7 +316,7 @@ fn resolve_ability(
     let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
     let mut terrain_cells_removed: u32 = 0;
     let mut damage_by_player: BTreeMap<String, DamageEvent> = BTreeMap::new();
-    let mut objects_created: Vec<PersistentObject> = Vec::new();
+    let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
     let mut dealt_to_others: u32 = 0;
     // Where the attack itself landed — the origin `ResolveContext::impact_point` gives
     // every effect below. Defaults to the actor's own position so a targetless area
@@ -386,7 +386,13 @@ fn resolve_ability(
                         .map(|p| p.id.clone());
 
                     if let Some(target_id) = direct_target {
-                        let crit = roll_crit(&mut rng, ability.crit_chance_basis_points);
+                        let crit = resolve_crit_for_target(
+                            state,
+                            &mut status_changes,
+                            &target_id,
+                            &mut rng,
+                            ability,
+                        );
                         let hp = resolved_damage_hp(ability, crit.is_critical());
                         // Read before the mutation so "this strike killed them" can be
                         // distinguished from "they were already down".
@@ -450,7 +456,13 @@ fn resolve_ability(
             let strikes = ability.strikes_per_turn.max(1);
             for _ in 0..strikes {
                 for target_id in &targets {
-                    let crit = roll_crit(&mut rng, ability.crit_chance_basis_points);
+                    let crit = resolve_crit_for_target(
+                        state,
+                        &mut status_changes,
+                        target_id,
+                        &mut rng,
+                        ability,
+                    );
                     let hp = resolved_damage_hp(ability, crit.is_critical());
                     let was_alive = state.player(target_id).is_some_and(|p| !p.is_eliminated());
                     let actual = deal_damage(
@@ -514,13 +526,17 @@ fn resolve_ability(
             impact_point,
             damage: &mut damage_by_player,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             terrain_cells_removed: &mut terrain_cells_removed,
             status_changes: &mut status_changes,
         };
         for effect in ability.effects {
-            resolve::resolve_effect(&mut ctx, effect)
+            let effect_strikes = resolve::resolve_effect(&mut ctx, effect)
                 .map_err(|_| CommandRejection::InvalidTarget)?;
+            for mut strike in effect_strikes {
+                strike.strike_index = strike_records.len().try_into().unwrap_or(u16::MAX);
+                strike_records.push(strike);
+            }
         }
     }
 
@@ -578,7 +594,7 @@ fn resolve_ability(
         projectile_traces,
         terrain_ops,
         damage: damage_by_player.into_values().collect(),
-        objects_created,
+        object_changes,
         strikes: strike_records,
         status_changes,
         gauge_gained: gauge_gained(state, &command.player_id, gauge_before_award),
@@ -595,6 +611,29 @@ fn gauge_gained(state: &SimulationState, player_id: &str, before_award: u16) -> 
     state.player(player_id).map_or(0, |player| {
         player.special_gauge.saturating_sub(before_award)
     })
+}
+
+/// Resolves one primary strike's critical-hit source without inventing an RNG draw.
+///
+/// A forced crit is eligible only when the ability has a real critical form; zero-damage
+/// utility actions such as Feeding Frenzy itself must not spend an older mark. Forced crits
+/// consume the target's authoritative mark but do not advance the seeded generator.
+fn resolve_crit_for_target(
+    state: &mut SimulationState,
+    status_changes: &mut Vec<StatusChange>,
+    target_id: &str,
+    rng: &mut Rng,
+    ability: &AbilityDefinition,
+) -> CritRoll {
+    let can_crit = ability.crit_chance_basis_points > 0
+        || ability.crit_damage_percent > ability.damage_percent;
+    if !can_crit {
+        return CritRoll::NotEligible;
+    }
+    if resolve::attack_mods::consume_guarantee_crit(state, status_changes, target_id) {
+        return CritRoll::Forced;
+    }
+    roll_crit(rng, ability.crit_chance_basis_points)
 }
 
 /// Awards gauge to the actor for this action, per `CHARACTERS.md` §2's per-point rates
@@ -918,7 +957,7 @@ fn resolve_passive_choice(
         projectile_traces: Vec::new(),
         terrain_ops: Vec::new(),
         damage: Vec::new(),
-        objects_created: Vec::new(),
+        object_changes: Vec::new(),
         // Choosing a passive resolves no strikes and touches no statuses.
         strikes: Vec::new(),
         status_changes: Vec::new(),

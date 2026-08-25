@@ -30,7 +30,8 @@ use crate::terrain;
 use crate::types::{
     AbilityCommand, AbilitySlot, BallisticImpact, BallisticSample, CommandOutcome,
     CommandRejection, CommandResult, CritRoll, DamageEvent, ImpactCause, MatchPhase,
-    PassiveChoiceCommand, SimulationState, StatusChange, StatusTransition, StrikeDelivery,
+    PassiveChoiceCommand, PersistentObjectChange, PersistentObjectRemovalCause,
+    PersistentObjectTransition, SimulationState, StatusChange, StatusTransition, StrikeDelivery,
     StrikeResolution, TurnEndReason,
 };
 
@@ -510,12 +511,17 @@ pub enum PresentationEventKind {
         /// Projection after the operation.
         current: PersistentObjectSnapshot,
     },
-    /// A persistent object was removed.
+    /// A persistent object was removed, for the reason its producer recorded.
+    ///
+    /// Previously derived by diffing snapshots, which could name no cause at all — every
+    /// removal reported the same `AuthoritativeResolution` placeholder — and could not see
+    /// an object spawned and removed inside one command, which appears in neither snapshot.
+    /// A knife that lands and immediately chain-detonates is exactly that case.
     ObjectRemoved {
         /// Last authoritative projection before removal.
         previous: PersistentObjectSnapshot,
-        /// Provenance retained for the removal.
-        cause: ChangeProvenance,
+        /// Why the object left authoritative state.
+        cause: PersistentObjectRemovalCause,
     },
     /// A living player became eliminated.
     PlayerEliminated {
@@ -851,11 +857,21 @@ fn retained_presentation_event_kind_bytes(
                     counter.u32(trace_sequence)?;
                 }
                 StrikeDelivery::Melee => counter.u8(1)?,
+                StrikeDelivery::Effect { kind } => {
+                    counter.u8(2)?;
+                    // Reuses the closed client vocabulary the snapshots already use, rather
+                    // than a second effect-kind mapping that could drift away from it.
+                    retained_client_status_kind_bytes(
+                        counter,
+                        crate::client_contract::snapshot_status_kind(kind),
+                    )?;
+                }
             }
             counter.u8(match strike.crit {
                 CritRoll::NotEligible => 0,
                 CritRoll::Missed => 1,
                 CritRoll::Landed => 2,
+                CritRoll::Forced => 3,
             })?;
             counter.u16(strike.damage_applied)?;
             counter.boolean(strike.eliminated_target)?;
@@ -936,8 +952,15 @@ fn retained_presentation_event_kind_bytes(
             retained_persistent_object_bytes(counter, current)?;
         }
         PresentationEventKind::ObjectRemoved { previous, cause } => {
+            counter.u8(match cause {
+                PersistentObjectRemovalCause::Replaced => 0,
+                PersistentObjectRemovalCause::CapacityEvicted => 1,
+                PersistentObjectRemovalCause::Detonated => 2,
+                PersistentObjectRemovalCause::Expired => 3,
+                PersistentObjectRemovalCause::Destroyed => 4,
+                PersistentObjectRemovalCause::OwnerEliminated => 5,
+            })?;
             retained_persistent_object_bytes(counter, previous)?;
-            retained_change_provenance_bytes(counter, *cause)?;
         }
         PresentationEventKind::PlayerEliminated { player_id, cause } => {
             counter.string(player_id)?;
@@ -1610,11 +1633,14 @@ impl MatchSessionHost {
             working_host.state(),
             &pre_snapshot,
             &post_snapshot,
-            command_outcome.as_deref(),
-            // Sourced from the host rather than the outcome so that commands producing no
-            // outcome at all -- Move, Pass, and the authority timeout -- still surface the
-            // end-of-turn status tick they caused.
-            working_host.status_changes(),
+            AppliedRecords {
+                outcome: command_outcome.as_deref(),
+                // Sourced from the host rather than the outcome so that commands producing
+                // no outcome at all -- Move, Pass, and the authority timeout -- still
+                // surface the end-of-turn transitions they caused.
+                status_changes: working_host.status_changes(),
+                object_changes: working_host.object_changes(),
+            },
         ) {
             Ok(events) => events,
             Err(fault) => {
@@ -1854,15 +1880,164 @@ struct PendingEvent {
     kind: PresentationEventKind,
 }
 
+type SnapshotStatusMap = BTreeMap<String, BTreeMap<ClientStatusKind, StatusSnapshot>>;
+
+/// Replays the producer-owned status record from the pre-snapshot and requires it to land
+/// exactly on the post-snapshot.
+///
+/// Merely observing that a record names the same status kind as a snapshot difference is not
+/// enough: a stale `Ticked` value, a refresh that lies about what it replaced, or one missing
+/// charge consumption would all satisfy that weaker check. Replaying the transitions also keeps
+/// invisible but legitimate lifecycles representable -- `Applied` followed by `Expired` can
+/// return to the same empty post-state while still being validated step by step.
+fn reconcile_status_changes(
+    pre_snapshot: &MatchSnapshot,
+    post_snapshot: &MatchSnapshot,
+    status_changes: &[StatusChange],
+) -> Result<(), SessionFault> {
+    let mut shadow = snapshot_status_map(pre_snapshot)?;
+    let expected = snapshot_status_map(post_snapshot)?;
+
+    if shadow.keys().ne(expected.keys()) {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    for change in status_changes {
+        apply_status_change(&mut shadow, change)?;
+    }
+
+    if shadow != expected {
+        return Err(SessionFault::ContractInvariant);
+    }
+    Ok(())
+}
+
+fn snapshot_status_map(snapshot: &MatchSnapshot) -> Result<SnapshotStatusMap, SessionFault> {
+    let mut players = BTreeMap::new();
+    for player in &snapshot.players {
+        let mut statuses = BTreeMap::new();
+        for status in &player.statuses {
+            if statuses.insert(status.kind, status.clone()).is_some() {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        if players.insert(player.id.clone(), statuses).is_some() {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(players)
+}
+
+fn apply_status_change(
+    shadow: &mut SnapshotStatusMap,
+    change: &StatusChange,
+) -> Result<(), SessionFault> {
+    let Some(statuses) = shadow.get_mut(&change.player_id) else {
+        return Err(SessionFault::ContractInvariant);
+    };
+    let kind = crate::client_contract::snapshot_status_kind(change.kind);
+
+    match &change.transition {
+        StatusTransition::Applied {
+            magnitude,
+            turns_remaining,
+        } => {
+            let status = StatusSnapshot {
+                kind,
+                magnitude: *magnitude,
+                turns_remaining: *turns_remaining,
+            };
+            if statuses.insert(kind, status).is_some() {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        StatusTransition::Refreshed {
+            magnitude,
+            turns_remaining,
+            replaced_magnitude,
+            replaced_turns_remaining,
+        } => {
+            let Some(status) = statuses.get_mut(&kind) else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            if status.magnitude != *replaced_magnitude
+                || status.turns_remaining != *replaced_turns_remaining
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            status.magnitude = *magnitude;
+            status.turns_remaining = *turns_remaining;
+        }
+        StatusTransition::ChargeConsumed { remaining } => {
+            if *remaining <= 0 {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let Some(status) = statuses.get_mut(&kind) else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            if status.magnitude.checked_sub(1) != Some(*remaining) {
+                return Err(SessionFault::ContractInvariant);
+            }
+            status.magnitude = *remaining;
+        }
+        StatusTransition::Ticked { turns_remaining } => {
+            if *turns_remaining == 0 {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let Some(status) = statuses.get_mut(&kind) else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            if status.turns_remaining.checked_sub(1) != Some(*turns_remaining) {
+                return Err(SessionFault::ContractInvariant);
+            }
+            status.turns_remaining = *turns_remaining;
+        }
+        StatusTransition::Exhausted => {
+            if statuses.get(&kind).map(|status| status.magnitude) != Some(1) {
+                return Err(SessionFault::ContractInvariant);
+            }
+            statuses.remove(&kind);
+        }
+        StatusTransition::Expired => {
+            if statuses
+                .get(&kind)
+                .is_none_or(|status| status.turns_remaining > 1)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            statuses.remove(&kind);
+        }
+    }
+    Ok(())
+}
+
+/// Everything the authoritative layer recorded while applying one command.
+///
+/// Grouped rather than passed as loose parameters because they are one concept — the
+/// producers' own account of what happened — and because a caller must not be able to supply
+/// one without the others and leave the event stream half-explained.
+struct AppliedRecords<'a> {
+    /// The command outcome, absent for kinds that produce none.
+    outcome: Option<&'a CommandOutcome>,
+    /// Status transitions, in the order they happened.
+    status_changes: &'a [StatusChange],
+    /// Persistent-object transitions, in the order they happened.
+    object_changes: &'a [PersistentObjectChange],
+}
+
 fn derive_events(
     command: &MatchCommand,
     pre_state: &SimulationState,
     post_state: &SimulationState,
     pre_snapshot: &MatchSnapshot,
     post_snapshot: &MatchSnapshot,
-    command_outcome: Option<&CommandOutcome>,
-    status_changes: &[StatusChange],
+    records: AppliedRecords<'_>,
 ) -> Result<Vec<PresentationEvent>, SessionFault> {
+    let AppliedRecords {
+        outcome: command_outcome,
+        status_changes,
+        object_changes,
+    } = records;
     let mut pending = Vec::new();
     let mut resolution_tick = 0u32;
 
@@ -1942,6 +2117,11 @@ fn derive_events(
                     (trace.impact.tick, 3)
                 }
                 StrikeDelivery::Melee => (0, 1),
+                // An effect-delivered strike has no trace of its own, and effects resolve
+                // after the ability's primary attack. It is presented at the action's
+                // resolution tick, ranked after any projectile-delivered strike sharing
+                // that tick, so the ordering matches the order the resolver produced them.
+                StrikeDelivery::Effect { .. } => (resolution_tick, 4),
             };
             push_pending(
                 &mut pending,
@@ -1997,6 +2177,23 @@ fn derive_events(
                 new_health: current.map(|block| block.health),
                 previous_surviving_bounds: surviving_block_bounds(pre_state, block_id)?,
                 new_surviving_bounds: surviving_block_bounds(post_state, block_id)?,
+            },
+        )?;
+    }
+
+    reconcile_status_changes(pre_snapshot, post_snapshot, status_changes)?;
+    // Emit from the producer record itself, once, rather than once per snapshot player.
+    // Grouping by player would be deterministic but chronologically false for an interleaved
+    // multi-player lifecycle such as A-applied, B-applied, A-expired, B-expired.
+    for change in status_changes {
+        push_pending(
+            &mut pending,
+            resolution_tick,
+            15,
+            PresentationEventKind::StatusChanged {
+                player_id: change.player_id.clone(),
+                kind: crate::client_contract::snapshot_status_kind(change.kind),
+                transition: change.transition.clone(),
             },
         )?;
     }
@@ -2061,52 +2258,6 @@ fn derive_events(
             )?;
         }
 
-        // The authoritative transitions for this player, in the order they happened.
-        let mut recorded_kinds: BTreeSet<ClientStatusKind> = BTreeSet::new();
-        for change in status_changes
-            .iter()
-            .filter(|change| change.player_id == post_player.id)
-        {
-            let kind = crate::client_contract::snapshot_status_kind(change.kind);
-            recorded_kinds.insert(kind);
-            push_pending(
-                &mut pending,
-                resolution_tick,
-                15,
-                PresentationEventKind::StatusChanged {
-                    player_id: change.player_id.clone(),
-                    kind,
-                    transition: change.transition.clone(),
-                },
-            )?;
-        }
-
-        // Cross-check, not a second source. Every status the two snapshots disagree about
-        // must be explained by at least one record; a visible change with no record means a
-        // producer mutated `statuses` without reporting it, and the event stream would tell
-        // the client nothing happened. The converse is deliberately not checked: a status
-        // applied and expired within this one call leaves no snapshot difference at all,
-        // and recording it is the entire point of this contract.
-        let status_kinds: BTreeSet<ClientStatusKind> = pre_player
-            .statuses
-            .iter()
-            .chain(post_player.statuses.iter())
-            .map(|status| status.kind)
-            .collect();
-        for kind in status_kinds {
-            let previous = pre_player
-                .statuses
-                .iter()
-                .find(|status| status.kind == kind);
-            let current = post_player
-                .statuses
-                .iter()
-                .find(|status| status.kind == kind);
-            if previous != current && !recorded_kinds.contains(&kind) {
-                return Err(SessionFault::ContractInvariant);
-            }
-        }
-
         if pre_player.passive_id != post_player.passive_id
             && let Some(passive_id) = &post_player.passive_id
         {
@@ -2139,47 +2290,64 @@ fn derive_events(
         }
     }
 
+    // Spawns and removals come from the producers that caused them, in the order they
+    // happened. A replacement removes then spawns and an eviction spawns then removes; only
+    // an ordered stream keeps those distinguishable, and only a record can describe an
+    // object that spawned and was removed inside this one command.
+    let mut recorded_sequences: BTreeSet<u32> = BTreeSet::new();
+    for change in object_changes {
+        recorded_sequences.insert(change.object.sequence);
+        let projection = crate::client_contract::snapshot_object(&change.object);
+        let kind = match change.transition {
+            PersistentObjectTransition::Spawned => {
+                PresentationEventKind::ObjectSpawned { object: projection }
+            }
+            PersistentObjectTransition::Removed { cause } => PresentationEventKind::ObjectRemoved {
+                previous: projection,
+                cause,
+            },
+        };
+        push_pending(&mut pending, resolution_tick, 16, kind)?;
+    }
+
+    // The other half of the same check: anything that left authoritative state must have
+    // said why. The converse is deliberately unchecked — an object spawned and removed
+    // within this command is in neither snapshot, and recording it is the entire point.
     for previous in &pre_snapshot.persistent_objects {
-        if post_snapshot
+        let survived = post_snapshot
             .persistent_objects
             .iter()
-            .all(|current| current.sequence != previous.sequence)
-        {
-            push_pending(
-                &mut pending,
-                resolution_tick,
-                16,
-                PresentationEventKind::ObjectRemoved {
-                    previous: previous.clone(),
-                    cause: ChangeProvenance::AuthoritativeResolution,
-                },
-            )?;
+            .any(|current| current.sequence == previous.sequence);
+        if !survived && !recorded_sequences.contains(&previous.sequence) {
+            return Err(SessionFault::ContractInvariant);
         }
     }
+
+    // `ObjectChanged` stays snapshot-derived: an object that survived the command is fully
+    // visible in both snapshots, and no producer records in-place mutation.
     for current in &post_snapshot.persistent_objects {
         match pre_snapshot
             .persistent_objects
             .iter()
             .find(|previous| previous.sequence == current.sequence)
         {
-            None => push_pending(
-                &mut pending,
-                resolution_tick,
-                16,
-                PresentationEventKind::ObjectSpawned {
-                    object: current.clone(),
-                },
-            )?,
             Some(previous) if previous != current => push_pending(
                 &mut pending,
                 resolution_tick,
-                16,
+                17,
                 PresentationEventKind::ObjectChanged {
                     previous: previous.clone(),
                     current: current.clone(),
                 },
             )?,
             Some(_) => {}
+            // Appearing in the post-snapshot without a record means a producer added an
+            // object without reporting it. Fail closed rather than emit a stream that
+            // disagrees with the snapshot it accompanies.
+            None if !recorded_sequences.contains(&current.sequence) => {
+                return Err(SessionFault::ContractInvariant);
+            }
+            None => {}
         }
     }
 
@@ -3184,8 +3352,8 @@ mod strike_provenance_tests {
                     );
                     cited.push(trace_sequence);
                 }
-                StrikeDelivery::Melee => {
-                    panic!("Carrion Call is a projectile ability; a melee delivery is wrong")
+                StrikeDelivery::Melee | StrikeDelivery::Effect { .. } => {
+                    panic!("Carrion Call delivers every strike by projectile")
                 }
             }
         }
@@ -3458,5 +3626,188 @@ mod status_lifecycle_tests {
             status_events(&second_transition).is_empty(),
             "a later command must not repeat an earlier command's transitions",
         );
+    }
+}
+
+/// Persistent-object lifecycle reaching the client event stream.
+///
+/// Aleph's throwing knife is the only object producer reachable from a non-special ability,
+/// and its chain detonation produces the case this contract exists for: a knife that spawns
+/// and is removed inside one command appears in neither the pre- nor the post-snapshot, so
+/// no diff can report it at all.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod object_lifecycle_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig};
+    use crate::types::Appearance;
+
+    const ALEPH: &str = "a-local-player";
+
+    fn knife_duel() -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: ALEPH.to_owned(),
+                    team: 0,
+                    character_id: "aleph".to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-local-bot".to_owned(),
+                    team: 1,
+                    character_id: "huck".to_owned(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    fn command_for(session: &MatchSessionHost, id: &str, kind: MatchCommandKind) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind,
+        }
+    }
+
+    /// Empirically verified to land and embed a knife.
+    fn throw_knife(session: &MatchSessionHost, id: &str) -> MatchCommand {
+        command_for(
+            session,
+            id,
+            MatchCommandKind::Ability {
+                slot: AbilitySlot::BasicAlt,
+                angle_millidegrees: 0,
+                power_basis_points: 200,
+                target_player_id: None,
+                secondary_target_player_id: None,
+            },
+        )
+    }
+
+    fn spawns(transition: &MatchTransition) -> Vec<u32> {
+        transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::ObjectSpawned { object } => Some(object.sequence),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn removals(transition: &MatchTransition) -> Vec<(u32, PersistentObjectRemovalCause)> {
+        transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::ObjectRemoved { previous, cause } => {
+                    Some((previous.sequence, *cause))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn embedding_a_knife_reports_the_spawn() {
+        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
+        let command = throw_knife(&session, "throw-1");
+        let transition = session.apply(command).expect("throw must be accepted");
+
+        assert_eq!(
+            spawns(&transition),
+            vec![0],
+            "the embedded knife must be reported as a spawn",
+        );
+        assert!(removals(&transition).is_empty());
+        assert_eq!(session.snapshot().persistent_objects.len(), 1);
+    }
+
+    #[test]
+    fn a_knife_spawned_and_detonated_in_one_command_is_invisible_to_a_diff_but_fully_recorded() {
+        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
+        let first = throw_knife(&session, "throw-1");
+        session.apply(first).expect("first throw must be accepted");
+        let pass = command_for(&session, "pass-1", MatchCommandKind::Pass);
+        session.apply(pass).expect("pass must be accepted");
+
+        let before: Vec<u32> = session
+            .snapshot()
+            .persistent_objects
+            .iter()
+            .map(|object| object.sequence)
+            .collect();
+
+        let second = throw_knife(&session, "throw-2");
+        let transition = session
+            .apply(second)
+            .expect("second throw must be accepted");
+
+        let after: Vec<u32> = session
+            .snapshot()
+            .persistent_objects
+            .iter()
+            .map(|object| object.sequence)
+            .collect();
+
+        // The fixture must genuinely reproduce the gap, or this test proves nothing: knife 1
+        // is created and destroyed inside this single command, so it is absent from the
+        // snapshot before it and the snapshot after it alike.
+        assert_eq!(before, vec![0], "only the first knife exists going in");
+        assert!(after.is_empty(), "both knives are gone coming out");
+        assert!(
+            !before.contains(&1) && !after.contains(&1),
+            "knife 1 must appear in neither snapshot, or the gap is not being tested",
+        );
+
+        // A diff could only ever have reported knife 0 disappearing, with no cause and no
+        // hint that knife 1 existed. The records describe all three transitions.
+        assert_eq!(spawns(&transition), vec![1], "knife 1's spawn is reported");
+        assert_eq!(
+            removals(&transition),
+            vec![
+                (0, PersistentObjectRemovalCause::Detonated),
+                (1, PersistentObjectRemovalCause::Detonated),
+            ],
+            "both detonations are reported, each naming why it happened",
+        );
+    }
+
+    #[test]
+    fn a_removal_names_a_real_cause_rather_than_a_placeholder() {
+        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
+        session
+            .apply(throw_knife(&session, "throw-1"))
+            .expect("first throw must be accepted");
+        let pass = command_for(&session, "pass-1", MatchCommandKind::Pass);
+        session.apply(pass).expect("pass must be accepted");
+        let transition = session
+            .apply(throw_knife(&session, "throw-2"))
+            .expect("second throw must be accepted");
+
+        let causes = removals(&transition);
+        assert!(
+            !causes.is_empty(),
+            "the fixture must actually remove objects"
+        );
+        for (sequence, cause) in causes {
+            // Every removal carries the producer's own reason. Before these records existed
+            // this field was a single constant that said only "something authoritative did
+            // it", which is true of every removal and therefore tells a client nothing.
+            assert_eq!(
+                cause,
+                PersistentObjectRemovalCause::Detonated,
+                "knife {sequence} was removed by the chain detonation",
+            );
+            assert_eq!(cause.wire_name(), "detonated");
+        }
     }
 }

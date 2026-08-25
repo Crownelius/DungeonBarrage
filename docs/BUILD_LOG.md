@@ -1280,3 +1280,111 @@ outcome's size.
 Object removal and change causes. `CommandOutcome` has no `objects_removed` counterpart to
 `objects_created`, and nothing records why a turret, knife, or gas cloud left the board. C1 is not
 complete; steps 3 through 8 are untouched.
+
+---
+
+## C1 — object lifecycle provenance, and finishing an interrupted refactor
+
+Resumed a working tree left mid-refactor by a previous agent: `types.rs`, `command.rs`,
+`match_session.rs`, `victory.rs`, and six `resolve/` modules were edited, but `scheduler.rs` and
+`match_host.rs` were untouched and the crate did not compile (10 errors). Nothing was reverted.
+
+### What the previous agent had established
+
+- `PersistentObjectChange` / `PersistentObjectTransition::{Spawned, Removed { cause }}` with a
+  six-variant `PersistentObjectRemovalCause`, replacing `CommandOutcome::objects_created` with an
+  ordered `object_changes` stream. One stream rather than separate create/remove vectors because a
+  turret replacement removes-then-spawns, a cap eviction spawns-then-removes, and a knife chain can
+  do both inside one command.
+- `StrikeDelivery::Effect { kind }` for strikes delivered by an effect rather than the primary
+  attack, and `CritRoll::Forced` for a guaranteed crit — critical, but consuming **no** RNG draw,
+  so `consumed_draw()` is correctly false for it.
+- `tick_statuses(state, player_id)`, scoped to one player, with `GuaranteeCrit` excluded from turn
+  decay because its magnitude is a charge count, not a clock.
+- Seven producers writing `object_changes`, and `victory::eliminate` recording `OwnerEliminated`.
+
+### What was finished here
+
+**Threading.** `scheduler::advance_phase` now carries both accumulators; `leave_victory_check` and
+`force_draw` pass the object accumulator into `victory::eliminate`. `MatchHost` gained an
+`object_changes` record cleared at every public entry point and folded onto the outcome, mirroring
+`status_changes` exactly. The `StatusResolution` arm ticks `state.active_player_id`.
+
+**The consumer, which did not exist.** `object_changes` was fully produced and read by nothing.
+`derive_events` still built object events by diffing snapshots, and every `ObjectRemoved` carried
+`ChangeProvenance::AuthoritativeResolution` — a constant true of every removal, and therefore
+information-free. Spawns and removals now come from the records, `ObjectRemoved` carries the real
+`PersistentObjectRemovalCause`, and the same reconciliation guard used for statuses applies: an
+object appearing or disappearing between snapshots with no record is a
+`SessionFault::ContractInvariant`. `ObjectChanged` stays snapshot-derived, since an object that
+survived is fully visible in both snapshots and no producer records in-place mutation.
+
+Left unwired, this would have been the sixth occurrence of the repository's
+correct-tested-unreachable failure mode.
+
+### A pre-existing test that had to change
+
+`a_two_turn_lockdown_survives_exactly_two_full_turn_cycles` predates this work and passed under
+all-player ticking. Per-player ticking breaks it, and the test — not the implementation — was the
+stale artifact: ticking every player on every command means a two-turn status expires after two
+commands *by anyone*, which in a four-player match is half a round, and makes the same status mean
+something different at every table size.
+
+Replaced with `a_two_turn_status_lasts_two_of_the_affected_players_own_turns`, which asserts across
+four laps that another player's turn does **not** erode it and the victim's own turn does. Timing
+was confirmed empirically first: the status ticks on laps 2 and 4, the target's own turns.
+
+**This is a balance change, not just a provenance change.** A status now lasts N of the victim's
+turns rather than N commands, so in a duel it is roughly twice as long as before and in a
+four-player match roughly four times. Numa's Pin and any future Chill are affected. Flagged for
+owner review.
+
+Added `a_count_based_guarantee_crit_is_not_eroded_by_the_turn_tick`, which runs four laps and
+asserts the charge count and the never-expires sentinel both survive.
+
+### Evidence
+
+486 passing, up from 480. Six new tests.
+
+The object tests use Aleph's throwing knife — the only object producer reachable from a
+non-special ability — with parameters found by brute-force search rather than guessed. The headline
+test captures the case the contract exists for, verified empirically before it was written:
+
+```
+cmd2  SPAWN  seq=1
+cmd2  REMOVE seq=0 cause=detonated
+cmd2  REMOVE seq=1 cause=detonated
+```
+
+Knife 1 is spawned and destroyed inside one command. The test asserts first that it appears in
+**neither** the pre- nor the post-snapshot — so the fixture genuinely reproduces the gap — and then
+that all three transitions are reported with real causes. A diff could only ever have reported
+knife 0 vanishing, with no cause and no hint knife 1 existed.
+
+Mutation-checked: suppressing record-driven emission makes all three object tests fail with
+`ContractInvariant` rather than silently emitting an empty stream.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 486 pass, 0 fail (was 480) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `git diff --check` | clean |
+
+Golden vectors are unchanged. The status-timing change does not reach them because no launch-roster
+basic attack applies a status — the same content gap recorded in the previous entry.
+
+`derive_events` exceeded clippy's argument limit once the object records joined it; the provenance
+inputs are now grouped in an `AppliedRecords` struct rather than the lint being suppressed. A caller
+cannot supply one record stream without the others and leave the event stream half-explained.
+
+### Still open
+
+`PersistentObjectRemovalCause::Expired` and `Destroyed` are defined but never produced: no
+scheduler-owned object-lifetime tick and no object targeting or damage exist yet. Both are marked
+reserved in their doc comments. C1 steps 3 through 8 remain untouched.

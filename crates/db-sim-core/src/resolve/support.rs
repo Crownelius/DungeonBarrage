@@ -212,7 +212,7 @@ mod tests {
     use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
-        Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObject, PlayerState,
+        Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObjectChange, PlayerState,
         SimulationState, TerrainMask, TerrainOperation,
     };
     use std::collections::BTreeMap;
@@ -269,7 +269,7 @@ mod tests {
         rng: Rng,
         damage: BTreeMap<String, DamageEvent>,
         terrain_ops: Vec<TerrainOperation>,
-        objects_created: Vec<PersistentObject>,
+        object_changes: Vec<PersistentObjectChange>,
         status_changes: Vec<StatusChange>,
         terrain_cells_removed: u32,
     }
@@ -281,7 +281,7 @@ mod tests {
                 rng: Rng::from_state(1),
                 damage: BTreeMap::new(),
                 terrain_ops: Vec::new(),
-                objects_created: Vec::new(),
+                object_changes: Vec::new(),
                 status_changes: Vec::new(),
                 terrain_cells_removed: 0,
             }
@@ -297,7 +297,7 @@ mod tests {
                 impact_point: FixedPoint::ZERO,
                 damage: &mut self.damage,
                 terrain_ops: &mut self.terrain_ops,
-                objects_created: &mut self.objects_created,
+                object_changes: &mut self.object_changes,
                 status_changes: &mut self.status_changes,
                 terrain_cells_removed: &mut self.terrain_cells_removed,
             }

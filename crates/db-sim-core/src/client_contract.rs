@@ -556,6 +556,21 @@ fn snapshot_players(source: &[PlayerState]) -> Vec<PlayerSnapshot> {
     players
 }
 
+/// Projects one object for a transition record.
+///
+/// Visible to the crate because `match_session` labels authoritative object transitions with
+/// the same projection the snapshots use; building a second one there would let the two
+/// drift apart silently.
+pub(crate) fn snapshot_object(object: &PersistentObject) -> PersistentObjectSnapshot {
+    let projected = snapshot_objects(std::slice::from_ref(object));
+    let Some(first) = projected.into_iter().next() else {
+        // `snapshot_objects` maps one-to-one, so a single input always yields a single
+        // output. Reconstructing a placeholder here would be inventing state.
+        unreachable!("projecting one object must yield exactly one snapshot")
+    };
+    first
+}
+
 fn snapshot_objects(source: &[PersistentObject]) -> Vec<PersistentObjectSnapshot> {
     let mut objects: Vec<PersistentObjectSnapshot> = source
         .iter()

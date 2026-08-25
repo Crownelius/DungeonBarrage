@@ -81,8 +81,9 @@ use crate::fixed::{
 };
 use crate::terrain;
 use crate::types::{
-    BASE_ATTACK, EffectKind, Material, MaterialMask, SimulationState, SpecialEffect, StatusChange,
-    StatusEffect, StatusTransition, TerrainOperation, TerrainShape,
+    BASE_ATTACK, CritRoll, EffectKind, Material, MaterialMask, SimulationState, SpecialEffect,
+    StatusChange, StatusEffect, StatusTransition, StrikeDelivery, StrikeResolution,
+    TerrainOperation, TerrainShape,
 };
 use std::collections::BTreeMap;
 
@@ -165,6 +166,19 @@ pub fn resolve(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResul
 /// `was_critical` is set if *any* strike crit and is never unset by a later uncrit strike
 /// (`deal_damage` only ever ORs it).
 fn resolve_multi_strike(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResult<()> {
+    let _records = resolve_multi_strike_with_records(ctx, effect)?;
+    Ok(())
+}
+
+/// Resolves [`EffectKind::MultiStrike`] and returns every source-owned strike record.
+///
+/// The ordinary family [`resolve`] entry point discards these only for isolated resolver
+/// tests. The real command path calls this function through [`super::resolve_effect`] and
+/// appends the records to [`crate::types::CommandOutcome::strikes`].
+pub(super) fn resolve_multi_strike_with_records(
+    ctx: &mut ResolveContext<'_>,
+    effect: &SpecialEffect,
+) -> SimResult<Vec<StrikeResolution>> {
     let Some(target_id) = ctx.primary_target_id else {
         return Err(SimError::OutOfRange {
             field: "multi_strike.primary_target_id",
@@ -176,18 +190,47 @@ fn resolve_multi_strike(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) ->
     let uncrit_hp = percent_to_hp(uncrit_percent);
     let crit_hp = percent_to_hp(crit_percent);
     let crit_chance_basis_points = multi_strike_crit_chance_basis_points(effect);
+    let mut records = Vec::new();
 
-    for _ in 0..strikes {
-        let forced = consume_guarantee_crit(ctx, target_id);
-        // Short-circuiting `||` is load-bearing: a forced strike must not also consume an
-        // RNG draw, the same "consumption proportional to what actually rolled" rule
-        // `command.rs::roll_crit` documents for its own zero-chance case.
-        let is_crit = forced || ctx.rng.bounded(CRIT_ROLL_BOUND) < crit_chance_basis_points;
-        let hp = if is_crit { crit_hp } else { uncrit_hp };
-        deal_damage(ctx, target_id, hp, is_crit);
+    for strike_index in 0..strikes {
+        let forced = consume_guarantee_crit(ctx.state, ctx.status_changes, target_id);
+        let crit = if forced {
+            CritRoll::Forced
+        } else if crit_chance_basis_points == 0 {
+            CritRoll::NotEligible
+        } else if ctx.rng.bounded(CRIT_ROLL_BOUND) < crit_chance_basis_points {
+            CritRoll::Landed
+        } else {
+            CritRoll::Missed
+        };
+        let hp = if crit.is_critical() {
+            crit_hp
+        } else {
+            uncrit_hp
+        };
+        let was_alive = ctx
+            .state
+            .player(target_id)
+            .is_some_and(|player| !player.is_eliminated());
+        let damage_applied = deal_damage(ctx, target_id, hp, crit.is_critical());
+        records.push(StrikeResolution {
+            strike_index: u16::try_from(strike_index).unwrap_or(u16::MAX),
+            target_player_id: target_id.to_owned(),
+            impact_point: ctx.impact_point,
+            delivery: StrikeDelivery::Effect {
+                kind: EffectKind::MultiStrike,
+            },
+            crit,
+            damage_applied,
+            eliminated_target: was_alive
+                && ctx
+                    .state
+                    .player(target_id)
+                    .is_some_and(crate::types::PlayerState::is_eliminated),
+        });
     }
 
-    Ok(())
+    Ok(records)
 }
 
 /// Strike count from `effect.magnitude`. Non-positive values clamp to `1` — an ability
@@ -233,8 +276,12 @@ fn multi_strike_crit_chance_basis_points(effect: &SpecialEffect) -> u32 {
 /// remaining count, consumes one count (removing the status once exhausted) and returns
 /// `true` — this strike is forced to crit, no RNG draw needed. Otherwise returns `false`
 /// and leaves the target's statuses untouched.
-fn consume_guarantee_crit(ctx: &mut ResolveContext<'_>, target_id: &str) -> bool {
-    let Some(target) = ctx.state.player_mut(target_id) else {
+pub(crate) fn consume_guarantee_crit(
+    state: &mut SimulationState,
+    status_changes: &mut Vec<StatusChange>,
+    target_id: &str,
+) -> bool {
+    let Some(target) = state.player_mut(target_id) else {
         return false;
     };
 
@@ -266,7 +313,7 @@ fn consume_guarantee_crit(ctx: &mut ResolveContext<'_>, target_id: &str) -> bool
     // One multi-strike ability can consume several charges in a single command, so a
     // pre/post diff of `magnitude` would collapse three consumptions into one net change
     // and an exhaustion into a status that simply vanished. Each is recorded as it happens.
-    ctx.status_changes.push(StatusChange {
+    status_changes.push(StatusChange {
         player_id: target_id.to_owned(),
         kind: EffectKind::GuaranteeCrit,
         transition: if exhausted {
@@ -680,7 +727,7 @@ mod tests {
     use crate::rng::Rng;
     use crate::types::TurnEndReason;
     use crate::types::{
-        Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObject, PlayerState,
+        Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObjectChange, PlayerState,
         TerrainMask,
     };
 
@@ -740,7 +787,7 @@ mod tests {
         damage: BTreeMap<String, DamageEvent>,
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
-        objects_created: Vec<PersistentObject>,
+        object_changes: Vec<PersistentObjectChange>,
         status_changes: Vec<StatusChange>,
     }
 
@@ -752,7 +799,7 @@ mod tests {
                 damage: BTreeMap::new(),
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
-                objects_created: Vec::new(),
+                object_changes: Vec::new(),
                 status_changes: Vec::new(),
             }
         }
@@ -774,7 +821,7 @@ mod tests {
                 damage: &mut self.damage,
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
-                objects_created: &mut self.objects_created,
+                object_changes: &mut self.object_changes,
                 status_changes: &mut self.status_changes,
             }
         }
@@ -1363,9 +1410,8 @@ mod tests {
 
         // Three consumptions inside what a caller sees as one action.
         for _ in 0..3 {
-            let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
             assert!(
-                consume_guarantee_crit(&mut ctx, "target"),
+                consume_guarantee_crit(&mut harness.state, &mut harness.status_changes, "target",),
                 "a marked target must force the crit while charges remain",
             );
         }
@@ -1403,9 +1449,11 @@ mod tests {
             ],
             1,
         );
-        let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
-
-        assert!(!consume_guarantee_crit(&mut ctx, "target"));
+        assert!(!consume_guarantee_crit(
+            &mut harness.state,
+            &mut harness.status_changes,
+            "target",
+        ));
         assert!(
             harness.status_changes.is_empty(),
             "a transition that did not happen must not be reported",

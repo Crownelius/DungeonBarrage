@@ -209,13 +209,19 @@ entire repository merely to silence Git's “LF will be replaced by CRLF” noti
 
 Continue C1; do not begin C2 or Godot UI yet.
 
-1. ~~Action impacts, per-strike crit/RNG records, status lifecycle records~~ **done**
-   (`StrikeResolution` and `StatusChange` in `types.rs`). **Remaining in this step:** object
-   removal/change causes — add an `objects_removed` counterpart to `objects_created` and record
-   why each object left (expiry, destruction, owner elimination). Do not reconstruct these from
-   final state. The status work is the worked example: record at every producer, consume in
-   `derive_events`, and add a reconciliation check that faults when the records fail to explain
-   an observable change.
+1. ~~Action impacts, per-strike crit/RNG records, status lifecycle records, object removal
+   causes~~ — **step 1 is complete.** `PersistentObjectChange` replaces `objects_created` with an
+   ordered spawn/remove stream naming a real `PersistentObjectRemovalCause`, consumed by
+   `derive_events` under the same fail-closed reconciliation guard used for statuses.
+   `RemovalCause::{Expired, Destroyed}` are defined but unreachable until a scheduler-owned
+   object-lifetime tick and object targeting/damage exist; both say so in their doc comments.
+
+   **Owner decision needed — this was a balance change, not only a provenance change.** Statuses
+   now tick on the affected player's own turns rather than once per command submitted anywhere.
+   A two-turn status is therefore roughly twice as long in a duel and four times as long in a
+   four-player match. This is more correct — the same status no longer means different things at
+   different table sizes — but Numa's Pin and any future Chill are directly affected and the
+   numbers in `CHARACTERS.md` were written against the old reading.
 2. Extend the session event builder and tests for real multi-strike, strike, random outcome,
    duration-one status, object lifecycle, block/terrain, elimination, passive selection/chosen,
    pass, timeout, and victory. Keep ordering deterministic and version the client contract if

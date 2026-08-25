@@ -21,7 +21,8 @@ use crate::fixed::{self, BODY_WIDTH, FixedPoint};
 use crate::rng::Rng;
 use crate::terrain;
 use crate::types::{
-    BASE_ATTACK, EffectKind, PersistentObject, PersistentObjectKind, SpecialEffect, TerrainMask,
+    BASE_ATTACK, EffectKind, PersistentObject, PersistentObjectChange, PersistentObjectKind,
+    PersistentObjectTransition, SpecialEffect, TerrainMask,
 };
 
 use super::ResolveContext;
@@ -309,9 +310,12 @@ fn resolve_obscure(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimR
 
     // Both the authoritative object list (so a same-action line-of-sight check would see
     // it immediately, matching how `Push` must be visible to a later `WallImpact` per the
-    // `ResolveContext` doc comment) and the action's own created-objects record.
+    // `ResolveContext` doc comment) and the action's ordered lifecycle record.
     ctx.state.objects.push(cloud.clone());
-    ctx.objects_created.push(cloud);
+    ctx.object_changes.push(PersistentObjectChange {
+        object: cloud,
+        transition: PersistentObjectTransition::Spawned,
+    });
 
     Ok(())
 }
@@ -643,7 +647,7 @@ mod tests {
         let mut rng = Rng::from_state(seed);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = teleport_effect(50, 200);
 
@@ -659,7 +663,7 @@ mod tests {
                 damage: &mut damage,
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
-                objects_created: &mut objects_created,
+                object_changes: &mut object_changes,
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -706,7 +710,7 @@ mod tests {
         let mut rng = Rng::from_state(1);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = teleport_effect(50, 200);
 
@@ -721,7 +725,7 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -746,7 +750,7 @@ mod tests {
         let mut rng = Rng::from_state(99);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = teleport_effect(radius, 0);
 
@@ -761,7 +765,7 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -790,7 +794,7 @@ mod tests {
             let mut rng = Rng::from_state(seed);
             let mut damage = BTreeMap::new();
             let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-            let mut objects_created: Vec<PersistentObject> = Vec::new();
+            let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
             let mut status_changes: Vec<StatusChange> = Vec::new();
             let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
@@ -803,7 +807,7 @@ mod tests {
                 damage: &mut damage,
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
-                objects_created: &mut objects_created,
+                object_changes: &mut object_changes,
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -828,7 +832,7 @@ mod tests {
             let mut rng = Rng::from_state(seed);
             let mut damage = BTreeMap::new();
             let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-            let mut objects_created: Vec<PersistentObject> = Vec::new();
+            let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
             let mut status_changes: Vec<StatusChange> = Vec::new();
             let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
@@ -841,7 +845,7 @@ mod tests {
                 damage: &mut damage,
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
-                objects_created: &mut objects_created,
+                object_changes: &mut object_changes,
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -886,7 +890,7 @@ mod tests {
             let mut rng = Rng::from_state(seed);
             let mut damage = BTreeMap::new();
             let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-            let mut objects_created: Vec<PersistentObject> = Vec::new();
+            let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
             let mut status_changes: Vec<StatusChange> = Vec::new();
             let mut cells_removed = 0u32;
             let mut ctx = ResolveContext {
@@ -899,7 +903,7 @@ mod tests {
                 damage: &mut damage,
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
-                objects_created: &mut objects_created,
+                object_changes: &mut object_changes,
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -936,7 +940,7 @@ mod tests {
         let mut rng = Rng::from_state(1);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = relocate_effect(25);
 
@@ -951,7 +955,7 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -995,7 +999,7 @@ mod tests {
         let mut rng = Rng::from_state(1);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = relocate_effect(25);
 
@@ -1010,7 +1014,7 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -1043,7 +1047,7 @@ mod tests {
         let mut rng = Rng::from_state(1);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = relocate_effect(25);
 
@@ -1058,7 +1062,7 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -1088,7 +1092,7 @@ mod tests {
         let mut rng = Rng::from_state(1);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = obscure_effect(radius, 2);
 
@@ -1103,27 +1107,28 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
         assert!(result.is_ok(), "resolve must succeed: {result:?}");
 
-        assert_eq!(objects_created.len(), 1);
-        let Some(created) = objects_created.first() else {
+        assert_eq!(object_changes.len(), 1);
+        let Some(created) = object_changes.first() else {
             panic!("must have created exactly one object");
         };
-        assert_eq!(created.kind, PersistentObjectKind::GasCloud);
-        assert_eq!(created.owner_id, "aleph");
-        assert_eq!(created.position, actor_pos);
-        assert_eq!(created.turns_remaining, 2);
-        assert!(created.health > 0);
+        assert_eq!(created.transition, PersistentObjectTransition::Spawned);
+        assert_eq!(created.object.kind, PersistentObjectKind::GasCloud);
+        assert_eq!(created.object.owner_id, "aleph");
+        assert_eq!(created.object.position, actor_pos);
+        assert_eq!(created.object.turns_remaining, 2);
+        assert!(created.object.health > 0);
 
         assert_eq!(state.objects.len(), 1);
         let Some(in_state) = state.objects.first() else {
             panic!("the object must also be present in the authoritative state");
         };
-        assert_eq!(in_state, created);
+        assert_eq!(in_state, &created.object);
     }
 
     // -----------------------------------------------------------------
@@ -1139,7 +1144,7 @@ mod tests {
         let mut rng = Rng::from_state(1);
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
-        let mut objects_created: Vec<PersistentObject> = Vec::new();
+        let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = SpecialEffect {
             trigger: EffectTrigger::OnImpact,
@@ -1160,7 +1165,7 @@ mod tests {
             damage: &mut damage,
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
-            objects_created: &mut objects_created,
+            object_changes: &mut object_changes,
             status_changes: &mut status_changes,
         };
         assert!(resolve(&mut ctx, &effect).is_err());
