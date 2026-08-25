@@ -1159,3 +1159,124 @@ pass.
 Status lifecycle records and object removal/change causes remain unrecorded, and `CommandOutcome`
 still has no `objects_removed` counterpart to `objects_created`. Duration-one statuses that apply and
 expire inside a single synchronous call remain invisible to a pre/post diff. C1 is not complete.
+
+---
+
+## C1 — status lifecycle records
+
+Second half of HANDOFF §6 step 1. Thirteen source files, `docs/HANDOFF.md`, this log.
+
+### What was added
+
+`CommandOutcome` gained `status_changes: Vec<StatusChange>`, each naming a player, a status kind,
+and one `StatusTransition`: `Applied`, `Refreshed` (carrying the magnitude and turns it displaced),
+`ChargeConsumed { remaining }`, `Ticked { turns_remaining }`, `Exhausted`, or `Expired`.
+
+All four production producers record where the transition happens:
+
+- `resolve::status::apply_status` — `Applied` / `Refreshed`
+- `resolve::status::tick_statuses` — `Ticked` / `Expired`, now `#[must_use]`
+- `resolve::attack_mods::resolve_guarantee_crit` — `Applied` / `Refreshed`
+- `resolve::attack_mods::consume_guarantee_crit` — `ChargeConsumed` / `Exhausted`
+
+`ResolveContext` carries the accumulator exactly as it already carries `damage`, `terrain_ops`,
+and `objects_created`. `scheduler::advance_phase` takes one too, because the end-of-turn tick runs
+inside it and `command::apply_ability` has already returned by then.
+
+`Refreshed` reports what it replaced because statuses refresh rather than stack: the displaced
+magnitude and duration are gone from state the moment the new status lands, so if the record did
+not carry them, nothing could.
+
+`Ticked` is recorded even though a snapshot diff can see it. Without it the transition stream would
+explain only some observable changes, leaving a consumer unable to distinguish a missing record
+from a change that legitimately had none — and it would make the reconciliation check below
+impossible to state.
+
+### Where the records surface
+
+`MatchHost` owns a `status_changes` record cleared at the start of every public entry point. This
+exists because `pass_turn`, `time_out_turn`, and `submit_move` produce no `CommandOutcome` at all,
+yet still end turns and therefore still run the status tick. `submit_ability` and
+`submit_passive_choice` copy the completed record onto their outcome with `clone_from`, so the two
+cannot disagree.
+
+`match_session::derive_events` now emits `StatusChanged` from these records instead of diffing the
+pre- and post-snapshots. The event previously carried `previous`/`current` snapshots; it now
+carries the transition itself, which is strictly more information — a diff cannot represent a
+status applied and expired inside one turn (it appears in neither snapshot), nor three charges
+consumed from one status by a single multi-strike ability (the diff shows one net change).
+
+### The reconciliation check
+
+Replacing a diff with records risks the opposite failure: a future producer mutates `statuses`
+without recording, and the client is told nothing happened. So `derive_events` keeps computing the
+diff and uses it as a cross-check. Any status kind the two snapshots disagree about that no record
+explains returns `SessionFault::ContractInvariant`.
+
+The converse is deliberately not checked: a status applied and expired within one call leaves no
+snapshot difference at all, and recording that is the entire point of the contract.
+
+This was verified by mutation, not assumed. Making `tick_statuses` record nothing while still
+mutating state causes `session.apply` to fail with `ContractInvariant` rather than silently
+emitting an empty event stream.
+
+### Evidence
+
+Sixteen new tests; 480 passing, up from 464.
+
+- `resolve::status` — `Applied`; `Refreshed` carrying the replaced values; the tick separating
+  survivors from expiries; per-player independence; and the headline case: a duration-one status
+  applied and expired in one call, asserting first that the pre- and post-status lists are
+  **identical** (so the fixture genuinely reproduces the invisible-transition gap) and then that
+  both `Applied` and `Expired` were nonetheless recorded, in that order.
+- `resolve::attack_mods` — three charges consumed inside one action producing
+  `ChargeConsumed { remaining: 2 }`, `ChargeConsumed { remaining: 1 }`, `Exhausted`, where a diff
+  would show a single disappearance; plus refresh-not-sum, and that an unmarked target records
+  nothing.
+- `match_host` — expiries reach `status_changes()`; the record is cleared per call; an ability
+  outcome carries byte-identical transitions to the host's own record.
+- `match_session` — a `Pass` surfaces the expiry it caused despite producing no outcome; a
+  surviving status reports its decrement; a turn with no statuses emits no events; and a second
+  command does not repeat the first command's transitions.
+
+### Content gap found while wiring this
+
+Only two effects in the entire launch roster attach a status — Numa's Pin (`Lockdown`) and Karl's
+Feeding Frenzy (`GuaranteeCrit`) — and both are specials gated behind a full gauge.
+`resolve::status::resolve_chill` and `resolve_embers` are fully implemented and tested, but **no
+ability references `EffectKind::Chill` or `EffectKind::Embers`**, so neither can occur in a real
+match today. A content gap rather than a wiring bug: the fifteen undesigned characters are
+expected to use them. It is nonetheless why the session-level tests seed a status directly rather
+than casting an ability to produce one, and it means status behaviour is far less exercised in
+real play than the test count alone suggests.
+
+`resolve::status::tick_statuses` also carried a stale doc comment claiming "nothing calls this
+yet". `scheduler::advance_phase` has called it since the scheduler landed; the comment was
+corrected rather than left to imply dead code.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 480 pass, 0 fail (was 464) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `git diff --check` | clean |
+
+Golden vectors and fixture hashes are unchanged, and `SIMULATION_VERSION` stays at 5: this records
+what the simulation already did and changes no authoritative state, no RNG consumption, and no
+state hash. The host's record is deliberately not part of `SimulationState`, so it is neither
+hashed nor replicated.
+
+Clippy's `large_enum_variant` fired on `match_session::AppliedCommand` once `CommandOutcome` grew
+its second provenance vector; the accepted variant is now boxed, so a rejection no longer pays the
+outcome's size.
+
+### Still open in step 1
+
+Object removal and change causes. `CommandOutcome` has no `objects_removed` counterpart to
+`objects_created`, and nothing records why a turret, knife, or gas cloud left the board. C1 is not
+complete; steps 3 through 8 are untouched.

@@ -365,6 +365,7 @@ mod tests {
     use super::*;
     use crate::rng::Rng;
     use crate::terrain;
+    use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PlayerState, SimulationState,
@@ -464,6 +465,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         objects_created: Vec<PersistentObject>,
+        status_changes: Vec<StatusChange>,
     }
 
     impl Fixture {
@@ -475,6 +477,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 objects_created: Vec::new(),
+                status_changes: Vec::new(),
             }
         }
 
@@ -495,6 +498,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 objects_created: &mut self.objects_created,
+                status_changes: &mut self.status_changes,
             };
             resolve(&mut ctx, effect)
         }

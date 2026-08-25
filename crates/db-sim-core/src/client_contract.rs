@@ -422,7 +422,10 @@ const fn snapshot_erosion_axis(axis: ErosionAxis) -> ClientErosionAxis {
     }
 }
 
-const fn snapshot_status_kind(kind: EffectKind) -> ClientStatusKind {
+/// Visible to the crate because `match_session` must label authoritative status
+/// transitions with the same closed client vocabulary the snapshots use. Duplicating this
+/// exhaustive match there would let the two drift apart silently.
+pub(crate) const fn snapshot_status_kind(kind: EffectKind) -> ClientStatusKind {
     match kind {
         EffectKind::Knockback => ClientStatusKind::Knockback,
         EffectKind::Chill => ClientStatusKind::Chill,

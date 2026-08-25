@@ -32,7 +32,7 @@
 use crate::error::SimResult;
 use crate::types::{
     AbilityCommand, CommandResult, GAUGE_FULL, MatchOutcome, MatchPhase, PassiveChoiceCommand,
-    SimulationState, TurnEndReason,
+    SimulationState, StatusChange, TurnEndReason,
 };
 use crate::{command, movement, scheduler, victory};
 
@@ -44,6 +44,13 @@ use crate::{command, movement, scheduler, victory};
 #[derive(Debug, Clone)]
 pub struct MatchHost {
     state: SimulationState,
+    /// Status transitions produced by the most recent public host call, in order.
+    ///
+    /// Deliberately **not** part of [`SimulationState`]: it is a record of what happened
+    /// during one call, not authoritative match state, so it is neither hashed nor
+    /// replicated. Every public entry point clears it first, so a caller can never read a
+    /// previous command's transitions and mistake them for this one's.
+    status_changes: Vec<StatusChange>,
 }
 
 impl MatchHost {
@@ -57,9 +64,23 @@ impl MatchHost {
         // Settle immediately so nobody begins the match hanging in the air. A character
         // spawned above their platform would otherwise take their first turn mid-fall.
         movement::settle(&mut state)?;
-        let mut host = Self { state };
+        let mut host = Self {
+            state,
+            status_changes: Vec::new(),
+        };
         host.open_turn()?;
         Ok(host)
+    }
+
+    /// Status transitions produced by the most recent public host call.
+    ///
+    /// Ability commands also carry these on their own [`crate::types::CommandOutcome`]; this
+    /// accessor is how the callers that produce no outcome — [`Self::pass_turn`],
+    /// [`Self::time_out_turn`], [`Self::submit_move`] — surface end-of-turn expiries that a
+    /// snapshot diff cannot show.
+    #[must_use]
+    pub fn status_changes(&self) -> &[StatusChange] {
+        &self.status_changes
     }
 
     /// Advances a freshly-opened turn from `TurnStart` into `Movement`, where commands are
@@ -71,7 +92,15 @@ impl MatchHost {
     /// job, not the scheduler's, because only the host knows there is a client waiting.
     fn open_turn(&mut self) -> SimResult<()> {
         if self.state.phase == MatchPhase::TurnStart {
-            scheduler::advance_phase(&mut self.state)?;
+            // `TurnStart` -> `Movement` never passes through `StatusResolution`, so this
+            // advance cannot tick a status. The scratch vector is asserted empty rather
+            // than discarded, so a future phase-graph change cannot silently drop expiries.
+            let mut unreachable_changes = Vec::new();
+            scheduler::advance_phase(&mut self.state, &mut unreachable_changes)?;
+            debug_assert!(
+                unreachable_changes.is_empty(),
+                "opening a turn must not tick statuses",
+            );
         }
         // `todolist.md` P12: a gauge can fill from damage *taken* during someone else's turn,
         // or from being healed. Raising the prompt only for whoever just acted meant such a
@@ -126,6 +155,7 @@ impl MatchHost {
     ///
     /// Propagates failures from [`movement::walk`] and [`movement::settle`].
     pub fn submit_move(&mut self, player_id: &str, dx: i32) -> SimResult<i32> {
+        self.status_changes.clear();
         if !scheduler::is_accepting_commands(&self.state)
             || player_id != self.state.active_player_id
         {
@@ -168,6 +198,7 @@ impl MatchHost {
     ///
     /// Propagates failures from settling and from the scheduler.
     pub fn submit_ability(&mut self, ability: &AbilityCommand) -> SimResult<CommandResult> {
+        self.status_changes.clear();
         if !scheduler::is_accepting_commands(&self.state) {
             return Ok(CommandResult::Rejected(
                 crate::types::CommandRejection::WrongPhase,
@@ -175,6 +206,12 @@ impl MatchHost {
         }
 
         let mut result = command::apply_ability(&mut self.state, ability);
+        if let CommandResult::Accepted(outcome) = &result {
+            // Resolution-time transitions come first; `finish_turn` appends the end-of-turn
+            // expiries after them, so the host record stays in the order things happened.
+            self.status_changes
+                .extend(outcome.status_changes.iter().cloned());
+        }
         if matches!(result, CommandResult::Rejected(_)) {
             // A rejected command costs nothing. Ending the turn here would let a client
             // grief itself into a skipped turn, and would let a *replayed* command end a
@@ -195,6 +232,11 @@ impl MatchHost {
         // The public host result must describe the public host state, not that internal
         // intermediate state.
         if let CommandResult::Accepted(outcome) = &mut result {
+            // `command::apply_ability` cannot see the end-of-turn status tick, which runs
+            // in the scheduler after it returns. Replacing rather than extending keeps the
+            // outcome and `Self::status_changes` byte-identical, so the two can never
+            // disagree about what happened.
+            outcome.status_changes.clone_from(&self.status_changes);
             outcome.turn_number_after = self.state.turn_number;
             outcome.final_state_hash = crate::hash::hash_state(&self.state);
         }
@@ -210,12 +252,16 @@ impl MatchHost {
         &mut self,
         choice: &PassiveChoiceCommand,
     ) -> SimResult<CommandResult> {
+        self.status_changes.clear();
         let mut result = command::apply_passive_choice(&mut self.state, choice);
         if matches!(result, CommandResult::Rejected(_)) {
             return Ok(result);
         }
         self.finish_turn(TurnEndReason::Attacked)?;
         if let CommandResult::Accepted(outcome) = &mut result {
+            // A passive choice attaches no statuses of its own, but resuming the turn it
+            // interrupted still runs the end-of-turn tick, so expiries belong here too.
+            outcome.status_changes.clone_from(&self.status_changes);
             outcome.turn_number_after = self.state.turn_number;
             outcome.final_state_hash = crate::hash::hash_state(&self.state);
         }
@@ -229,6 +275,7 @@ impl MatchHost {
     /// Returns [`crate::error::SimError::OutOfRange`] while a passive choice is owed;
     /// otherwise propagates scheduler failures.
     pub fn pass_turn(&mut self) -> SimResult<()> {
+        self.status_changes.clear();
         if self.state.phase == MatchPhase::PassiveSelection {
             return Err(crate::error::SimError::OutOfRange {
                 field: "passive selection",
@@ -248,6 +295,7 @@ impl MatchHost {
     /// otherwise propagates scheduler failures. Local play pauses its planning clock for
     /// this prompt; an online passive-timeout policy must be defined before online play.
     pub fn time_out_turn(&mut self) -> SimResult<()> {
+        self.status_changes.clear();
         if self.state.phase == MatchPhase::PassiveSelection {
             return Err(crate::error::SimError::OutOfRange {
                 field: "passive selection",
@@ -293,12 +341,16 @@ impl MatchHost {
         // between an attack, a pass, and a timeout (`todolist.md` P11).
         self.state.pending_turn_end_reason = reason;
 
+        // Collected locally, then moved onto the host: `advance_phase` needs `&mut
+        // self.state`, so it cannot also borrow a field of `self`.
+        let mut expiries: Vec<StatusChange> = Vec::new();
         let mut steps = 0u32;
         loop {
             if self.is_complete() {
+                self.status_changes.append(&mut expiries);
                 return Ok(());
             }
-            let phase = scheduler::advance_phase(&mut self.state)?;
+            let phase = scheduler::advance_phase(&mut self.state, &mut expiries)?;
             steps = steps.saturating_add(1);
             if matches!(phase, MatchPhase::TurnStart | MatchPhase::MatchComplete) {
                 break;
@@ -307,6 +359,7 @@ impl MatchHost {
                 break;
             }
         }
+        self.status_changes.append(&mut expiries);
         if self.is_complete() {
             return Ok(());
         }
@@ -799,5 +852,109 @@ mod tests {
             crate::hash::hash_state(host.state())
         };
         assert_eq!(run(), run());
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Status transition provenance
+    //
+    // The host is the only layer that sees both halves of a status's life: resolution
+    // attaches statuses, and the scheduler's end-of-turn tick removes them, and those happen
+    // on either side of `command::apply_ability` returning.
+    // -----------------------------------------------------------------------------------
+
+    /// A duel in which the starting player already carries a status about to lapse.
+    fn duel_with_expiring_status() -> SimulationState {
+        let mut state = duel();
+        let Some(target) = state.players.first_mut() else {
+            panic!("the fixture duel must have players");
+        };
+        target.statuses.push(crate::types::StatusEffect {
+            kind: crate::types::EffectKind::Lockdown,
+            magnitude: 2,
+            turns_remaining: 1,
+        });
+        state
+    }
+
+    #[test]
+    fn an_end_of_turn_expiry_reaches_the_hosts_record() {
+        let Ok(mut host) = MatchHost::start(duel_with_expiring_status()) else {
+            panic!("a match must be startable");
+        };
+        assert!(
+            host.status_changes().is_empty(),
+            "starting a match reports no transitions",
+        );
+
+        let Ok(()) = host.pass_turn() else {
+            panic!("passing must succeed");
+        };
+
+        let [change] = host.status_changes() else {
+            panic!(
+                "expected exactly one transition, got {}",
+                host.status_changes().len(),
+            )
+        };
+        assert_eq!(change.kind, crate::types::EffectKind::Lockdown);
+        assert_eq!(change.transition, crate::types::StatusTransition::Expired);
+    }
+
+    #[test]
+    fn the_record_is_cleared_at_the_start_of_every_call() {
+        let Ok(mut host) = MatchHost::start(duel_with_expiring_status()) else {
+            panic!("a match must be startable");
+        };
+        let Ok(()) = host.pass_turn() else {
+            panic!("passing must succeed");
+        };
+        assert_eq!(host.status_changes().len(), 1);
+
+        // Nothing carries a status now, so this turn produces no transitions at all. A
+        // record that were merely appended to would still be reporting the expiry above.
+        let Ok(()) = host.pass_turn() else {
+            panic!("passing must succeed");
+        };
+        assert!(
+            host.status_changes().is_empty(),
+            "a new call must not report the previous call's transitions",
+        );
+    }
+
+    #[test]
+    fn an_ability_outcome_carries_the_same_transitions_the_host_recorded() {
+        let Ok(mut host) = MatchHost::start(duel_with_expiring_status()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let command = AbilityCommand {
+            command_id: "ability-1".to_owned(),
+            player_id: actor,
+            expected_turn_number: host.state().turn_number,
+            slot: AbilitySlot::Basic,
+            angle_millidegrees: 45_000,
+            power_basis_points: 5_000,
+            target_player_id: None,
+            secondary_target_player_id: None,
+        };
+
+        let Ok(CommandResult::Accepted(outcome)) = host.submit_ability(&command) else {
+            panic!("the fixture ability must be accepted");
+        };
+
+        // `command::apply_ability` returns before the scheduler ticks statuses, so an
+        // outcome that were left as the command layer built it would omit this entirely.
+        assert_eq!(
+            outcome.status_changes,
+            host.status_changes(),
+            "the outcome and the host must not be able to disagree",
+        );
+        assert!(
+            outcome
+                .status_changes
+                .iter()
+                .any(|change| change.transition == crate::types::StatusTransition::Expired),
+            "the end-of-turn expiry must appear on the outcome",
+        );
     }
 }

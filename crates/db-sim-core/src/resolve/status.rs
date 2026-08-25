@@ -44,7 +44,10 @@
 
 use crate::error::{SimError, SimResult};
 use crate::fixed::within_radius;
-use crate::types::{EffectKind, PlayerState, SimulationState, SpecialEffect, StatusEffect};
+use crate::types::{
+    EffectKind, PlayerState, SimulationState, SpecialEffect, StatusChange, StatusEffect,
+    StatusTransition,
+};
 
 use super::ResolveContext;
 
@@ -90,6 +93,7 @@ fn resolve_chill(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRes
             magnitude: effect.magnitude,
             turns_remaining: effect.duration_turns,
         },
+        ctx.status_changes,
     );
     Ok(())
 }
@@ -115,6 +119,7 @@ fn resolve_lockdown(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> Sim
             magnitude: effect.magnitude,
             turns_remaining: effect.duration_turns,
         },
+        ctx.status_changes,
     );
     Ok(())
 }
@@ -143,6 +148,7 @@ fn resolve_embers(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
                     magnitude: effect.magnitude,
                     turns_remaining: effect.duration_turns,
                 },
+                ctx.status_changes,
             );
         }
     }
@@ -157,16 +163,35 @@ fn resolve_embers(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
 /// Re-sorts `player.statuses` by `kind` after mutating rather than searching for a sorted
 /// insertion point — simplest to reason about, and irrelevant in cost at the handful of
 /// simultaneous statuses a single character can realistically carry.
-fn apply_status(player: &mut PlayerState, status: StatusEffect) {
-    if let Some(existing) = player
+fn apply_status(player: &mut PlayerState, status: StatusEffect, changes: &mut Vec<StatusChange>) {
+    let transition = if let Some(existing) = player
         .statuses
         .iter_mut()
         .find(|existing| existing.kind == status.kind)
     {
+        // Read the outgoing values before the overwrite: once replaced they are gone, and
+        // a refresh that cannot say what it displaced is not a record of a refresh.
+        let transition = StatusTransition::Refreshed {
+            magnitude: status.magnitude,
+            turns_remaining: status.turns_remaining,
+            replaced_magnitude: existing.magnitude,
+            replaced_turns_remaining: existing.turns_remaining,
+        };
         *existing = status;
+        transition
     } else {
+        let transition = StatusTransition::Applied {
+            magnitude: status.magnitude,
+            turns_remaining: status.turns_remaining,
+        };
         player.statuses.push(status);
-    }
+        transition
+    };
+    changes.push(StatusChange {
+        player_id: player.id.clone(),
+        kind: status.kind,
+        transition,
+    });
     player.statuses.sort_by_key(|s| s.kind);
 }
 
@@ -181,7 +206,16 @@ fn apply_status(player: &mut PlayerState, status: StatusEffect) {
 /// `retain` preserves the relative order of the elements it keeps, and this function never
 /// introduces a new status kind (only [`apply_status`] does that), so the vector's
 /// sortedness from before the call carries through without an explicit re-sort.
-pub fn tick_statuses(state: &mut SimulationState) {
+///
+/// Returns one record per status touched: [`StatusTransition::Expired`] for those removed
+/// and [`StatusTransition::Ticked`] for those that survived. The caller must surface these.
+/// An expiry is the half of a status's life a client cannot reconstruct, because a status
+/// applied and expired inside one turn never appears in any snapshot; the ticks are recorded
+/// alongside it so the transition stream accounts for every observable change rather than
+/// only the ones a diff would miss.
+#[must_use]
+pub fn tick_statuses(state: &mut SimulationState) -> Vec<StatusChange> {
+    let mut changes = Vec::new();
     for player in &mut state.players {
         for status in &mut player.statuses {
             // Saturating rather than checked: a status already at zero should already
@@ -191,8 +225,22 @@ pub fn tick_statuses(state: &mut SimulationState) {
             // decrement being silently dropped.
             status.turns_remaining = status.turns_remaining.saturating_sub(1);
         }
+        for status in &player.statuses {
+            changes.push(StatusChange {
+                player_id: player.id.clone(),
+                kind: status.kind,
+                transition: if status.turns_remaining == 0 {
+                    StatusTransition::Expired
+                } else {
+                    StatusTransition::Ticked {
+                        turns_remaining: status.turns_remaining,
+                    }
+                },
+            });
+        }
         player.statuses.retain(|status| status.turns_remaining > 0);
     }
+    changes
 }
 
 #[cfg(test)]
@@ -298,6 +346,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         objects_created: Vec<PersistentObject>,
+        status_changes: Vec<StatusChange>,
     }
 
     impl Harness {
@@ -309,6 +358,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 objects_created: Vec::new(),
+                status_changes: Vec::new(),
             }
         }
 
@@ -329,6 +379,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 objects_created: &mut self.objects_created,
+                status_changes: &mut self.status_changes,
             }
         }
     }
@@ -581,7 +632,7 @@ mod tests {
         });
         let mut state = test_state(vec![player]);
 
-        tick_statuses(&mut state);
+        let _expired = tick_statuses(&mut state);
 
         assert!(statuses_of(&state, "target").is_empty());
     }
@@ -600,7 +651,7 @@ mod tests {
         }
         assert_eq!(statuses_of(&harness.state, "target").len(), 1);
 
-        tick_statuses(&mut harness.state);
+        let _expired = tick_statuses(&mut harness.state);
         let statuses = statuses_of(&harness.state, "target");
         assert_eq!(statuses.len(), 1, "must still be present after one tick");
         let Some(status) = statuses.first() else {
@@ -608,7 +659,7 @@ mod tests {
         };
         assert_eq!(status.turns_remaining, 1);
 
-        tick_statuses(&mut harness.state);
+        let _expired = tick_statuses(&mut harness.state);
         assert!(
             statuses_of(&harness.state, "target").is_empty(),
             "must be gone after the second tick"
@@ -632,7 +683,7 @@ mod tests {
         ];
         let mut state = test_state(vec![player]);
 
-        tick_statuses(&mut state); // Lockdown expires; Chill survives with 2 remaining.
+        let _expired = tick_statuses(&mut state); // Lockdown expires; Chill survives with 2 remaining.
 
         let statuses = statuses_of(&state, "target");
         assert_eq!(statuses.len(), 1);
@@ -659,9 +710,173 @@ mod tests {
         });
         let mut state = test_state(vec![a, b]);
 
-        tick_statuses(&mut state);
+        let _expired = tick_statuses(&mut state);
 
         assert_eq!(statuses_of(&state, "a").len(), 1);
         assert!(statuses_of(&state, "b").is_empty());
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Lifecycle provenance
+    //
+    // The contract these cover is not "the status list ends up correct" — the tests above
+    // already establish that. It is that every transition is *reported*, including the ones
+    // no snapshot diff can see.
+    // -----------------------------------------------------------------------------------
+
+    fn seeded(kind: EffectKind, magnitude: i32, turns_remaining: u8) -> StatusEffect {
+        StatusEffect {
+            kind,
+            magnitude,
+            turns_remaining,
+        }
+    }
+
+    #[test]
+    fn applying_a_new_status_records_it_as_applied() {
+        let mut harness = Harness::new(vec![make_player("target", FixedPoint::ZERO)]);
+        let mut ctx = harness.ctx("actor", Some("target"), FixedPoint::ZERO);
+        assert_eq!(resolve(&mut ctx, &lockdown_effect(2, 2)), Ok(()));
+
+        let [change] = harness.status_changes.as_slice() else {
+            panic!(
+                "expected exactly one record, got {}",
+                harness.status_changes.len(),
+            )
+        };
+        assert_eq!(change.player_id, "target");
+        assert_eq!(change.kind, EffectKind::Lockdown);
+        assert_eq!(
+            change.transition,
+            StatusTransition::Applied {
+                magnitude: 2,
+                turns_remaining: 2,
+            },
+        );
+        assert!(!change.transition.removes_status());
+    }
+
+    #[test]
+    fn reapplying_a_status_records_what_it_replaced() {
+        let mut player_state = make_player("target", FixedPoint::ZERO);
+        player_state
+            .statuses
+            .push(seeded(EffectKind::Lockdown, 9, 7));
+        let mut harness = Harness::new(vec![player_state]);
+
+        let mut ctx = harness.ctx("actor", Some("target"), FixedPoint::ZERO);
+        assert_eq!(resolve(&mut ctx, &lockdown_effect(2, 2)), Ok(()));
+
+        let [change] = harness.status_changes.as_slice() else {
+            panic!("expected exactly one record")
+        };
+        // Statuses refresh rather than stack, so the displaced values are gone from state
+        // the instant the new one lands. If the record did not carry them, nothing could.
+        assert_eq!(
+            change.transition,
+            StatusTransition::Refreshed {
+                magnitude: 2,
+                turns_remaining: 2,
+                replaced_magnitude: 9,
+                replaced_turns_remaining: 7,
+            },
+        );
+    }
+
+    #[test]
+    fn the_status_tick_records_survivors_and_expiries_separately() {
+        let mut player_state = make_player("target", FixedPoint::ZERO);
+        player_state.statuses.push(seeded(EffectKind::Chill, 1, 1));
+        player_state
+            .statuses
+            .push(seeded(EffectKind::Lockdown, 2, 3));
+        player_state.statuses.sort_by_key(|s| s.kind);
+        let mut state = test_state(vec![player_state]);
+
+        let changes = tick_statuses(&mut state);
+
+        assert_eq!(changes.len(), 2, "both statuses must report");
+        let Some(chill) = changes.iter().find(|c| c.kind == EffectKind::Chill) else {
+            panic!("chill must report")
+        };
+        let Some(lockdown) = changes.iter().find(|c| c.kind == EffectKind::Lockdown) else {
+            panic!("lockdown must report")
+        };
+
+        assert_eq!(chill.transition, StatusTransition::Expired);
+        assert!(chill.transition.removes_status());
+        assert_eq!(
+            lockdown.transition,
+            StatusTransition::Ticked { turns_remaining: 2 },
+        );
+        assert!(!lockdown.transition.removes_status());
+
+        // The records agree with what the tick actually did.
+        assert_eq!(statuses_of(&state, "target").len(), 1);
+    }
+
+    #[test]
+    fn a_status_applied_and_expired_in_one_call_is_invisible_to_a_diff_but_fully_recorded() {
+        let mut harness = Harness::new(vec![make_player("target", FixedPoint::ZERO)]);
+        let before: Vec<StatusEffect> = statuses_of(&harness.state, "target").to_vec();
+
+        let mut ctx = harness.ctx("actor", Some("target"), FixedPoint::ZERO);
+        // Duration one: applied during this turn's resolution, removed by this same turn's
+        // end-of-turn tick.
+        assert_eq!(resolve(&mut ctx, &lockdown_effect(2, 1)), Ok(()));
+        let expiries = tick_statuses(&mut harness.state);
+        harness.status_changes.extend(expiries);
+
+        let after: Vec<StatusEffect> = statuses_of(&harness.state, "target").to_vec();
+
+        // This is the whole justification for the contract: a client comparing the state
+        // before the call to the state after it cannot tell that anything happened at all.
+        assert_eq!(
+            before, after,
+            "fixture must produce no observable difference, or it is not testing the gap",
+        );
+        assert!(before.is_empty());
+
+        // The records nevertheless describe the status's entire life.
+        let kinds: Vec<&StatusTransition> = harness
+            .status_changes
+            .iter()
+            .map(|change| &change.transition)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &StatusTransition::Applied {
+                    magnitude: 2,
+                    turns_remaining: 1,
+                },
+                &StatusTransition::Expired,
+            ],
+            "the applied-then-expired pair must both be reported, in that order",
+        );
+    }
+
+    #[test]
+    fn the_tick_reports_every_player_independently() {
+        let mut a = make_player("a", FixedPoint::ZERO);
+        a.statuses.push(seeded(EffectKind::Lockdown, 1, 1));
+        let mut b = make_player("b", FixedPoint::new(1024, 0));
+        b.statuses.push(seeded(EffectKind::Lockdown, 1, 5));
+        let mut state = test_state(vec![a, b]);
+
+        let changes = tick_statuses(&mut state);
+
+        assert_eq!(changes.len(), 2);
+        let Some(for_a) = changes.iter().find(|c| c.player_id == "a") else {
+            panic!("a must report")
+        };
+        let Some(for_b) = changes.iter().find(|c| c.player_id == "b") else {
+            panic!("b must report")
+        };
+        assert_eq!(for_a.transition, StatusTransition::Expired);
+        assert_eq!(
+            for_b.transition,
+            StatusTransition::Ticked { turns_remaining: 4 },
+        );
     }
 }

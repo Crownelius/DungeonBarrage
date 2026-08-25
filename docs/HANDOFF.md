@@ -167,11 +167,20 @@ entire repository merely to silence Git's “LF will be replaced by CRLF” noti
   whether that strike caused the elimination. Emitted at the point of resolution by both the
   projectile and melee producers in `command.rs`, and consumed by `match_session::derive_events`
   as one `StrikeResolved` event per strike.
-- `CommandOutcome` still does not retain status application/removal transitions or exact object
-  removal causes, and has no `objects_removed` counterpart to `objects_created`.
-  `match_session.rs` labels those net changes honestly and does not invent them.
-- Duration-one statuses can be applied and expire inside the same synchronous host call, making a
-  pure pre/post diff unable to observe them. The resolver/outcome must emit lifecycle records.
+- `CommandOutcome` now carries `status_changes: Vec<StatusChange>` covering every status
+  transition: `Applied`, `Refreshed` (with the values it displaced), `ChargeConsumed`, `Ticked`,
+  `Exhausted`, and `Expired`. Recorded at all four producers — `resolve::status::apply_status`,
+  `resolve::status::tick_statuses`, and both halves of `GuaranteeCrit` in
+  `resolve::attack_mods`. A status applied and expired inside one call, and several charges
+  consumed by one multi-strike ability, are both fully reported. `MatchHost::status_changes()`
+  is the same record for commands that produce no outcome (Move, Pass, timeout).
+- `derive_events` emits these as `StatusChanged` and **cross-checks** them: any status the pre-
+  and post-snapshots disagree about that no record explains is a `SessionFault::ContractInvariant`.
+  A future producer that mutates `statuses` without recording fails closed rather than silently
+  telling the client nothing happened.
+- `CommandOutcome` still does not retain exact object removal causes, and has no
+  `objects_removed` counterpart to `objects_created`. `match_session.rs` labels those net changes
+  honestly and does not invent them.
 - Authority-generated timeout has no `MatchTransition` session entry point yet.
 - No read-only authoritative trajectory preview contract exists.
 - Match ID, ABI/envelope version, clocks, and serialized terrain bytes remain adapter metadata.
@@ -200,11 +209,13 @@ entire repository merely to silence Git's “LF will be replaced by CRLF” noti
 
 Continue C1; do not begin C2 or Godot UI yet.
 
-1. ~~Action impacts and per-strike crit/RNG records~~ **done** (`StrikeResolution` in `types.rs`).
-   **Remaining in this step:** status lifecycle records and object removal/change causes. Do not
-   reconstruct these from final positions or aggregate `was_critical`. The strike work is the
-   worked example to follow: record at the resolver, consume in `derive_events`, and anchor each
-   test to a scenario proven to exercise the path.
+1. ~~Action impacts, per-strike crit/RNG records, status lifecycle records~~ **done**
+   (`StrikeResolution` and `StatusChange` in `types.rs`). **Remaining in this step:** object
+   removal/change causes — add an `objects_removed` counterpart to `objects_created` and record
+   why each object left (expiry, destruction, owner elimination). Do not reconstruct these from
+   final state. The status work is the worked example: record at every producer, consume in
+   `derive_events`, and add a reconciliation check that faults when the records fail to explain
+   an observable change.
 2. Extend the session event builder and tests for real multi-strike, strike, random outcome,
    duration-one status, object lifecycle, block/terrain, elimination, passive selection/chosen,
    pass, timeout, and victory. Keep ordering deterministic and version the client contract if
@@ -223,10 +234,18 @@ Continue C1; do not begin C2 or Godot UI yet.
 8. Only when the raw fixture passes through release FFI, create headless C# contracts/interop and
    `SafeHandle` tests (C3). Godot scenes start at C4.
 
-The strike half of that seam is now in place. The next seam is the same shape for status
-lifecycle: statuses applied and expired inside one synchronous call are invisible to a pre/post
-diff, so `resolve/status.rs` and the scheduler must record transitions where they happen. Keep
-`types.rs` integrator-owned while this shared contract changes.
+The strike and status halves of that seam are now in place. The next seam is the same shape for
+persistent objects: `resolve/objects.rs` and whatever removes turrets, knives, and gas clouds must
+record why. Keep `types.rs` integrator-owned while this shared contract changes.
+
+**Content gap found while wiring statuses.** Only two effects in the entire launch roster attach a
+status: Numa's Pin (`Lockdown`) and Karl's Feeding Frenzy (`GuaranteeCrit`), and both are specials
+gated behind a full gauge. `resolve::status::resolve_chill` and `resolve_embers` are fully
+implemented and tested but **no ability references `EffectKind::Chill` or `EffectKind::Embers`**,
+so neither can occur in a real match. This is a content gap, not a wiring bug — the fifteen
+undesigned characters are expected to use them — but it means status behaviour is currently far
+less exercised in real play than the test count suggests. It is also why the session-level status
+tests seed a status directly instead of casting an ability to produce one.
 
 **Reachability warning, confirmed by this slice.** `StrikeResolved` was previously gated on
 `matches!(ability.attack, Attack::Strike(_))`. Karl's Carrion Call is the only multi-strike ability

@@ -35,7 +35,8 @@ use crate::error::SimResult;
 use crate::fixed::FixedPoint;
 use crate::rng::Rng;
 use crate::types::{
-    DamageEvent, EffectKind, PersistentObject, SimulationState, SpecialEffect, TerrainOperation,
+    DamageEvent, EffectKind, PersistentObject, SimulationState, SpecialEffect, StatusChange,
+    TerrainOperation,
 };
 use std::collections::BTreeMap;
 
@@ -72,6 +73,13 @@ pub struct ResolveContext<'a> {
     /// `todolist.md` P2). A resolver that calls `terrain::apply_operation` must add the
     /// returned count here rather than discarding it with `let _removed = …`.
     pub terrain_cells_removed: &'a mut u32,
+    /// Status lifecycle transitions produced by this action, in the order they happened.
+    ///
+    /// Recorded where the transition occurs, never diffed from the final status list: a
+    /// status applied and expired within one turn, or a charge-based status decremented
+    /// several times by one multi-strike ability, leaves no observable trace in a pre/post
+    /// comparison.
+    pub status_changes: &'a mut Vec<StatusChange>,
 }
 
 impl ResolveContext<'_> {

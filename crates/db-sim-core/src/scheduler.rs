@@ -46,7 +46,7 @@
 use crate::character;
 use crate::error::{SimError, SimResult};
 use crate::resolve::status;
-use crate::types::{MatchOutcome, MatchPhase, SimulationState, TurnEndReason};
+use crate::types::{MatchOutcome, MatchPhase, SimulationState, StatusChange, TurnEndReason};
 use crate::victory;
 
 /// The turn at which sudden death triggers in a duel (`PRODUCT_SPEC.md` §2: "Sudden-death
@@ -117,7 +117,10 @@ pub fn begin_match(state: &mut SimulationState) -> SimResult<()> {
 ///
 /// Propagates any error from [`victory::check_and_finalize`] or [`end_turn`], both of which
 /// this function calls while leaving [`MatchPhase::VictoryCheck`].
-pub fn advance_phase(state: &mut SimulationState) -> SimResult<MatchPhase> {
+pub fn advance_phase(
+    state: &mut SimulationState,
+    status_changes: &mut Vec<StatusChange>,
+) -> SimResult<MatchPhase> {
     let next = match state.phase {
         MatchPhase::MatchIntro => MatchPhase::TurnStart,
         MatchPhase::TurnStart => MatchPhase::Movement,
@@ -131,7 +134,7 @@ pub fn advance_phase(state: &mut SimulationState) -> SimResult<MatchPhase> {
             // The only call site in the crate (see module docs): exactly one lap of
             // `advance_phase` leaves `StatusResolution` exactly once, so this ticks every
             // status by exactly one turn per lap — never zero, never two.
-            status::tick_statuses(state);
+            status_changes.extend(status::tick_statuses(state));
             MatchPhase::VictoryCheck
         }
         MatchPhase::VictoryCheck => return leave_victory_check(state),
@@ -364,6 +367,14 @@ fn movement_allowance_for(state: &SimulationState, player_id: &str) -> SimResult
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Advances one phase, discarding any status expiries.
+    ///
+    /// These tests assert phase transitions, not status lifecycle; the tests that do assert
+    /// on expiries call [`advance_phase`] directly and inspect what it collected.
+    fn step(state: &mut SimulationState) -> SimResult<MatchPhase> {
+        advance_phase(state, &mut Vec::new())
+    }
     use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
     use crate::types::{Appearance, EffectKind, Material, PlayerState, StatusEffect, TerrainMask};
 
@@ -424,7 +435,7 @@ mod tests {
     /// module doc comment for why that is exactly eight [`advance_phase`] calls.
     fn run_full_lap(state: &mut SimulationState) {
         for _ in 0..8 {
-            let Ok(_) = advance_phase(state) else {
+            let Ok(_) = step(state) else {
                 panic!("advance_phase must not error mid-lap in these fixtures");
             };
         }
@@ -501,7 +512,7 @@ mod tests {
             MatchPhase::TurnStart,
         ];
         for phase in expected {
-            let reached = advance_phase(&mut state);
+            let reached = step(&mut state);
             assert_eq!(
                 reached,
                 Ok(phase),
@@ -531,7 +542,7 @@ mod tests {
         state.phase = MatchPhase::VictoryCheck;
         state.pending_turn_end_reason = TurnEndReason::Eliminated;
 
-        assert_eq!(advance_phase(&mut state), Ok(MatchPhase::MatchComplete));
+        assert_eq!(step(&mut state), Ok(MatchPhase::MatchComplete));
         assert_eq!(state.phase, MatchPhase::MatchComplete);
         assert_eq!(state.last_turn_end_reason, TurnEndReason::Eliminated);
     }
@@ -541,8 +552,8 @@ mod tests {
         let mut state = base_state(vec![player("a", 0)]);
         state.phase = MatchPhase::MatchComplete;
 
-        assert_eq!(advance_phase(&mut state), Ok(MatchPhase::MatchComplete));
-        assert_eq!(advance_phase(&mut state), Ok(MatchPhase::MatchComplete));
+        assert_eq!(step(&mut state), Ok(MatchPhase::MatchComplete));
+        assert_eq!(step(&mut state), Ok(MatchPhase::MatchComplete));
     }
 
     #[test]
@@ -551,7 +562,7 @@ mod tests {
         state.active_player_id = "a".to_string();
         state.phase = MatchPhase::PassiveSelection;
 
-        assert_eq!(advance_phase(&mut state), Ok(MatchPhase::Settling));
+        assert_eq!(step(&mut state), Ok(MatchPhase::Settling));
     }
 
     #[test]
@@ -561,7 +572,7 @@ mod tests {
         state.phase = MatchPhase::VictoryCheck;
         state.turn_number = HARD_TURN_LIMIT;
 
-        assert_eq!(advance_phase(&mut state), Ok(MatchPhase::MatchComplete));
+        assert_eq!(step(&mut state), Ok(MatchPhase::MatchComplete));
         let Some(a) = state.player("a") else {
             panic!("player a must still be present");
         };
@@ -579,7 +590,7 @@ mod tests {
         state.phase = MatchPhase::VictoryCheck;
         state.turn_number = HARD_TURN_LIMIT.saturating_sub(1);
 
-        assert_eq!(advance_phase(&mut state), Ok(MatchPhase::TurnStart));
+        assert_eq!(step(&mut state), Ok(MatchPhase::TurnStart));
         let Some(a) = state.player("a") else {
             panic!("player a must still be present");
         };

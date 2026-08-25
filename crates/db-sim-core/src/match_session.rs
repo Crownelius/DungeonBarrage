@@ -30,7 +30,8 @@ use crate::terrain;
 use crate::types::{
     AbilityCommand, AbilitySlot, BallisticImpact, BallisticSample, CommandOutcome,
     CommandRejection, CommandResult, CritRoll, DamageEvent, ImpactCause, MatchPhase,
-    PassiveChoiceCommand, SimulationState, StrikeDelivery, StrikeResolution, TurnEndReason,
+    PassiveChoiceCommand, SimulationState, StatusChange, StatusTransition, StrikeDelivery,
+    StrikeResolution, TurnEndReason,
 };
 
 /// Maximum first-receipt results retained by one live session.
@@ -470,16 +471,21 @@ pub enum PresentationEventKind {
         /// Signed actual change, computed from the two authoritative values.
         delta: i32,
     },
-    /// One active status was added, changed, or removed.
+    /// One authoritative status transition, in the order the simulation produced it.
+    ///
+    /// Previously derived by diffing the pre- and post-snapshots, which could not represent
+    /// a status applied and expired inside the same turn (it appears in neither snapshot),
+    /// nor several charges consumed from one status by a single multi-strike ability (the
+    /// diff shows one net change). The transition now comes from the resolver that caused
+    /// it; `derive_events` additionally verifies that these records account for every
+    /// difference the two snapshots do show.
     StatusChanged {
         /// Opaque player ID.
         player_id: String,
         /// Closed client status kind.
         kind: ClientStatusKind,
-        /// Previous value, absent for an addition.
-        previous: Option<StatusSnapshot>,
-        /// New value, absent for a removal.
-        current: Option<StatusSnapshot>,
+        /// What actually happened to the status.
+        transition: StatusTransition,
     },
     /// One player's authoritative position changed.
     EntityMoved {
@@ -905,13 +911,11 @@ fn retained_presentation_event_kind_bytes(
         PresentationEventKind::StatusChanged {
             player_id,
             kind,
-            previous,
-            current,
+            transition,
         } => {
             counter.string(player_id)?;
             retained_client_status_kind_bytes(counter, *kind)?;
-            retained_optional_status_bytes(counter, previous.as_ref())?;
-            retained_optional_status_bytes(counter, current.as_ref())?;
+            retained_status_transition_bytes(counter, transition)?;
         }
         PresentationEventKind::EntityMoved {
             player_id,
@@ -1321,15 +1325,44 @@ fn retained_status_snapshot_bytes(
     counter.u8(*turns_remaining)
 }
 
-fn retained_optional_status_bytes(
+fn retained_status_transition_bytes(
     counter: &mut RetainedByteCounter,
-    status: Option<&StatusSnapshot>,
+    transition: &StatusTransition,
 ) -> Option<()> {
-    counter.boolean(status.is_some())?;
-    if let Some(status) = status {
-        retained_status_snapshot_bytes(counter, status)?;
+    // One discriminant byte plus that variant's own payload. Written as an exhaustive match
+    // so a new transition variant cannot be added without accounting for its bytes.
+    match transition {
+        StatusTransition::Applied {
+            magnitude,
+            turns_remaining,
+        } => {
+            counter.u8(0)?;
+            counter.i32(*magnitude)?;
+            counter.u8(*turns_remaining)
+        }
+        StatusTransition::Refreshed {
+            magnitude,
+            turns_remaining,
+            replaced_magnitude,
+            replaced_turns_remaining,
+        } => {
+            counter.u8(1)?;
+            counter.i32(*magnitude)?;
+            counter.u8(*turns_remaining)?;
+            counter.i32(*replaced_magnitude)?;
+            counter.u8(*replaced_turns_remaining)
+        }
+        StatusTransition::ChargeConsumed { remaining } => {
+            counter.u8(2)?;
+            counter.i32(*remaining)
+        }
+        StatusTransition::Ticked { turns_remaining } => {
+            counter.u8(3)?;
+            counter.u8(*turns_remaining)
+        }
+        StatusTransition::Exhausted => counter.u8(4),
+        StatusTransition::Expired => counter.u8(5),
     }
-    Some(())
 }
 
 fn retained_client_status_kind_bytes(
@@ -1577,7 +1610,11 @@ impl MatchSessionHost {
             working_host.state(),
             &pre_snapshot,
             &post_snapshot,
-            command_outcome.as_ref(),
+            command_outcome.as_deref(),
+            // Sourced from the host rather than the outcome so that commands producing no
+            // outcome at all -- Move, Pass, and the authority timeout -- still surface the
+            // end-of-turn status tick they caused.
+            working_host.status_changes(),
         ) {
             Ok(events) => events,
             Err(fault) => {
@@ -1727,7 +1764,9 @@ impl MatchSessionHost {
 }
 
 enum AppliedCommand {
-    Accepted(Option<CommandOutcome>),
+    /// Boxed because `CommandOutcome` carries several provenance vectors and dwarfs the
+    /// rejection variant; an unboxed union would pay that size on every rejection too.
+    Accepted(Option<Box<CommandOutcome>>),
     Rejected(CommandRejection),
 }
 
@@ -1758,7 +1797,7 @@ fn apply_to_working_host(
                 secondary_target_player_id: secondary_target_player_id.clone(),
             };
             match host.submit_ability(&ability)? {
-                CommandResult::Accepted(outcome) => Ok(AppliedCommand::Accepted(Some(*outcome))),
+                CommandResult::Accepted(outcome) => Ok(AppliedCommand::Accepted(Some(outcome))),
                 CommandResult::Rejected(reason) => Ok(AppliedCommand::Rejected(reason)),
             }
         }
@@ -1770,7 +1809,7 @@ fn apply_to_working_host(
                 passive_id: passive_id.clone(),
             };
             match host.submit_passive_choice(&choice)? {
-                CommandResult::Accepted(outcome) => Ok(AppliedCommand::Accepted(Some(*outcome))),
+                CommandResult::Accepted(outcome) => Ok(AppliedCommand::Accepted(Some(outcome))),
                 CommandResult::Rejected(reason) => Ok(AppliedCommand::Rejected(reason)),
             }
         }
@@ -1822,6 +1861,7 @@ fn derive_events(
     pre_snapshot: &MatchSnapshot,
     post_snapshot: &MatchSnapshot,
     command_outcome: Option<&CommandOutcome>,
+    status_changes: &[StatusChange],
 ) -> Result<Vec<PresentationEvent>, SessionFault> {
     let mut pending = Vec::new();
     let mut resolution_tick = 0u32;
@@ -2021,6 +2061,32 @@ fn derive_events(
             )?;
         }
 
+        // The authoritative transitions for this player, in the order they happened.
+        let mut recorded_kinds: BTreeSet<ClientStatusKind> = BTreeSet::new();
+        for change in status_changes
+            .iter()
+            .filter(|change| change.player_id == post_player.id)
+        {
+            let kind = crate::client_contract::snapshot_status_kind(change.kind);
+            recorded_kinds.insert(kind);
+            push_pending(
+                &mut pending,
+                resolution_tick,
+                15,
+                PresentationEventKind::StatusChanged {
+                    player_id: change.player_id.clone(),
+                    kind,
+                    transition: change.transition.clone(),
+                },
+            )?;
+        }
+
+        // Cross-check, not a second source. Every status the two snapshots disagree about
+        // must be explained by at least one record; a visible change with no record means a
+        // producer mutated `statuses` without reporting it, and the event stream would tell
+        // the client nothing happened. The converse is deliberately not checked: a status
+        // applied and expired within this one call leaves no snapshot difference at all,
+        // and recording it is the entire point of this contract.
         let status_kinds: BTreeSet<ClientStatusKind> = pre_player
             .statuses
             .iter()
@@ -2031,25 +2097,13 @@ fn derive_events(
             let previous = pre_player
                 .statuses
                 .iter()
-                .find(|status| status.kind == kind)
-                .cloned();
+                .find(|status| status.kind == kind);
             let current = post_player
                 .statuses
                 .iter()
-                .find(|status| status.kind == kind)
-                .cloned();
-            if previous != current {
-                push_pending(
-                    &mut pending,
-                    resolution_tick,
-                    15,
-                    PresentationEventKind::StatusChanged {
-                        player_id: post_player.id.clone(),
-                        kind,
-                        previous,
-                        current,
-                    },
-                )?;
+                .find(|status| status.kind == kind);
+            if previous != current && !recorded_kinds.contains(&kind) {
+                return Err(SessionFault::ContractInvariant);
             }
         }
 
@@ -3234,5 +3288,175 @@ mod strike_provenance_tests {
             }
         }
         assert_eq!(checked, 3, "all three strikes must have been checked");
+    }
+}
+
+/// Status lifecycle reaching the client event stream.
+///
+/// The path these cover is the one a `CommandOutcome` cannot carry: a `Pass` produces no
+/// outcome at all, yet still ends a turn and therefore still runs the status tick. Before
+/// the transition records existed this was derived by diffing snapshots, which is why the
+/// session sources them from the host instead.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod status_lifecycle_tests {
+    use super::*;
+    use crate::match_host::MatchHost;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::{Appearance, EffectKind, StatusEffect};
+
+    fn duel() -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-local-player".to_owned(),
+                    team: 0,
+                    character_id: "zeke".to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-local-bot".to_owned(),
+                    team: 1,
+                    character_id: "huck".to_owned(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    /// A session whose named player already carries `status`.
+    ///
+    /// Built through `build_initial_state` rather than `MatchSessionHost::create` because no
+    /// launch-roster basic attack applies a status: the only two status effects in the game
+    /// are Numa's Pin and Karl's Feeding Frenzy, both specials gated behind a full gauge.
+    fn session_with_status(player_id: &str, status: StatusEffect) -> MatchSessionHost {
+        let mut state = build_initial_state(&duel()).expect("fixture config must build");
+        let target = state
+            .player_mut(player_id)
+            .expect("fixture player must exist");
+        target.statuses.push(status);
+        target.statuses.sort_by_key(|s| s.kind);
+        let host = MatchHost::start(state).expect("fixture match must start");
+        MatchSessionHost::from_new_host(host)
+    }
+
+    /// Local copy of the sibling test module's helper: that module is private to itself.
+    fn command(
+        session: &MatchSessionHost,
+        command_id: &str,
+        kind: MatchCommandKind,
+    ) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: command_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind,
+        }
+    }
+
+    fn status_events(
+        transition: &MatchTransition,
+    ) -> Vec<(String, ClientStatusKind, StatusTransition)> {
+        transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::StatusChanged {
+                    player_id,
+                    kind,
+                    transition,
+                } => Some((player_id.clone(), *kind, transition.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pass_surfaces_the_expiry_it_caused_despite_producing_no_outcome() {
+        let mut session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::Lockdown,
+                magnitude: 2,
+                turns_remaining: 1,
+            },
+        );
+        let command = command(&session, "pass-1", MatchCommandKind::Pass);
+        let transition = session.apply(command).expect("pass must be accepted");
+
+        let events = status_events(&transition);
+        assert_eq!(
+            events,
+            vec![(
+                "a-local-player".to_owned(),
+                ClientStatusKind::Lockdown,
+                StatusTransition::Expired,
+            )],
+            "the end-of-turn tick that removed the status must reach the client",
+        );
+    }
+
+    #[test]
+    fn a_surviving_status_reports_its_decrement_rather_than_nothing() {
+        let mut session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::Lockdown,
+                magnitude: 2,
+                turns_remaining: 4,
+            },
+        );
+        let command = command(&session, "pass-1", MatchCommandKind::Pass);
+        let transition = session.apply(command).expect("pass must be accepted");
+
+        assert_eq!(
+            status_events(&transition),
+            vec![(
+                "a-local-player".to_owned(),
+                ClientStatusKind::Lockdown,
+                StatusTransition::Ticked { turns_remaining: 3 },
+            )],
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_statuses_anywhere_emits_no_status_events() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let command = command(&session, "pass-1", MatchCommandKind::Pass);
+        let transition = session.apply(command).expect("pass must be accepted");
+
+        // Guards the reconciliation check from the opposite direction: it must not invent
+        // events for statuses nobody has.
+        assert!(status_events(&transition).is_empty());
+    }
+
+    #[test]
+    fn each_command_reports_only_its_own_transitions() {
+        let mut session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::Lockdown,
+                magnitude: 2,
+                turns_remaining: 1,
+            },
+        );
+        let first = command(&session, "pass-1", MatchCommandKind::Pass);
+        let first_transition = session.apply(first).expect("first pass must be accepted");
+        assert_eq!(status_events(&first_transition).len(), 1);
+
+        let second = command(&session, "pass-2", MatchCommandKind::Pass);
+        let second_transition = session.apply(second).expect("second pass must be accepted");
+
+        // The host clears its record at the start of every call. Without that, the expiry
+        // above would be replayed here and the client would remove the status twice.
+        assert!(
+            status_events(&second_transition).is_empty(),
+            "a later command must not repeat an earlier command's transitions",
+        );
     }
 }

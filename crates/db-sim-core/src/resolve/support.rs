@@ -209,6 +209,7 @@ mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
     use crate::rng::Rng;
+    use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObject, PlayerState,
@@ -269,6 +270,7 @@ mod tests {
         damage: BTreeMap<String, DamageEvent>,
         terrain_ops: Vec<TerrainOperation>,
         objects_created: Vec<PersistentObject>,
+        status_changes: Vec<StatusChange>,
         terrain_cells_removed: u32,
     }
 
@@ -280,6 +282,7 @@ mod tests {
                 damage: BTreeMap::new(),
                 terrain_ops: Vec::new(),
                 objects_created: Vec::new(),
+                status_changes: Vec::new(),
                 terrain_cells_removed: 0,
             }
         }
@@ -295,6 +298,7 @@ mod tests {
                 damage: &mut self.damage,
                 terrain_ops: &mut self.terrain_ops,
                 objects_created: &mut self.objects_created,
+                status_changes: &mut self.status_changes,
                 terrain_cells_removed: &mut self.terrain_cells_removed,
             }
         }

@@ -286,6 +286,7 @@ fn resolve_ability(
 ) -> Result<CommandOutcome, CommandRejection> {
     let turn_before = state.turn_number;
     let mut strike_records: Vec<StrikeResolution> = Vec::new();
+    let mut status_changes: Vec<StatusChange> = Vec::new();
 
     // Consuming the gauge and marking the attack are unconditional consequences of a
     // validated command being committed, independent of what the attack goes on to hit.
@@ -515,6 +516,7 @@ fn resolve_ability(
             terrain_ops: &mut terrain_ops,
             objects_created: &mut objects_created,
             terrain_cells_removed: &mut terrain_cells_removed,
+            status_changes: &mut status_changes,
         };
         for effect in ability.effects {
             resolve::resolve_effect(&mut ctx, effect)
@@ -578,6 +580,7 @@ fn resolve_ability(
         damage: damage_by_player.into_values().collect(),
         objects_created,
         strikes: strike_records,
+        status_changes,
         gauge_gained: gauge_gained(state, &command.player_id, gauge_before_award),
         terrain_cells_removed,
         final_state_hash: hash::hash_state(state),
@@ -916,8 +919,9 @@ fn resolve_passive_choice(
         terrain_ops: Vec::new(),
         damage: Vec::new(),
         objects_created: Vec::new(),
-        // Choosing a passive resolves no strikes.
+        // Choosing a passive resolves no strikes and touches no statuses.
         strikes: Vec::new(),
+        status_changes: Vec::new(),
         gauge_gained: 0,
         terrain_cells_removed: 0,
         final_state_hash: hash::hash_state(state),

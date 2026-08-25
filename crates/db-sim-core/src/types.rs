@@ -1137,6 +1137,93 @@ pub struct StrikeResolution {
     pub eliminated_target: bool,
 }
 
+/// What happened to one status on one player, recorded where it happened.
+///
+/// A status can be applied and expire inside the same synchronous host call — a
+/// `duration_turns: 1` status applied during resolution is removed by the status tick at the
+/// end of that same turn — so a client diffing the pre-state against the post-state sees no
+/// trace of it ever having existed. Charge-based statuses are worse: `GuaranteeCrit` can be
+/// decremented three times by a single multi-strike ability, and a diff sees one net change.
+/// These records exist so none of that is inferred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusTransition {
+    /// Newly attached. The player carried no status of this kind.
+    Applied {
+        /// Effect magnitude as applied.
+        magnitude: i32,
+        /// Turns the status will last.
+        turns_remaining: u8,
+    },
+    /// Replaced an existing status of the same kind.
+    ///
+    /// Statuses refresh rather than stack (`ARSENAL.md` guardrail 4), so the previous values
+    /// are reported alongside the new ones: the old status is genuinely gone, and a client
+    /// animating a refresh needs to know what it replaced.
+    Refreshed {
+        /// Effect magnitude as applied.
+        magnitude: i32,
+        /// Turns the refreshed status will last.
+        turns_remaining: u8,
+        /// Magnitude of the status this replaced.
+        replaced_magnitude: i32,
+        /// Turns that were left on the status this replaced.
+        replaced_turns_remaining: u8,
+    },
+    /// One charge was consumed from a count-based status, which survived.
+    ChargeConsumed {
+        /// Charges left after this consumption. Always positive; a status reaching zero
+        /// reports [`StatusTransition::Exhausted`] instead.
+        remaining: i32,
+    },
+    /// Survived the end-of-turn tick with one fewer turn remaining.
+    ///
+    /// Recorded even though a snapshot diff can see it, so that the transition stream fully
+    /// accounts for every observable change to a player's statuses. A stream that explained
+    /// only some of them would leave a consumer unable to tell a missing record from a
+    /// change that legitimately had none.
+    Ticked {
+        /// Turns left after the decrement. Always positive; reaching zero reports
+        /// [`StatusTransition::Expired`] instead.
+        turns_remaining: u8,
+    },
+    /// Removed because its charges ran out, not because its turns did.
+    Exhausted,
+    /// Removed because `turns_remaining` reached zero during the end-of-turn status tick.
+    Expired,
+}
+
+impl StatusTransition {
+    /// Whether this transition removed the status from the player.
+    #[must_use]
+    pub const fn removes_status(&self) -> bool {
+        matches!(self, Self::Exhausted | Self::Expired)
+    }
+
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Applied { .. } => "applied",
+            Self::Refreshed { .. } => "refreshed",
+            Self::ChargeConsumed { .. } => "chargeConsumed",
+            Self::Ticked { .. } => "ticked",
+            Self::Exhausted => "exhausted",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// One status lifecycle transition, attributed to the player it happened to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusChange {
+    /// Opaque id of the player carrying the status.
+    pub player_id: String,
+    /// Which status.
+    pub kind: EffectKind,
+    /// What happened to it.
+    pub transition: StatusTransition,
+}
+
 /// The authoritative outcome of an accepted command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
@@ -1161,6 +1248,12 @@ pub struct CommandOutcome {
     /// several strikes crit, and guessing would put a presentation layer's animation out of
     /// step with the authoritative RNG stream.
     pub strikes: Vec<StrikeResolution>,
+    /// Every status lifecycle transition this command caused, in the order it caused them.
+    ///
+    /// Includes transitions that both begin and end within this one command, which a
+    /// pre/post state diff cannot observe at all. End-of-turn expiries appear last, appended
+    /// by the host after it drives the scheduler's status tick.
+    pub status_changes: Vec<StatusChange>,
     /// Gauge charge gained by the actor, in hundredths.
     pub gauge_gained: u16,
     /// Terrain cells removed, for telemetry and the Excavator XP bonus.

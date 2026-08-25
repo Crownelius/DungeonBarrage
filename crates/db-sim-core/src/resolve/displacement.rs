@@ -411,6 +411,7 @@ fn resolve_wall_impact(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> 
 mod tests {
     use super::*;
     use crate::rng::Rng;
+    use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PersistentObject,
@@ -453,6 +454,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         objects: Vec<PersistentObject>,
+        status_changes: Vec<StatusChange>,
     }
 
     impl Harness {
@@ -486,6 +488,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 objects: Vec::new(),
+                status_changes: Vec::new(),
             }
         }
 
@@ -501,6 +504,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 objects_created: &mut self.objects,
+                status_changes: &mut self.status_changes,
             }
         }
 
@@ -793,6 +797,7 @@ mod tests {
             terrain_cells_removed: &mut harness.terrain_cells_removed,
             terrain_ops: &mut harness.terrain_ops,
             objects_created: &mut harness.objects,
+            status_changes: &mut harness.status_changes,
         };
 
         assert_eq!(

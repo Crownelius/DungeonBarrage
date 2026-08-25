@@ -81,8 +81,8 @@ use crate::fixed::{
 };
 use crate::terrain;
 use crate::types::{
-    BASE_ATTACK, EffectKind, Material, MaterialMask, SimulationState, SpecialEffect, StatusEffect,
-    TerrainOperation, TerrainShape,
+    BASE_ATTACK, EffectKind, Material, MaterialMask, SimulationState, SpecialEffect, StatusChange,
+    StatusEffect, StatusTransition, TerrainOperation, TerrainShape,
 };
 use std::collections::BTreeMap;
 
@@ -240,7 +240,7 @@ fn consume_guarantee_crit(ctx: &mut ResolveContext<'_>, target_id: &str) -> bool
 
     // Scoped so the mutable borrow of `target.statuses` (via `status`) ends before
     // `target.statuses.retain` needs its own mutable borrow below.
-    let exhausted = {
+    let (exhausted, remaining) = {
         let Some(status) = target
             .statuses
             .iter_mut()
@@ -255,7 +255,7 @@ fn consume_guarantee_crit(ctx: &mut ResolveContext<'_>, target_id: &str) -> bool
         // cannot underflow. `checked_sub` still guards the (unreachable) alternative
         // rather than assuming the invariant holds.
         status.magnitude = status.magnitude.checked_sub(1).unwrap_or(0);
-        status.magnitude <= 0
+        (status.magnitude <= 0, status.magnitude)
     };
 
     if exhausted {
@@ -263,6 +263,18 @@ fn consume_guarantee_crit(ctx: &mut ResolveContext<'_>, target_id: &str) -> bool
             .statuses
             .retain(|status| status.kind != EffectKind::GuaranteeCrit);
     }
+    // One multi-strike ability can consume several charges in a single command, so a
+    // pre/post diff of `magnitude` would collapse three consumptions into one net change
+    // and an exhaustion into a status that simply vanished. Each is recorded as it happens.
+    ctx.status_changes.push(StatusChange {
+        player_id: target_id.to_owned(),
+        kind: EffectKind::GuaranteeCrit,
+        transition: if exhausted {
+            StatusTransition::Exhausted
+        } else {
+            StatusTransition::ChargeConsumed { remaining }
+        },
+    });
     true
 }
 
@@ -308,19 +320,38 @@ fn resolve_guarantee_crit(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) 
         turns_remaining: u8::MAX,
     };
 
-    if let Some(existing) = target
+    let transition = if let Some(existing) = target
         .statuses
         .iter_mut()
         .find(|existing| existing.kind == EffectKind::GuaranteeCrit)
     {
+        let transition = StatusTransition::Refreshed {
+            magnitude: status.magnitude,
+            turns_remaining: status.turns_remaining,
+            replaced_magnitude: existing.magnitude,
+            replaced_turns_remaining: existing.turns_remaining,
+        };
         *existing = status;
+        transition
     } else {
+        let transition = StatusTransition::Applied {
+            magnitude: status.magnitude,
+            turns_remaining: status.turns_remaining,
+        };
         target.statuses.push(status);
-    }
+        transition
+    };
     // `PlayerState.statuses` must stay sorted by `kind` at all times — the canonical hash
     // encoding depends on it (`status.rs`'s own `apply_status` doc comment states the
     // same invariant; re-affirmed here since this file cannot call that private helper).
     target.statuses.sort_by_key(|s| s.kind);
+    // Recorded here for the same reason `apply_status` records its own: this file may not
+    // call that private sibling helper, so it must not silently skip its provenance either.
+    ctx.status_changes.push(StatusChange {
+        player_id: target_id.to_owned(),
+        kind: EffectKind::GuaranteeCrit,
+        transition,
+    });
 
     Ok(())
 }
@@ -710,6 +741,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         objects_created: Vec<PersistentObject>,
+        status_changes: Vec<StatusChange>,
     }
 
     impl Harness {
@@ -721,6 +753,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 objects_created: Vec::new(),
+                status_changes: Vec::new(),
             }
         }
 
@@ -742,6 +775,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 objects_created: &mut self.objects_created,
+                status_changes: &mut self.status_changes,
             }
         }
     }
@@ -1246,5 +1280,135 @@ mod tests {
         assert_eq!(damage_of(&first, "target"), damage_of(&second, "target"));
         assert_eq!(first.rng.state(), second.rng.state());
         assert_eq!(first.state.terrain, second.state.terrain);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // GuaranteeCrit lifecycle provenance
+    //
+    // The count lives in `magnitude` and is decremented per forced crit, so a single
+    // multi-strike ability can spend several charges inside one command. A pre/post diff of
+    // the status collapses all of them into one net change, and an exhaustion into a status
+    // that simply vanished, which is why each is recorded where it happens.
+    // -----------------------------------------------------------------------------------
+
+    #[test]
+    fn marking_a_target_with_guarantee_crit_records_the_application() {
+        let mut harness = Harness::new(
+            vec![
+                make_player("actor", FixedPoint::ZERO, 300),
+                make_player("target", FixedPoint::ZERO, 300),
+            ],
+            1,
+        );
+        let effect = guarantee_crit_effect(3);
+        let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
+
+        assert_eq!(resolve(&mut ctx, &effect), Ok(()));
+
+        let [change] = harness.status_changes.as_slice() else {
+            panic!("expected one record, got {}", harness.status_changes.len())
+        };
+        assert_eq!(change.player_id, "target");
+        assert_eq!(change.kind, EffectKind::GuaranteeCrit);
+        assert_eq!(
+            change.transition,
+            StatusTransition::Applied {
+                magnitude: 3,
+                // The sentinel that keeps a count-based status from lapsing on turn decay.
+                turns_remaining: u8::MAX,
+            },
+        );
+    }
+
+    #[test]
+    fn remarking_a_target_records_the_replaced_count_rather_than_summing_it() {
+        let mut harness = Harness::new(
+            vec![
+                make_player("actor", FixedPoint::ZERO, 300),
+                make_player("target", FixedPoint::ZERO, 300),
+            ],
+            1,
+        );
+        let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
+        assert_eq!(resolve(&mut ctx, &guarantee_crit_effect(3)), Ok(()));
+        let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
+        assert_eq!(resolve(&mut ctx, &guarantee_crit_effect(2)), Ok(()));
+
+        let [_first, second] = harness.status_changes.as_slice() else {
+            panic!("expected two records, got {}", harness.status_changes.len())
+        };
+        assert_eq!(
+            second.transition,
+            StatusTransition::Refreshed {
+                magnitude: 2,
+                turns_remaining: u8::MAX,
+                replaced_magnitude: 3,
+                replaced_turns_remaining: u8::MAX,
+            },
+        );
+    }
+
+    #[test]
+    fn each_consumed_charge_is_recorded_and_the_last_one_reports_exhaustion() {
+        let mut harness = Harness::new(
+            vec![
+                make_player("actor", FixedPoint::ZERO, 300),
+                make_player("target", FixedPoint::ZERO, 300),
+            ],
+            1,
+        );
+        let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
+        assert_eq!(resolve(&mut ctx, &guarantee_crit_effect(3)), Ok(()));
+        harness.status_changes.clear();
+
+        // Three consumptions inside what a caller sees as one action.
+        for _ in 0..3 {
+            let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
+            assert!(
+                consume_guarantee_crit(&mut ctx, "target"),
+                "a marked target must force the crit while charges remain",
+            );
+        }
+
+        let transitions: Vec<&StatusTransition> = harness
+            .status_changes
+            .iter()
+            .map(|change| &change.transition)
+            .collect();
+        assert_eq!(
+            transitions,
+            vec![
+                &StatusTransition::ChargeConsumed { remaining: 2 },
+                &StatusTransition::ChargeConsumed { remaining: 1 },
+                &StatusTransition::Exhausted,
+            ],
+            "each charge must report its own remaining count, and the last must report \
+             exhaustion rather than a fourth consumption",
+        );
+
+        // The status is genuinely gone, so a diff would have shown one disappearance for
+        // three distinct events.
+        assert!(
+            statuses_of(&harness.state, "target").is_empty(),
+            "an exhausted mark must be removed",
+        );
+    }
+
+    #[test]
+    fn an_unmarked_target_consumes_nothing_and_records_nothing() {
+        let mut harness = Harness::new(
+            vec![
+                make_player("actor", FixedPoint::ZERO, 300),
+                make_player("target", FixedPoint::ZERO, 300),
+            ],
+            1,
+        );
+        let mut ctx = harness.ctx("actor", Some("target"), None, FixedPoint::ZERO);
+
+        assert!(!consume_guarantee_crit(&mut ctx, "target"));
+        assert!(
+            harness.status_changes.is_empty(),
+            "a transition that did not happen must not be reported",
+        );
     }
 }
