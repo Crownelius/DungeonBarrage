@@ -1057,6 +1057,86 @@ pub struct DamageEvent {
     pub eliminated: bool,
 }
 
+/// Why a strike consumed — or did not consume — a crit roll from the seeded generator.
+///
+/// Recorded per strike rather than inferred, because RNG consumption is part of the
+/// authoritative state transition: an observer that guesses wrong about whether a roll
+/// happened will desynchronise on the very next draw. `roll_crit` skips the draw entirely
+/// when an ability cannot crit, so "did not crit" and "never rolled" are different facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CritRoll {
+    /// The ability has `crit_chance_basis_points == 0`. No draw was taken.
+    NotEligible,
+    /// A draw was taken and lost.
+    Missed,
+    /// A draw was taken and won.
+    Landed,
+}
+
+impl CritRoll {
+    /// Whether this strike actually consumed a value from the match generator.
+    #[must_use]
+    pub const fn consumed_draw(self) -> bool {
+        matches!(self, Self::Missed | Self::Landed)
+    }
+
+    /// Whether this strike resolved as a critical hit.
+    #[must_use]
+    pub const fn is_critical(self) -> bool {
+        matches!(self, Self::Landed)
+    }
+
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::NotEligible => "notEligible",
+            Self::Missed => "missed",
+            Self::Landed => "landed",
+        }
+    }
+}
+
+/// How an individual strike reached its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrikeDelivery {
+    /// Delivered by a projectile, identified by its [`ProjectileTrace::sequence`].
+    Projectile {
+        /// The launch-order sequence of the trace that delivered this strike.
+        trace_sequence: u32,
+    },
+    /// Delivered by a close-range strike with no projectile.
+    Melee,
+}
+
+/// One authoritative strike resolution, recorded where it happened.
+///
+/// `CommandOutcome::damage` aggregates every hit on a player into one itemized total, which
+/// is what a result panel wants but destroys per-strike facts a client needs to animate:
+/// Karl's basic resolves three times with three independent crit rolls, and an aggregate
+/// `was_critical` cannot say which of them landed. These records are emitted by the resolver
+/// at the moment of resolution and are never reconstructed from final state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrikeResolution {
+    /// Zero-based index within this command's strike sequence, in resolution order.
+    pub strike_index: u16,
+    /// Opaque id of the player this strike hit.
+    pub target_player_id: String,
+    /// Where the strike resolved, in fixed-point simulation units.
+    pub impact_point: FixedPoint,
+    /// How the strike was delivered.
+    pub delivery: StrikeDelivery,
+    /// The crit draw, including whether one was taken at all.
+    pub crit: CritRoll,
+    /// Damage this strike actually applied after clamping to remaining health.
+    ///
+    /// The *applied* figure, not the nominal one: a 60-damage strike against a target on
+    /// 10 health applies 10, and a client showing 60 would be lying about a kill.
+    pub damage_applied: u16,
+    /// Whether this specific strike reduced the target to zero health.
+    pub eliminated_target: bool,
+}
+
 /// The authoritative outcome of an accepted command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
@@ -1074,6 +1154,13 @@ pub struct CommandOutcome {
     pub damage: Vec<DamageEvent>,
     /// Persistent objects created by this action.
     pub objects_created: Vec<PersistentObject>,
+    /// Every individual strike resolution, in the order the resolver produced them.
+    ///
+    /// Emitted at the point of resolution. A consumer must never reconstruct these from
+    /// `damage` or from final state — the aggregate deliberately cannot express which of
+    /// several strikes crit, and guessing would put a presentation layer's animation out of
+    /// step with the authoritative RNG stream.
+    pub strikes: Vec<StrikeResolution>,
     /// Gauge charge gained by the actor, in hundredths.
     pub gauge_gained: u16,
     /// Terrain cells removed, for telemetry and the Excavator XP bonus.

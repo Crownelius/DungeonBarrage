@@ -161,9 +161,15 @@ entire repository merely to silence Git's “LF will be replaced by CRLF” noti
 
 ### Important limits — do not call C1 complete
 
-- `CommandOutcome` does not retain exact non-projectile strike points, public RNG roll provenance,
-  per-strike damage/crit timing, all status application/removal transitions, or exact object removal
-  causes. `match_session.rs` labels net changes honestly and does not invent these facts.
+- `CommandOutcome` now carries per-strike provenance (`strikes: Vec<StrikeResolution>`): the
+  resolution-order index, target, exact impact point, melee/projectile delivery with the citing
+  trace sequence, the crit draw as `CritRoll::{NotEligible, Missed, Landed}`, applied damage, and
+  whether that strike caused the elimination. Emitted at the point of resolution by both the
+  projectile and melee producers in `command.rs`, and consumed by `match_session::derive_events`
+  as one `StrikeResolved` event per strike.
+- `CommandOutcome` still does not retain status application/removal transitions or exact object
+  removal causes, and has no `objects_removed` counterpart to `objects_created`.
+  `match_session.rs` labels those net changes honestly and does not invent them.
 - Duration-one statuses can be applied and expire inside the same synchronous host call, making a
   pure pre/post diff unable to observe them. The resolver/outcome must emit lifecycle records.
 - Authority-generated timeout has no `MatchTransition` session entry point yet.
@@ -194,9 +200,11 @@ entire repository merely to silence Git's “LF will be replaced by CRLF” noti
 
 Continue C1; do not begin C2 or Godot UI yet.
 
-1. Enrich authoritative outcomes at their source. Add explicit action impacts, per-strike timing and
-   crit/RNG records, status lifecycle records, and object removal/change causes. Do not reconstruct
-   these from final positions or aggregate `was_critical`.
+1. ~~Action impacts and per-strike crit/RNG records~~ **done** (`StrikeResolution` in `types.rs`).
+   **Remaining in this step:** status lifecycle records and object removal/change causes. Do not
+   reconstruct these from final positions or aggregate `was_critical`. The strike work is the
+   worked example to follow: record at the resolver, consume in `derive_events`, and anchor each
+   test to a scenario proven to exercise the path.
 2. Extend the session event builder and tests for real multi-strike, strike, random outcome,
    duration-one status, object lifecycle, block/terrain, elimination, passive selection/chosen,
    pass, timeout, and victory. Keep ordering deterministic and version the client contract if
@@ -215,9 +223,17 @@ Continue C1; do not begin C2 or Godot UI yet.
 8. Only when the raw fixture passes through release FFI, create headless C# contracts/interop and
    `SafeHandle` tests (C3). Godot scenes start at C4.
 
-The first recommended code seam is to add resolver-owned provenance structures to
-`CommandOutcome`, update every producer, and make `match_session::derive_events` consume them. Keep
+The strike half of that seam is now in place. The next seam is the same shape for status
+lifecycle: statuses applied and expired inside one synchronous call are invisible to a pre/post
+diff, so `resolve/status.rs` and the scheduler must record transitions where they happen. Keep
 `types.rs` integrator-owned while this shared contract changes.
+
+**Reachability warning, confirmed by this slice.** `StrikeResolved` was previously gated on
+`matches!(ability.attack, Attack::Strike(_))`. Karl's Carrion Call is the only multi-strike ability
+in the roster and the one whose design note promises three independent crit rolls, and it is an
+`Attack::Projectile` — so it emitted **zero** strike events while every test passed. This is the
+fifth occurrence of the repository's signature failure mode. Emission is now driven by what the
+outcome actually recorded, never by the ability's declared shape.
 
 ---
 

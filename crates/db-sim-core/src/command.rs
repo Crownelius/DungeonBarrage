@@ -285,6 +285,7 @@ fn resolve_ability(
     ability: &'static AbilityDefinition,
 ) -> Result<CommandOutcome, CommandRejection> {
     let turn_before = state.turn_number;
+    let mut strike_records: Vec<StrikeResolution> = Vec::new();
 
     // Consuming the gauge and marking the attack are unconditional consequences of a
     // validated command being committed, independent of what the attack goes on to hit.
@@ -384,16 +385,32 @@ fn resolve_ability(
                         .map(|p| p.id.clone());
 
                     if let Some(target_id) = direct_target {
-                        let is_crit = roll_crit(&mut rng, ability.crit_chance_basis_points);
-                        let hp = resolved_damage_hp(ability, is_crit);
+                        let crit = roll_crit(&mut rng, ability.crit_chance_basis_points);
+                        let hp = resolved_damage_hp(ability, crit.is_critical());
+                        // Read before the mutation so "this strike killed them" can be
+                        // distinguished from "they were already down".
+                        let was_alive =
+                            state.player(&target_id).is_some_and(|p| !p.is_eliminated());
                         let actual = deal_damage(
                             state,
                             &mut damage_by_player,
                             &target_id,
                             hp,
                             DamageField::Direct,
-                            is_crit,
+                            crit.is_critical(),
                         );
+                        strike_records.push(StrikeResolution {
+                            strike_index: strike_records.len().try_into().unwrap_or(u16::MAX),
+                            target_player_id: target_id.clone(),
+                            impact_point: impact_position,
+                            delivery: StrikeDelivery::Projectile {
+                                trace_sequence: sequence,
+                            },
+                            crit,
+                            damage_applied: actual,
+                            eliminated_target: was_alive
+                                && state.player(&target_id).is_some_and(|p| p.is_eliminated()),
+                        });
                         dealt_to_others = dealt_to_others.saturating_add(u32::from(actual));
                     }
                 }
@@ -432,16 +449,27 @@ fn resolve_ability(
             let strikes = ability.strikes_per_turn.max(1);
             for _ in 0..strikes {
                 for target_id in &targets {
-                    let is_crit = roll_crit(&mut rng, ability.crit_chance_basis_points);
-                    let hp = resolved_damage_hp(ability, is_crit);
+                    let crit = roll_crit(&mut rng, ability.crit_chance_basis_points);
+                    let hp = resolved_damage_hp(ability, crit.is_critical());
+                    let was_alive = state.player(target_id).is_some_and(|p| !p.is_eliminated());
                     let actual = deal_damage(
                         state,
                         &mut damage_by_player,
                         target_id,
                         hp,
                         DamageField::Direct,
-                        is_crit,
+                        crit.is_critical(),
                     );
+                    strike_records.push(StrikeResolution {
+                        strike_index: strike_records.len().try_into().unwrap_or(u16::MAX),
+                        target_player_id: target_id.clone(),
+                        impact_point: strike_point,
+                        delivery: StrikeDelivery::Melee,
+                        crit,
+                        damage_applied: actual,
+                        eliminated_target: was_alive
+                            && state.player(target_id).is_some_and(|p| p.is_eliminated()),
+                    });
                     dealt_to_others = dealt_to_others.saturating_add(u32::from(actual));
                 }
             }
@@ -549,6 +577,7 @@ fn resolve_ability(
         terrain_ops,
         damage: damage_by_player.into_values().collect(),
         objects_created,
+        strikes: strike_records,
         gauge_gained: gauge_gained(state, &command.player_id, gauge_before_award),
         terrain_cells_removed,
         final_state_hash: hash::hash_state(state),
@@ -683,14 +712,23 @@ fn apply_backlash(
     total
 }
 
-/// Rolls a crit for one strike using the seeded match RNG.
+/// Rolls a crit for one strike using the seeded match RNG, reporting whether a draw was
+/// taken as well as its result.
 ///
 /// A zero `crit_chance_basis_points` never rolls at all (matching every non-crit-capable
 /// launch ability, whose `crit_damage_percent` equals `damage_percent`), so RNG state
 /// consumption is exactly proportional to how many crit-capable strikes actually happened.
-fn roll_crit(rng: &mut Rng, crit_chance_basis_points: u16) -> bool {
-    crit_chance_basis_points > 0
-        && rng.bounded(CRIT_ROLL_BOUND) < u32::from(crit_chance_basis_points)
+fn roll_crit(rng: &mut Rng, crit_chance_basis_points: u16) -> CritRoll {
+    if crit_chance_basis_points == 0 {
+        // No draw is taken at all, which is itself a fact the record must carry: a
+        // consumer that assumed every strike drew would predict the wrong next value.
+        return CritRoll::NotEligible;
+    }
+    if rng.bounded(CRIT_ROLL_BOUND) < u32::from(crit_chance_basis_points) {
+        CritRoll::Landed
+    } else {
+        CritRoll::Missed
+    }
 }
 
 /// The hit-point damage for one resolution of `ability`, non-critical or critical per
@@ -878,6 +916,8 @@ fn resolve_passive_choice(
         terrain_ops: Vec::new(),
         damage: Vec::new(),
         objects_created: Vec::new(),
+        // Choosing a passive resolves no strikes.
+        strikes: Vec::new(),
         gauge_gained: 0,
         terrain_cells_removed: 0,
         final_state_hash: hash::hash_state(state),
@@ -992,6 +1032,115 @@ mod tests {
             target_player_id: target.map(str::to_string),
             secondary_target_player_id: None,
         }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Per-strike provenance recorded by the resolver.
+    //
+    // Huck's Haymaker is a melee `Attack::Strike` with `crit_chance_basis_points: 0`, so it
+    // covers the two facts the projectile-side session tests cannot: the `Melee` delivery,
+    // and a strike that takes no crit draw at all. `NotEligible` is deliberately distinct
+    // from `Missed` — a consumer that treated "no crit" as "a draw was taken and lost"
+    // would predict the wrong next value from the seeded generator.
+    // -----------------------------------------------------------------------------------
+
+    fn accepted_outcome(state: &mut SimulationState, command: &AbilityCommand) -> CommandOutcome {
+        let CommandResult::Accepted(outcome) = apply_ability(state, command) else {
+            panic!("fixture command must be accepted")
+        };
+        *outcome
+    }
+
+    /// The single strike a one-strike fixture must have produced.
+    fn only_strike(outcome: &CommandOutcome) -> &StrikeResolution {
+        let [strike] = outcome.strikes.as_slice() else {
+            panic!(
+                "fixture must resolve exactly one strike, got {}",
+                outcome.strikes.len(),
+            )
+        };
+        strike
+    }
+
+    fn set_health(state: &mut SimulationState, player_id: &str, health: u16) {
+        let Some(target) = state.player_mut(player_id) else {
+            panic!("fixture player {player_id} must exist")
+        };
+        target.health = health;
+    }
+
+    fn health_of(state: &SimulationState, player_id: &str) -> u16 {
+        let Some(target) = state.player(player_id) else {
+            panic!("fixture player {player_id} must exist")
+        };
+        target.health
+    }
+
+    #[test]
+    fn a_melee_strike_records_melee_delivery_and_no_crit_draw() {
+        let mut state = base_state();
+        let command = ability_command("cmd-melee", Some("defender"));
+        let outcome = accepted_outcome(&mut state, &command);
+        let strike = only_strike(&outcome);
+
+        assert_eq!(strike.strike_index, 0);
+        assert_eq!(strike.target_player_id, "defender");
+        assert_eq!(strike.delivery, StrikeDelivery::Melee);
+        assert_eq!(
+            strike.crit,
+            CritRoll::NotEligible,
+            "an ability that cannot crit must record that no draw was taken",
+        );
+        assert!(
+            !strike.crit.consumed_draw(),
+            "recording a consumed draw for a zero-crit ability would desynchronise the RNG",
+        );
+        assert!(!strike.crit.is_critical());
+        assert!(strike.damage_applied > 0);
+        assert!(!strike.eliminated_target);
+    }
+
+    #[test]
+    fn a_strike_records_damage_actually_applied_not_the_nominal_amount() {
+        let mut state = base_state();
+        // Haymaker's nominal damage is far above this. The record must report what the
+        // target could actually lose, or a client would narrate a 60-point hit on a
+        // 7-point target and overstate every finishing blow in the game.
+        let survivable = 7;
+        set_health(&mut state, "defender", survivable);
+
+        let command = ability_command("cmd-overkill", Some("defender"));
+        let outcome = accepted_outcome(&mut state, &command);
+        let strike = only_strike(&outcome);
+
+        assert_eq!(
+            strike.damage_applied, survivable,
+            "damage_applied must be clamped to the health the target actually had",
+        );
+        assert!(
+            strike.eliminated_target,
+            "a strike that reduced the target to zero must record the elimination",
+        );
+        assert_eq!(health_of(&state, "defender"), 0);
+    }
+
+    #[test]
+    fn an_already_eliminated_target_cannot_be_struck_at_all() {
+        let mut state = base_state();
+        set_health(&mut state, "defender", 0);
+
+        let command = ability_command("cmd-corpse", Some("defender"));
+
+        // Validation refuses the command outright, which is a stronger guarantee than
+        // `eliminated_target` merely being false: no strike record against an already-dead
+        // target can exist, because no such strike resolves. The untargeted area path
+        // filters eliminated players for the same reason, so the `was_alive` read in the
+        // resolver is defence in depth rather than the only thing standing between a client
+        // and a second kill credit for the same player.
+        assert_eq!(
+            apply_ability(&mut state, &command),
+            CommandResult::Rejected(CommandRejection::InvalidTarget),
+        );
     }
 
     // -----------------------------------------------------------------------------------

@@ -1061,3 +1061,101 @@ and required Windows x86_64 debug/release files in addition to the editor/.NET/R
 complete toolchain gate passes. The full Rust, release FFI, supply-chain, fixture-byte, diff, and
 format gates are rerun immediately before the checkpoint commit, and the post-commit worktree is
 required to be clean. No push is performed.
+
+---
+
+## C1 — per-strike provenance on the authoritative outcome
+
+Working-tree change on `main` at `327d2ae` (ahead 1 of `origin/main`, unpushed). Three files:
+`crates/db-sim-core/src/types.rs`, `command.rs`, `match_session.rs`. Not committed.
+
+### What was added
+
+`CommandOutcome` gained `strikes: Vec<StrikeResolution>`. Each record carries the resolution-order
+index, the target, the exact impact point, the delivery (`StrikeDelivery::{Projectile { trace_sequence },
+Melee}`), the crit draw, the damage actually applied, and whether that strike caused the elimination.
+
+The crit draw is `CritRoll::{NotEligible, Missed, Landed}` rather than a boolean. This distinction is
+not cosmetic: `roll_crit` never draws at all when an ability's `crit_chance_basis_points` is zero, so
+"did not crit" and "never rolled" are different facts about the seeded generator. A consumer that
+conflated them would predict the wrong next value and desynchronise. The rewritten `roll_crit`
+returns `CritRoll` and preserves the original short-circuit exactly; the golden vectors passing
+unchanged is the evidence that RNG consumption is bit-identical.
+
+`match_session::derive_events` now emits one `StrikeResolved` event per recorded strike, carrying the
+resolver's verbatim record. Projectile-delivered strikes are presented at their own trace's impact
+tick (rank 3, after the trace and its `Impact`), so damage lands with the projectile instead of at
+turn start. A strike citing a trace the outcome does not contain is a `SessionFault::ContractInvariant`
+rather than something quietly tolerated.
+
+### The bug this surfaced
+
+`StrikeResolved` was previously gated on `matches!(ability.attack, Attack::Strike(_))`. Karl's
+Carrion Call is the **only** multi-strike ability in the roster, and the only one whose design note
+promises that "each of the three attacks rolls its crit independently" — and it is an
+`Attack::Projectile`. It therefore emitted **zero** strike events, while 456 tests passed.
+
+This is the fifth occurrence of the repository's signature failure mode: correct, tested, unreachable.
+Emission is now driven by what the outcome actually recorded, never by the ability's declared shape,
+so an ability that finds no target emits nothing and one that lands three emits three.
+
+### Evidence
+
+Eight new tests, five in `match_session.rs` and three in `command.rs`.
+
+The projectile-side tests are anchored to a scenario found by brute-force search rather than guessed:
+Karl at x=2048 versus Huck at x=8192 on `horizontal-test-array`, angle 0, power 4600, which lands all
+three strikes. Each test asserts `landed.len() == 3` first, so the suite cannot pass vacuously if
+ballistics or spawn placement later stops the volley connecting — the failure mode the golden-vector
+no-op guard was built to catch.
+
+The strongest assertion is reconciliation: the three per-strike `damage_applied` values sum exactly to
+the target's authoritative health change. Carrion Call carries no effects and no self-damage, so that
+sum has to be the whole delta. This is what makes the records trustworthy rather than merely
+well-formed.
+
+The tests were mutation-checked. Truncating emission to `outcome.strikes.iter().take(1)` fails all
+five; restoring passes all five.
+
+The melee side is covered in `command.rs` against Huck's Haymaker, which is a `Attack::Strike` with
+`crit_chance_basis_points: 0` — so it covers both the `Melee` delivery and the `NotEligible` draw that
+the projectile fixture cannot reach. Two further tests cover clamping and elimination: a 7-health
+target struck by a 60-damage Haymaker must record `damage_applied == 7`, not 60, and must record the
+elimination. Overkill is otherwise unexercised by the projectile fixture, where 24 damage against 400
+health means applied always equals nominal.
+
+A third melee test was written expecting a strike against an already-eliminated target to record
+`eliminated_target == false`. It failed: validation rejects the command outright with
+`InvalidTarget`. The test was rewritten to assert that stronger, real guarantee. The `was_alive` read
+in the resolver is therefore defence in depth, not the only thing preventing a second kill credit.
+
+### Gates
+
+All run at the working tree described above.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 464 pass, 0 fail (was 456) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `scripts/verify-toolchain.ps1` | pass |
+| `git diff --check` | clean |
+
+Golden vectors and the shared fixture hashes are unchanged, as they must be: this slice records what
+the simulation already did and alters no authoritative state, no RNG consumption, and no state hash.
+`SIMULATION_VERSION` stays at 5 for the same reason.
+
+One note on the toolchain gate: it initially failed with "Godot 4.7.1 .NET is missing". Godot is
+installed and correct — `DUNGEON_BARRAGE_GODOT` is a user-level variable set after this session's
+shell environment was created, so the process had not inherited it. Re-run with the variable in
+scope, the full gate passes. Not a regression, and nothing was reinstalled or modified to make it
+pass.
+
+### Still open in step 1
+
+Status lifecycle records and object removal/change causes remain unrecorded, and `CommandOutcome`
+still has no `objects_removed` counterpart to `objects_created`. Duration-one statuses that apply and
+expire inside a single synchronous call remain invisible to a pre/post diff. C1 is not complete.

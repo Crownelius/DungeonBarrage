@@ -28,9 +28,9 @@ use crate::match_host::MatchHost;
 use crate::match_setup::{MatchConfig, create_match, is_valid_match_local_id};
 use crate::terrain;
 use crate::types::{
-    AbilityCommand, AbilitySlot, Attack, BallisticImpact, BallisticSample, CommandOutcome,
-    CommandRejection, CommandResult, DamageEvent, ImpactCause, MatchPhase, PassiveChoiceCommand,
-    SimulationState, TurnEndReason,
+    AbilityCommand, AbilitySlot, BallisticImpact, BallisticSample, CommandOutcome,
+    CommandRejection, CommandResult, CritRoll, DamageEvent, ImpactCause, MatchPhase,
+    PassiveChoiceCommand, SimulationState, StrikeDelivery, StrikeResolution, TurnEndReason,
 };
 
 /// Maximum first-receipt results retained by one live session.
@@ -413,15 +413,20 @@ pub enum PresentationEventKind {
         /// Terminal impact details.
         impact: ImpactSnapshot,
     },
-    /// A close-range strike resolved without a projectile.
+    /// One individual damage resolution, carrying the resolver's own record of it.
     ///
-    /// The current authoritative outcome does not retain its exact strike point, so none is
-    /// fabricated here.
+    /// Emitted once per strike the authoritative resolver actually performed, for melee and
+    /// projectile deliveries alike — a projectile's [`PresentationEventKind::Impact`] is the
+    /// ballistic terminal event, which is a different fact from the damage resolution that
+    /// followed it. The embedded [`StrikeResolution`] is the resolver's verbatim record, not
+    /// a reconstruction: nothing here is inferred from final state.
     StrikeResolved {
         /// Opaque attacking player ID.
         owner_id: String,
         /// Stable ability definition ID.
         ability_id: String,
+        /// The authoritative per-strike record, including its crit draw and impact point.
+        strike: StrikeResolution,
     },
     /// The terrain mask changed and these exact row-runs must be refreshed.
     TerrainChanged {
@@ -826,9 +831,28 @@ fn retained_presentation_event_kind_bytes(
         PresentationEventKind::StrikeResolved {
             owner_id,
             ability_id,
+            strike,
         } => {
             counter.string(owner_id)?;
             counter.string(ability_id)?;
+            counter.u16(strike.strike_index)?;
+            counter.string(&strike.target_player_id)?;
+            counter.i32(strike.impact_point.x)?;
+            counter.i32(strike.impact_point.y)?;
+            match strike.delivery {
+                StrikeDelivery::Projectile { trace_sequence } => {
+                    counter.u8(0)?;
+                    counter.u32(trace_sequence)?;
+                }
+                StrikeDelivery::Melee => counter.u8(1)?,
+            }
+            counter.u8(match strike.crit {
+                CritRoll::NotEligible => 0,
+                CritRoll::Missed => 1,
+                CritRoll::Landed => 2,
+            })?;
+            counter.u16(strike.damage_applied)?;
+            counter.boolean(strike.eliminated_target)?;
         }
         PresentationEventKind::TerrainChanged {
             terrain_generation,
@@ -1858,14 +1882,35 @@ fn derive_events(
             )?;
         }
 
-        if matches!(ability.attack, Attack::Strike(_)) {
+        // One event per strike the resolver actually performed. The count comes from the
+        // outcome, never from `ability.strikes_per_turn`: a three-strike ability that found
+        // no target performs zero, and a client told otherwise would animate phantom hits.
+        for strike in &outcome.strikes {
+            // A projectile-delivered strike is presented at its own trace's impact tick, so
+            // the damage lands with the projectile rather than at the start of the turn.
+            let (tick, rank) = match strike.delivery {
+                StrikeDelivery::Projectile { trace_sequence } => {
+                    let Some(trace) = outcome
+                        .projectile_traces
+                        .iter()
+                        .find(|t| t.sequence == trace_sequence)
+                    else {
+                        // A strike citing a trace the outcome does not contain means the
+                        // two halves of the record disagree; never paper over it.
+                        return Err(SessionFault::ContractInvariant);
+                    };
+                    (trace.impact.tick, 3)
+                }
+                StrikeDelivery::Melee => (0, 1),
+            };
             push_pending(
                 &mut pending,
-                0,
-                1,
+                tick,
+                rank,
                 PresentationEventKind::StrikeResolved {
                     owner_id: command.player_id.clone(),
                     ability_id: ability.id.to_owned(),
+                    strike: strike.clone(),
                 },
             )?;
         }
@@ -2948,5 +2993,246 @@ mod tests {
                 },
             ],
         );
+    }
+}
+
+/// Per-strike provenance, verified end to end against the authoritative health change.
+///
+/// These exist because the field they cover is exactly the kind this repository has shipped
+/// broken before: produced by a resolver, structurally correct, and reaching no consumer.
+/// Karl's Carrion Call is the only multi-strike ability in the roster and is a *projectile*,
+/// so the previous `matches!(ability.attack, Attack::Strike(_))` emission gate meant the one
+/// ability whose design doc promises three independent crit rolls emitted no strike event at
+/// all. A vacuous pass would hide that again, so every assertion below is anchored to a
+/// scenario proven to land all three strikes.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod strike_provenance_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig};
+    use crate::types::Appearance;
+
+    const TARGET: &str = "b-local-bot";
+
+    fn karl_duel() -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-local-player".to_owned(),
+                    team: 0,
+                    character_id: "karl".to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: TARGET.to_owned(),
+                    team: 1,
+                    character_id: "huck".to_owned(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    /// Flat shot empirically verified to land every one of Karl's three strikes.
+    fn landing_volley(session: &MatchSessionHost) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: "karl-volley".to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind: MatchCommandKind::Ability {
+                slot: AbilitySlot::Basic,
+                angle_millidegrees: 0,
+                power_basis_points: 4_600,
+                target_player_id: None,
+                secondary_target_player_id: None,
+            },
+        }
+    }
+
+    fn health_of(session: &MatchSessionHost, id: &str) -> u16 {
+        session
+            .host()
+            .state()
+            .player(id)
+            .expect("fixture player must exist")
+            .health
+    }
+
+    fn strikes(transition: &MatchTransition) -> Vec<StrikeResolution> {
+        transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::StrikeResolved { strike, .. } => Some(strike.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_multi_strike_projectile_emits_one_record_per_strike_it_actually_landed() {
+        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let command = landing_volley(&session);
+        let transition = session.apply(command).expect("volley must be accepted");
+        let landed = strikes(&transition);
+
+        // Guard against a vacuous pass: if this scenario ever stops landing, every
+        // assertion below would hold trivially over an empty vector and prove nothing.
+        assert_eq!(
+            landed.len(),
+            3,
+            "Carrion Call must land three strikes in this fixture; a change in ballistics \
+             or spawn placement has silently defanged this test",
+        );
+
+        // Indices are the resolver's own resolution order: dense and zero-based.
+        let indices: Vec<u16> = landed.iter().map(|s| s.strike_index).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+
+        for strike in &landed {
+            assert_eq!(strike.target_player_id, TARGET);
+            assert!(
+                strike.damage_applied > 0,
+                "a landed strike that applied no damage is not a landed strike",
+            );
+        }
+    }
+
+    #[test]
+    fn every_strike_cites_a_projectile_trace_the_outcome_actually_contains() {
+        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let command = landing_volley(&session);
+        let transition = session.apply(command).expect("volley must be accepted");
+        let landed = strikes(&transition);
+        assert_eq!(landed.len(), 3);
+
+        let trace_ids: Vec<u32> = transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::ProjectileTrace(trace) => Some(trace.trace_id),
+                _ => None,
+            })
+            .collect();
+
+        let mut cited = Vec::new();
+        for strike in &landed {
+            match strike.delivery {
+                StrikeDelivery::Projectile { trace_sequence } => {
+                    assert!(
+                        trace_ids.contains(&trace_sequence),
+                        "strike cites trace {trace_sequence}, which the transition never emitted",
+                    );
+                    cited.push(trace_sequence);
+                }
+                StrikeDelivery::Melee => {
+                    panic!("Carrion Call is a projectile ability; a melee delivery is wrong")
+                }
+            }
+        }
+
+        // Each strike is delivered by its own distinct projectile, not three readings of one.
+        cited.sort_unstable();
+        cited.dedup();
+        assert_eq!(
+            cited.len(),
+            3,
+            "the three strikes must cite three distinct traces",
+        );
+    }
+
+    #[test]
+    fn each_strike_records_its_own_independent_crit_draw() {
+        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let command = landing_volley(&session);
+        let transition = session.apply(command).expect("volley must be accepted");
+        let landed = strikes(&transition);
+        assert_eq!(landed.len(), 3);
+
+        for strike in &landed {
+            // Carrion Call has a non-zero crit chance, so every strike must actually have
+            // drawn. `NotEligible` here would mean the record misreports RNG consumption,
+            // which desynchronises any consumer tracking the generator.
+            assert_ne!(
+                strike.crit,
+                CritRoll::NotEligible,
+                "a crit-capable ability must record a real draw for every strike",
+            );
+            assert!(strike.crit.consumed_draw());
+        }
+
+        // The per-strike flag is only meaningful if it tracks per-strike damage.
+        if let (Some(crit), Some(plain)) = (
+            landed.iter().find(|s| s.crit.is_critical()),
+            landed.iter().find(|s| !s.crit.is_critical()),
+        ) {
+            assert!(
+                crit.damage_applied > plain.damage_applied,
+                "a critical strike ({}) must exceed a non-critical one ({})",
+                crit.damage_applied,
+                plain.damage_applied,
+            );
+        }
+    }
+
+    #[test]
+    fn per_strike_damage_reconciles_exactly_with_the_authoritative_health_change() {
+        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let before = health_of(&session, TARGET);
+        let command = landing_volley(&session);
+        let transition = session.apply(command).expect("volley must be accepted");
+        let after = health_of(&session, TARGET);
+        let landed = strikes(&transition);
+        assert_eq!(landed.len(), 3);
+
+        let recorded: u32 = landed.iter().map(|s| u32::from(s.damage_applied)).sum();
+
+        // Carrion Call carries no effects and no self-damage, so the target's entire health
+        // loss this command is the sum of these three strikes. This is the assertion that
+        // makes the records trustworthy: they are not merely well-formed, they add up to
+        // what the authoritative simulation actually did.
+        assert_eq!(
+            recorded,
+            u32::from(before - after),
+            "per-strike damage must account for the whole authoritative health change",
+        );
+        assert!(recorded > 0, "the fixture must actually deal damage");
+    }
+
+    #[test]
+    fn a_strike_is_presented_at_its_own_projectiles_impact_tick() {
+        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let command = landing_volley(&session);
+        let transition = session.apply(command).expect("volley must be accepted");
+
+        let mut impact_ticks = BTreeMap::new();
+        for event in &transition.events {
+            if let PresentationEventKind::ProjectileTrace(trace) = &event.kind {
+                impact_ticks.insert(trace.trace_id, trace.terminal_impact.tick);
+            }
+        }
+
+        let mut checked = 0;
+        for event in &transition.events {
+            if let PresentationEventKind::StrikeResolved { strike, .. } = &event.kind
+                && let StrikeDelivery::Projectile { trace_sequence } = strike.delivery
+            {
+                let expected = impact_ticks
+                    .get(&trace_sequence)
+                    .copied()
+                    .expect("cited trace must exist");
+                assert_eq!(
+                    event.presentation_tick, expected,
+                    "damage must be presented when its projectile lands, not at turn start",
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 3, "all three strikes must have been checked");
     }
 }
