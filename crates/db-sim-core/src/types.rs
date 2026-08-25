@@ -640,6 +640,22 @@ pub struct BallisticResult {
     pub impact: BallisticImpact,
 }
 
+/// One independently playable projectile trajectory produced by a command.
+///
+/// A multi-strike ability must not concatenate several paths into one ambiguous stream or
+/// discard all but its final impact. `sequence` is zero-based within the command and gives
+/// the presentation layer a stable identity without making that identity authoritative
+/// match state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectileTrace {
+    /// Zero-based launch order within the command.
+    pub sequence: u32,
+    /// Authoritative sampled path for this projectile only.
+    pub samples: Vec<BallisticSample>,
+    /// This projectile's terminal event.
+    pub impact: BallisticImpact,
+}
+
 // ---------------------------------------------------------------------------
 // Players and match state
 // ---------------------------------------------------------------------------
@@ -1050,10 +1066,8 @@ pub struct CommandOutcome {
     pub turn_number_before: u32,
     /// Turn number after application.
     pub turn_number_after: u32,
-    /// Sampled projectile path, empty for strikes.
-    pub samples: Vec<BallisticSample>,
-    /// Terminal projectile event, absent for strikes.
-    pub impact: Option<BallisticImpact>,
+    /// Independently identifiable projectile paths in launch order; empty for strikes.
+    pub projectile_traces: Vec<ProjectileTrace>,
     /// Terrain mutations, in sequence order.
     pub terrain_ops: Vec<TerrainOperation>,
     /// Damage and healing applied, sorted by `player_id`.

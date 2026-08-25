@@ -857,3 +857,207 @@ What was attempted, what landed, what was learned. Defects go in §4 with a
 back-reference here. Never edit an entry above this line; correct it with a new
 one that points back.
 -->
+
+### 2026-08-14 — Core orchestration closeout recorded after the fact
+
+**Commits:** `ef3c41f`, `41cfd8d`, `9ebaa64`, `4ac6b09`, `fa7f0af`
+
+The append-only log previously stopped before a material sequence that is now part of the
+baseline. `ef3c41f` closed the real P2/P3 gaps: all crater producers route through block health,
+terrain-removal accounting reaches the outcome, blocks live in state and the hash, and authored
+maps populate them. `41cfd8d` added the top-level `MatchHost`; `9ebaa64` added frozen whole-match
+golden vectors and fixed two orchestration defects those vectors exposed; `4ac6b09` fixed turn-end
+reason recording and passive prompting, then deliberately regenerated both vector sets at
+`SIMULATION_VERSION = 4`. `fa7f0af` added the first C# client specification.
+
+This entry corrects the historical record rather than rewriting earlier analysis. In particular,
+the old P2/P3 text in `todolist.md` described genuine unreachable/partial states but was not updated
+after `ef3c41f`; it is now labelled historical and resolved.
+
+### 2026-08-14 — Client stack decision and first C0/C1 prerequisite slice
+
+**Commits:** none — working tree based on `fa7f0af`; still uncommitted at this checkpoint
+
+The client plan was re-evaluated rather than assuming the earlier “native C#” sentence answered the
+whole architecture. C#, Rust, C++, TypeScript, Unity, Godot, MonoGame, Bevy, desktop/web, and future
+server/console implications were separated by responsibility. ADR 0006 records the resulting
+boundary: Godot 4.7.1 .NET and C# for presentation; Rust as the only authoritative gameplay; a
+coarse client-only C ABI for local matches; and a future Rust-native server linking the core
+directly. C# remains the right language at the Godot presentation seam, not for the authoritative
+simulation or server.
+
+The same working slice rewrote `CLIENT_SPEC.md` into ordered evidence gates; pinned .NET 10.0.302
+and Rust 1.94.0; added a toolchain verifier; added validated transport-free match construction and
+an engine-neutral atomic snapshot; preserved every projectile as an independent trace; corrected
+post-host turn/hash reporting and actual gauge deltas; made `MatchHost` cloneable for adapter
+atomicity; prevented pass/timeout from bypassing passive selection; and made the release FFI panic
+containment promise executable under `panic = "unwind"`.
+
+The full Rust workspace, release FFI tests, and release FFI build passed during that slice. The
+toolchain verifier passed Rust/.NET and stopped clearly at the missing Godot 4.7.1 .NET editor. No
+Godot project was created because the C1–C3 contract gates deliberately precede scenes.
+
+### 2026-08-24 — C1 normalized session, transitions, and shared fixture
+
+**Commits:** none — continuation in the same preserved dirty working tree
+
+The next coherent C1 boundary was implemented in `match_session.rs`. `MatchSessionHost` now owns a
+closed normalized `MatchCommand`, deterministic canonical semantic digests, snapshot generation,
+cloned-host application, a retained first-result ledger for accepted and rejected commands,
+duplicate replay, changed-content command-ID security rejection, and atomic `MatchTransition`
+responses. A digest is never trusted alone: exact typed equality is also required. Generation
+increments once only when the candidate authoritative state differs; a legal zero/blocked move is
+accepted and retained without manufacturing a state generation.
+
+Transitions repeat one detached post-snapshot and exact live-host hash. Events preserve independent
+projectile traces and impacts, and deterministically derive net entity movement, health/gauge/status
+changes, block surviving bounds, persistent-object lifecycle, elimination, passive prompts/choice,
+turn end/open, and match completion. Terrain dirty rectangles are exact changed-cell row-runs,
+sorted by row and column. The implementation explicitly labels absent provenance instead of
+inventing it. C1 remains open because current outcomes do not retain exact strike points,
+per-strike/RNG timing, every status lifecycle, or every removal cause.
+
+Review found and fixed a separate host deadlock: movement settling could eliminate the active
+player while leaving that dead actor in `Movement`. `submit_move` now drives the normal
+`Eliminated` turn/victory cycle; tests cover both duel completion and rotation when other teams
+survive.
+
+The first cross-language fixture bundle lives under
+`tests/fixtures/matches/horizontal-test-duel-v1`. Its compact request files are exact UTF-8/LF bytes
+for a real Zeke-vs-Huck match: move one cell, fire one projectile, and hand the turn over. A strict
+direct Rust consumer rejects BOM/CR/noncompact/unsafe paths and closed-schema violations, then
+asserts nonzero movement, independent trace/sample minima, generation changes, event ordering, turn
+handoff, and transition/snapshot/live-host hash equality. Frozen hashes are:
+
+- initial: `a37f45c1af031a47`
+- after move: `f0c78bdd9d2066cf`
+- after ability/final: `194afe5bc5d13818`
+
+Production `db-sim-core` remains dependency-free; serde/serde_json are dev-only for this shared
+fixture test. Full response JSON bytes wait for C2's production FFI serializer rather than blessing
+a test-only imitation as the ABI.
+
+Documentation was reconciled at the same time: ownership now names the C1/C2 seams and the sole FFI
+unsafe exception; P2/P3 are correctly marked resolved; P13 records the active client-boundary gap;
+`CLIENT_SPEC.md` states implemented versus missing provenance; and `HANDOFF.md` contains the exact
+dirty-tree inventory, validation commands, risks, next sequence, and copy-paste Opus prompt.
+
+**Targeted evidence before the final full pass:** all 12 `match_session` unit tests passed, both
+movement-fall host tests passed, the strict shared fixture passed, and core all-target clippy was
+clean. Final workspace/release/toolchain results are recorded in `HANDOFF.md`; the work remains
+uncommitted until an explicit landing request.
+
+### 2026-08-24 — C1 audit closeout, bounded replay ledger, and simulation version 5
+
+**Commits:** none — continuation in the same preserved dirty working tree
+
+This append corrects and extends the preceding same-day checkpoint; it does not rewrite that
+intermediate evidence. Independent review found two session-boundary issues and one scheduler
+compatibility defect before handoff.
+
+First, the session specified a 64 MiB retained command/result limit but enforced only 16,384
+entries. `MatchSessionHost` now measures the complete retained typed command and transition with a
+deterministic platform-independent logical encoding: fixed primitive widths, one-byte enum/option
+tags, four-byte string/sequence lengths, complete UTF-8 and nested payloads, and top-level canonical
+headers. The exhaustive counter includes snapshots, every event kind, dirty rectangles, damage,
+persistent objects, projectile traces, and every sample. Checked `u64` arithmetic and the byte cap
+run before ledger/host/generation publication; a cap or arithmetic overflow closes the session with
+no authoritative mutation. Exact duplicate and command-ID conflict paths consume no new bytes.
+Tests cover widths, accepted and rejected receipts, no-growth replay/conflict, exact-fit and
+one-byte-over behavior, checked overflow, and a 4,096-sample trace.
+
+Second, the net event builder labelled every active-player position change under a `Move` command
+as `RequestedMove`, even though `MatchHost` always settles immediately afterward. It now uses that
+label only for a same-direction, bounded, purely horizontal displacement. Any vertical component,
+including a settle-only fall or a walk-plus-fall, is conservatively
+`AuthoritativeResolution` until the host retains a post-walk/pre-settle split. A focused regression
+protects both cases.
+
+Third, the earlier movement-fall fix exposed a terminal scheduler omission. A victory path
+deliberately does not call `end_turn` because no next player exists, but it also failed to copy the
+final pending turn reason. The previous turn's reason could therefore survive a terminal attack,
+timeout, pass, or fall. `leave_victory_check` now commits that value before returning
+`MatchComplete`, with direct scheduler and host regressions. This changes replay-visible state, so
+`SIMULATION_VERSION` moved from 4 to 5 under the golden-vector regeneration procedure:
+
+| Vector | Version 4 | Version 5 |
+|---|---|---|
+| all passes | `876de8693b5b75a8` | `b75ec70f007a7a7b` |
+| walking duel | `b28768a38619df88` | `0038e5ddfabfec81` |
+| firing duel | `2fbdca99f94c944c` | `9c53418575ea824d` |
+| mixed actions | `765e76572c02b6b9` | `ea50d7336feb3a94` |
+| low-health decision | `06db50b907568060` | `323672057a1d53af` |
+
+The shared direct fixture was regenerated only after its movement, projectile, turn, generation,
+event-order, and live-hash assertions passed. Its version-4-to-version-5 hash history is:
+
+| Checkpoint | Version 4 | Version 5 |
+|---|---|---|
+| initial | `a37f45c1af031a47` | `65ac3e53023ca6b0` |
+| after movement | `f0c78bdd9d2066cf` | `9d92d3b5d5dad7d0` |
+| after ability/final | `194afe5bc5d13818` | `af724375e588d90b` |
+
+Final local evidence from `C:\Users\rsfit\DungeonBarrage`:
+
+- `git diff --check`, `cargo fmt --all --check`, and workspace all-target clippy with
+  `-D warnings`: pass. Git printed only the existing non-failing `core.autocrlf` notices.
+- `cargo test --workspace --quiet`: 456 tests pass — 440 core unit, 7 whole-match golden,
+  1 strict shared fixture, 7 FFI, and 1 WASM.
+- `cargo test --release -p db-sim-ffi`: 7 pass; `cargo build --release -p db-sim-ffi`: pass.
+- `cargo deny check`: advisories, bans, licenses, and sources pass; only unused license allow-list
+  warnings are emitted.
+- All three raw request files remain UTF-8 with no BOM or CR and exactly one terminal LF.
+- The toolchain verifier confirms .NET SDK 10.0.302 and Rust/Cargo 1.94.0, then exits 1 with the
+  intended actionable error because Godot 4.7.1 .NET is not installed.
+
+C1 remains open only on documented contract breadth: source-owned per-strike/impact/RNG/status and
+object-removal provenance, authority timeout, read-only preview, safe host-plus-complete-ledger
+restore, the composite session/ABI envelope, and the remaining direct transition scenarios. C2's
+production serializer is still the correct place to freeze full response JSON bytes. No C# or
+Godot scene work starts before those evidence gates, and no files were staged or committed.
+
+### 2026-08-24 — Correction: requested-movement provenance remains reserved
+
+**Commits:** none — final review in the same preserved dirty working tree
+
+The preceding closeout was still too optimistic when it said a same-direction, same-height net move
+could be labelled `RequestedMove`. A walk can climb and then settle back to its original height, so
+equal pre/post `y` does not prove the path was purely horizontal. Without a retained
+post-walk/pre-settle position, no net diff can make that attribution safely.
+
+The event builder now labels every current position diff `AuthoritativeResolution` and documents
+`RequestedMove` as reserved for the richer movement outcome contract. Tests assert that a real move
+still increments generation and publishes the authoritative net position, and that neither positive
+nor negative accepted moves emit the reserved cause. This correction affects presentation metadata
+only; authoritative state, `SIMULATION_VERSION = 5`, golden vectors, and shared fixture state hashes
+do not change. The full workspace remains 456 passing tests after replacing the earlier provenance
+regression with this stricter reserved-cause contract.
+
+### 2026-08-25 — Pinned client dependencies installed and campaign committed
+
+**Commit:** the local checkpoint commit containing this entry; not pushed
+
+The owner authorized dependency installation and a local repository commit. The already-pinned
+.NET SDK 10.0.302, Rust/Cargo 1.94.0, rustfmt, clippy, and cargo-deny were present and usable.
+`cargo fetch --locked` materializes the locked Rust dependency graph without changing it.
+
+Godot 4.7.1 .NET was installed for the current Windows user through WinGet package
+`GodotEngine.GodotEngine.Mono` at exact version 4.7.1. WinGet verified the official editor archive
+SHA-256 `764a089809fb1a6f745686ce9f6d3ca83adce8fb60fb9a4e2324b63baaebaa45`; the executable reports
+`4.7.1.stable.mono.official.a13da4feb`. The versioned executable path is persisted in the user-level
+`DUNGEON_BARRAGE_GODOT` variable, so the repository is not coupled to a machine-local absolute path.
+
+The matching official `.NET` export-template archive was downloaded from Godot's 4.7.1-stable
+GitHub release. Its 1,201,759,011-byte payload matched the release API's published SHA-256
+`ef9a708be51ecd974cd7dccdcafd7a1870da3d3e1c24c072bdbb9818c7a7db63` before extraction. Templates
+are installed at `%APPDATA%\Godot\export_templates\4.7.1.stable`; `version.txt` reports
+`4.7.1.stable.mono`, and both Windows x86_64 debug and release binaries are present. The downloaded
+archive remains at `%LOCALAPPDATA%\Temp\DungeonBarrage-Godot-4.7.1\Godot_v4.7.1-stable_mono_export_templates.tpz`:
+the exact-target cleanup attempt was rejected by the execution policy, so no destructive workaround
+was attempted. The retained archive is not part of the repository and is safe to remove manually.
+
+`scripts/verify-toolchain.ps1` now verifies the template directory, exact Mono template version,
+and required Windows x86_64 debug/release files in addition to the editor/.NET/Rust versions. The
+complete toolchain gate passes. The full Rust, release FFI, supply-chain, fixture-byte, diff, and
+format gates are rerun immediately before the checkpoint commit, and the post-commit worktree is
+required to be clean. No push is performed.

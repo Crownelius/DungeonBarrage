@@ -1,761 +1,1431 @@
-# Dungeon Barrage C# Client Specification
+# Dungeon Barrage client specification
 
-**Status:** Implementation specification — nothing built yet
-**Engine:** Godot 4.x with C# (.NET 8)
-**Related:** [adr/0004-native-desktop-rust-csharp.md](./adr/0004-native-desktop-rust-csharp.md) · [SECURITY_BASELINE.md](./SECURITY_BASELINE.md) · [CHARACTERS.md](./CHARACTERS.md) · [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PROGRAM_PLAN.md](./PROGRAM_PLAN.md)
+**Status:** Version 2 implementation specification
 
-This document is written so an engineer who has never seen the project can build the client
-from it. Where a decision is already made it says so and why; where one is open it says that
-too rather than inventing an answer.
+**Updated:** 2026-08-24
 
----
+**Launch client:** Godot 4.7.1 .NET, C# targeting `net10.0`
 
-## 1. What the client is
+**Authoritative simulation:** Rust `db-sim-core`
 
-A native desktop application that **renders the authoritative simulation and collects player
-intent.** Nothing else.
+**Local boundary:** coarse, versioned C ABI through `db-sim-ffi`
 
-The simulation is `db-sim-core`, a Rust crate. The client calls into it over a C ABI. In a
-local match the client hosts the core in-process; online, the same core runs on the server and
-the client's copy is used only for prediction and playback. **The rules are identical in both
-cases because it is literally the same compiled code.**
+**Online boundary:** authoritative server protocol; no client prediction initially
 
-### The one rule
+**Related:** [ADR 0006](./adr/0006-client-and-server-language-boundaries.md) · [ADR 0004](./adr/0004-native-desktop-rust-csharp.md) · [ADR 0002](./adr/0002-character-kits.md) · [ADR 0005](./adr/0005-destructible-blocks-with-health.md) · [SECURITY_BASELINE.md](./SECURITY_BASELINE.md) · [CHARACTERS.md](./CHARACTERS.md) · [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PROGRAM_PLAN.md](./PROGRAM_PLAN.md)
 
-> **The client decides nothing.**
-
-Not damage, not whether a shot hit, not ammunition, not terrain changes, not whose turn it is,
-not who won. It sends intents and renders results. `SECURITY_BASELINE.md` §2 draws the trust
-boundary with the client entirely on the untrusted side, and a native client is neither more
-nor less trusted than a browser one — memory editing and packet forging were always in scope.
-
-If you find yourself writing `if (damage > health) player.Die()` in C#, stop. That decision
-belongs in Rust, and duplicating it creates a second source of truth that will disagree.
-
-### What it is not
-
-- Not a second implementation of the rules.
-- Not a physics simulation. **Godot's physics, collision, and RNG are never used for
-  gameplay.** They are not deterministic to the standard ADR 0001 §4 requires. Godot may
-  animate cosmetic debris; it may not decide where a character stands.
-- Not a level editor (deferred).
-- Not the match server.
+This document defines an implementable native client, including the Rust contracts it requires.
+It deliberately separates what exists from what must be built. A milestone is complete only when
+its stated evidence exists; a class name or a green test that does not exercise a real match is not
+evidence.
 
 ---
 
-## 2. Why Godot 4 with C#
+## 1. Authority and source precedence
 
-Decided in ADR 0004. Recorded here so the reasoning survives:
+The repository contains older documents written before the platform and character-kit pivots.
+Use this precedence when two sources disagree:
 
-| Need | Why Godot supplies it |
-|---|---|
-| A shell, not an engine | The project owns its simulation; it needs rendering, input, audio, UI, and an asset pipeline |
-| 2D strength | The game is a 2D side-view artillery game |
-| Desktop export | First-class Windows/macOS/Linux |
-| Licensing | MIT — no revenue terms, no runtime fees |
-| C# support | .NET 8, first-class P/Invoke |
+1. The newest accepted ADR governing the disputed decision.
+2. This document for client architecture, presentation, input, packaging, and client-facing
+   Rust/FFI requirements.
+3. Specialized current design documents such as `CHARACTERS.md`, `SECURITY_BASELINE.md`, and
+   ADR 0005.
+4. Non-superseded portions of `PRODUCT_SPEC.md` and `PLATFORM_STRATEGY.md`.
+5. Historical plans and retired code under `reference/`.
 
-**MonoGame remains the recorded fallback.** If Godot's C# tooling proves obstructive, the
-Rust boundary is identical either way — switching costs the shell, not the game. That property
-is why the boundary is drawn where it is.
+In particular:
 
-Console porting via a third-party house (W4 Games) is the known path, not a promise.
+- ADR 0006 governs the current language boundaries: Godot/C# presentation, Rust simulation, and a
+  future Rust-native server.
+- ADR 0002 replaces the old three-weapon loadout with fixed character kits. Ammunition and the
+  `main | secondary | meleeTool` equipment contract are retired. Client UI uses
+  `basic | basicAlt | special`.
+- ADR 0004's web removal still stands, but its ASP.NET/C# server choice is superseded by ADR 0006.
+- ADR 0005 governs destructible block health and mask derivation.
+- `PLATFORM_STRATEGY.md` remains useful for general authority, networking, privacy, and performance
+  intent, but its PWA, browser, Electron, TypeScript, and Node-specific sections are historical.
+
+Current code is evidence of implementation state, not permission to silently weaken this contract.
+If the code cannot satisfy a requirement, record and resolve the gap before building a workaround in
+C#.
+
+### 1.1 The one gameplay rule
+
+> **Presentation never decides an authoritative result.**
+
+The Rust host owns legality, phase, active player, turn version, random draws, movement allowance,
+projectiles, collision, terrain, blocks, health, status, gauge, passive selection, elimination, and
+victory. The C# client submits intent and presents authoritative snapshots and transitions.
+
+Godot physics, collision, navigation, and RNG are never used for gameplay. Cosmetic debris may use
+Godot physics only when it cannot obscure or alter an authoritative result.
+
+The local application contains an in-process authority for training and local matches. That does not
+make the Godot view authoritative: `LocalMatchSession` owns the Rust host and clocks; scenes still
+consume the same intent/snapshot/transition interface as a remote client.
+
+### 1.2 What the client owns
+
+- Rendering, animation, particles, camera, audio, and UI.
+- Semantic input and uncommitted local aim/charge state.
+- Playback progress through an already-authoritative transition.
+- Device settings and local accessibility preferences.
+- Connection presentation and retry requests.
+
+### 1.3 Non-goals for the first client
+
+- No online prediction or rollback.
+- No second implementation of ballistics or rules in C#.
+- No level editor, user-authored scripting, or downloaded executable content.
+- No web export. Godot 4 C# web delivery is not part of the launch architecture.
+- No ranked mode, public matchmaking, store, progression UI, or account system before the local
+  match gate.
+- No engine abstraction intended to make Godot, MonoGame, and another renderer interchangeable.
+  Domain/session code remains Godot-free; scenes are allowed to be good Godot code.
 
 ---
 
-## 3. The FFI boundary
+## 2. Settled stack and supported targets
 
-### 3.1 Current state — read this before writing bindings
-
-`crates/db-sim-ffi` exists and exports only:
-
-```c
-uint32_t db_sim_simulation_version(void);
-uint32_t db_sim_protocol_version(void);
-uint32_t db_sim_content_version(void);
-SimHandle* db_sim_create(uint64_t seed);
-void      db_sim_destroy(SimHandle* handle);
-int32_t   db_sim_state_hash(const SimHandle* handle, char* out, size_t out_len);
-void      db_sim_string_free(char* ptr);
-```
-
-**The match API is not exported yet.** `MatchHost`, `submit_move`, `submit_ability`,
-`pass_turn`, and state readback all need adding to `db-sim-ffi` before the client can do
-anything. §3.4 specifies what to add. Do not begin the C# side expecting these to exist.
-
-### 3.2 Status codes
-
-Every fallible export returns `int32_t`:
-
-| Value | Meaning |
-|---:|---|
-| `0` | `OK` |
-| `-1` | `NULL_POINTER` — a required pointer was null |
-| `-2` | `INVALID_UTF8` |
-| `-3` | `REJECTED` — the simulation refused. **Not a fault.** A game-rules outcome |
-| `-4` | `INTERNAL_PANIC` — a bug in the core. The process survives; abandon the match |
-| `-5` | `BUFFER_TOO_SMALL` — nothing was written |
-
-`REJECTED` is normal and frequent. Treat it as information for the player ("out of range"),
-not an error dialog.
-
-`INTERNAL_PANIC` is not normal. Log it, surface a "match desynchronised" state, and do not
-continue playing — the state may be inconsistent.
-
-### 3.3 Safety contract
-
-Guaranteed by the Rust side:
-
-- **No exported function panics across the boundary.** Every one is `catch_unwind`-wrapped.
-  Unwinding across FFI is undefined behaviour and would take down a server holding other
-  players' matches.
-- **A null handle is tolerated, not undefined.** Every function checks and returns a status.
-- **No floating point crosses the boundary.** Every gameplay scalar is a quantized integer.
-- Strings out are UTF-8, NUL-terminated, owned by Rust, freed with `db_sim_string_free`.
-  **Never free them with the .NET allocator** — the allocators differ and it will corrupt the
-  heap.
-
-Required of the C# side:
-
-- A handle is opaque. Never construct, offset, or compare one.
-- Destroy exactly once. Double-free is undefined behaviour on your side of the line.
-- Do not hold a handle across an AppDomain reload without re-validating it.
-
-### 3.4 Exports the client needs added
-
-Specified here so the Rust work is unambiguous. Buffer-out rather than returning allocations,
-so the caller controls lifetime.
-
-```c
-// Lifecycle
-SimHandle* db_sim_match_start(uint64_t seed, const char* map_id);
-void       db_sim_match_destroy(SimHandle*);
-
-// Intents
-int32_t db_sim_submit_move(SimHandle*, const char* player_id, int32_t dx, int32_t* travelled_out);
-int32_t db_sim_submit_ability(SimHandle*, const AbilityCommandFfi* command, char* outcome_json, size_t len);
-int32_t db_sim_submit_passive(SimHandle*, const char* player_id, const char* passive_id);
-int32_t db_sim_pass_turn(SimHandle*);
-
-// Readback
-int32_t db_sim_phase(const SimHandle*, int32_t* phase_out);
-int32_t db_sim_active_player(const SimHandle*, char* out, size_t len);
-int32_t db_sim_outcome(const SimHandle*, int32_t* outcome_out);
-int32_t db_sim_player_count(const SimHandle*, uint32_t* out);
-int32_t db_sim_player_snapshot(const SimHandle*, uint32_t index, PlayerSnapshotFfi* out);
-int32_t db_sim_block_count(const SimHandle*, uint32_t* out);
-int32_t db_sim_block_snapshot(const SimHandle*, uint32_t index, BlockSnapshotFfi* out);
-int32_t db_sim_terrain_dimensions(const SimHandle*, uint32_t* w, uint32_t* h);
-int32_t db_sim_terrain_cells(const SimHandle*, uint8_t* out, size_t len);
-int32_t db_sim_state_hash(const SimHandle*, char* out, size_t len);
-```
-
-**On the projectile timeline:** `CommandOutcome` carries sampled path points, impacts, terrain
-operations, itemized damage, and created objects. That is a nested, variable-length structure
-and marshalling it field-by-field across FFI would be miserable. Serialize it to JSON in Rust
-and parse it in C#. This is **presentation data only** — it never feeds a decision — so the
-cost is one allocation per action and the risk is nil. Do not use JSON for anything
-authoritative.
-
-`#[repr(C)]` structs for the flat snapshots:
-
-```c
-typedef struct {
-    char     id[64];          // NUL-padded
-    uint8_t  team;
-    uint16_t health;
-    uint16_t max_health;
-    int32_t  position_x;      // fixed-point, POSITION_SCALE units per cell
-    int32_t  position_y;
-    uint16_t special_gauge;   // hundredths, 0..=10000
-    uint8_t  has_chosen_passive;
-    char     character_id[32];
-} PlayerSnapshotFfi;
-
-typedef struct {
-    uint32_t id;
-    int32_t  origin_cell_x;
-    int32_t  origin_cell_y;
-    uint16_t width_cells;
-    uint16_t height_cells;
-    uint16_t health;
-    uint16_t max_health;
-    uint8_t  material;
-    uint8_t  erosion_axis;
-} BlockSnapshotFfi;
-```
-
-Fixed-size `char` arrays rather than pointers: no lifetime question, no free, and a truncated
-id fails loudly rather than dangling.
-
-### 3.5 The C# binding layer
-
-One file, `Interop/DbSim.cs`, is the **only** place `DllImport` appears. Everything else
-talks to a wrapper.
-
-```csharp
-internal static class DbSimNative
-{
-    private const string Lib = "db_sim_ffi";
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern uint db_sim_simulation_version();
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr db_sim_match_start(ulong seed,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string mapId);
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void db_sim_match_destroy(IntPtr handle);
-
-    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int db_sim_submit_move(IntPtr handle,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string playerId, int dx, out int travelled);
-}
-```
-
-Wrapped in a `SafeHandle` so a leak is impossible even on an exception path:
-
-```csharp
-public sealed class MatchHandle : SafeHandleZeroOrMinusOneIsInvalid
-{
-    public MatchHandle() : base(ownsHandle: true) { }
-    protected override bool ReleaseHandle()
-    {
-        DbSimNative.db_sim_match_destroy(handle);
-        return true;
-    }
-}
-```
-
-**Version check at startup, before anything else:**
-
-```csharp
-if (DbSimNative.db_sim_simulation_version() != ExpectedSimulationVersion)
-    throw new InvalidOperationException(
-        "Native simulation version mismatch — refusing to start. " +
-        "A client and core built from different revisions will desynchronise silently.");
-```
-
-This must be a hard failure. `SIMULATION_VERSION` has already moved 1→4 during development;
-a mismatched pair produces divergent matches with no visible symptom until the state hashes
-disagree.
-
-### 3.6 Native library placement
-
-| Platform | File | Location |
+| Layer | Choice | Constraint |
 |---|---|---|
-| Windows | `db_sim_ffi.dll` | `client/bin/win-x64/` |
-| Linux | `libdb_sim_ffi.so` | `client/bin/linux-x64/` |
-| macOS | `libdb_sim_ffi.dylib` | `client/bin/osx-x64/` (universal preferred) |
+| Presentation | Godot **4.7.1 .NET** | Use the .NET editor and matching export templates, not the standard editor |
+| Client language | C# targeting **`net10.0`** | Nullable enabled; warnings are errors in owned code |
+| Local simulation | Rust `db-sim-core` | Linked only through `db-sim-ffi` from C# |
+| Native boundary | Coarse C ABI | Opaque handle plus versioned byte envelopes; no gameplay logic in FFI |
+| Future server | Rust-native | Links `db-sim-core` directly; it does not P/Invoke through C# |
+| Online client | Authoritative playback | No local simulation prediction until measured latency proves it necessary |
 
-Built by `cargo build -p db-sim-ffi --release` and copied by a pre-build step. The export
-preset must include them or the shipped game will start and immediately fail its version
-check — which is the correct failure, but only if the check exists.
+Pin the toolchain in the repository before C1:
 
----
+- `global.json` pins a .NET 10 SDK accepted by Godot 4.7.1.
+- `rust-toolchain.toml` pins the reviewed Rust toolchain.
+- The Godot version appears in a bootstrap script and CI, not only in prose.
+- NuGet restore uses a lock file.
 
-## 4. Coordinate systems
+Target order:
 
-Three, and confusing them is the most likely early bug.
+1. Windows x64 development and first playable export.
+2. Linux x64, including Steam Deck desktop mode.
+3. macOS x64 and arm64. A universal application must contain both matching native libraries and be
+   signed as one bundle.
 
-| Space | Unit | Where |
-|---|---|---|
-| **Simulation** | fixed-point `i32`; `POSITION_SCALE = 1024` per cell | everything from the core |
-| **Cell** | whole terrain cells | terrain mask, block spans |
-| **Screen** | Godot pixels (`float`) | rendering only |
-
-```csharp
-public static class Coord
-{
-    public const int PositionScale = 1024;
-    public const int BodyWidth     = 4 * PositionScale;   // one character body width
-    public const float PixelsPerCell = 16f;               // art-direction choice
-
-    public static Vector2 SimToScreen(int simX, int simY) => new(
-        simX / (float)PositionScale * PixelsPerCell,
-        simY / (float)PositionScale * PixelsPerCell);
-
-    // Screen -> sim is for AIMING PREVIEWS ONLY. The value sent to the core is a quantized
-    // angle and power, never a screen coordinate: the server must never receive a number
-    // whose meaning depends on the client's resolution.
-    public static int ScreenToSim(float px) =>
-        (int)MathF.Round(px / PixelsPerCell * PositionScale);
-}
-```
-
-**Y is positive downward** in both simulation and screen space, matching the terrain mask's
-row-major top-left origin. Do not flip it.
-
-`PixelsPerCell = 16` is a starting value. The horizontal test map is 50×20 cells → 800×320
-pixels, which is small; expect to render at 2–4× zoom or increase the constant once art
-exists.
+Cross-platform support is not claimed until an exported build, launched outside the source tree on
+that platform, completes the smoke scenario in §20.5.
 
 ---
 
-## 5. Project layout
+## 3. Truthful current state
 
+The committed baseline from which this v2 work began was `fa7f0af`. The first C1 prerequisite slice
+has now landed in the working tree, but a capability remains incomplete until its gate in §20 passes:
+
+- `db-sim-core` has real match orchestration, maps, movement, ability resolution, terrain blocks,
+  passive interruption, status ticking, victory, and frozen versioned golden vectors in the
+  current working tree.
+- `MatchHost` currently resolves most of a turn synchronously before `submit_ability` returns.
+  Transient phases are therefore not observable client animation states.
+- A validated, transport-free `MatchConfig`/`create_match` path now constructs a real host from the
+  horizontal-test map and character definitions.
+- Every projectile now retains its own trace and impact. Host submissions now report the post-host
+  turn number and state hash, including settling, passive interruption, and turn rotation. Reported
+  gauge gain is the capped action delta rather than the resulting total.
+- A read-only, engine-neutral core snapshot projection covers every authoritative state field a
+  client must render, including deterministic turn order, elimination, terrain generation, sorted
+  entities, and the exact host hash.
+- The working tree now contains a transport-free `MatchSessionHost`: one normalized typed
+  `MatchCommand` union, canonical semantic digests, generation ownership, cloned-host application,
+  retained accepted/rejected first results, exact duplicate replay, changed-command-ID security
+  rejection, exact 16,384-entry/64 MiB canonical-byte resource bounds, and atomic
+  `MatchTransition` plus post-snapshot/hash.
+  Accepted operations increment generation exactly once only when authoritative state actually
+  changes; a legal zero/blocked move remains accepted without inventing a generation.
+- Its first event builder preserves independent projectile traces/impacts; derives deterministic
+  net movement, health, gauge, status, object, passive, elimination, turn, and outcome events; and
+  produces exact changed-cell row-runs for terrain. All current net movement is conservatively
+  labelled authoritative resolution: without the post-walk/pre-settle path, even an unchanged final
+  height cannot prove that no climb-and-settle occurred. `requestedMove` remains reserved for a
+  richer movement outcome. The builder does not fabricate missing combat provenance. Exact
+  per-strike damage timing, public RNG outcomes, non-projectile strike impact points, ephemeral
+  status lifecycles, and some removal causes still require richer authoritative outcomes before the
+  complete §20.1 vocabulary gate can pass.
+- Movement settling now ends an eliminated active player's turn and drives victory/rotation. The
+  former path could leave a dead active player stranded in `Movement`. Terminal victory now also
+  commits the final pending turn reason instead of exposing the prior turn's reason; this
+  replay-visible correction is `SIMULATION_VERSION = 5` and regenerated every golden vector under
+  the documented procedure.
+- The session/ABI composite envelope, authority-timeout transition, read-only preview, and
+  production serialization remain incomplete. The first shared raw JSON fixture now passes direct
+  Rust with frozen hashes, nonzero movement, an independent projectile/sample minimum, generation
+  changes, turn handoff, and live-host hash equality. Full byte-for-byte response fixtures belong
+  to C2's production serializer rather than a test-only imitation.
+- `db-sim-ffi` began as a scaffold exposing versions, placeholder create/destroy, and a placeholder
+  state hash; C2 is not complete until it owns a real `MatchHost` and passes every §20.2 gate.
+- The native release profile now uses `panic = "unwind"`, and its FFI guard has a controlled
+  release-profile containment test. Per-handle poisoning and the real gameplay exports remain C2.
+- No `client/` project exists.
+- No match server exists.
+
+Consequently, the next work is to complete the Rust transition contract and then expose it through
+the FFI, not to begin menu or HUD construction.
+
+---
+
+## 4. Architecture and dependency rules
+
+```text
+Godot scenes and views
+        │
+        ▼
+DungeonBarrage.Client          presentation coordination, view models, input contexts
+        │
+        ▼
+DungeonBarrage.Client.Contracts  IMatchSession, commands, snapshots, transitions
+        ▲                              ▲
+        │                              │
+LocalMatchSession                 RemoteMatchSession (future)
+        │                              │
+db-sim-ffi C ABI                  WSS protocol
+        │                              │
+db-sim-core                    Rust match server ── db-sim-core
 ```
+
+Binding rules:
+
+- `Client.Contracts` references neither Godot nor native interop.
+- `Client.Interop` references `Client.Contracts`, owns all native calls, and references no Godot
+  types.
+- Godot scenes call `IMatchSession`; they never call native exports.
+- Only `DbSimNative.cs` may declare `LibraryImport`/`DllImport`.
+- A native handle is owned by exactly one `LocalMatchSession` and used through one serialized
+  executor. `db-sim-ffi` is not assumed thread-safe.
+- Background completion is marshalled onto Godot's main thread before touching a `GodotObject`.
+- The future Rust server links the core directly. Network DTOs may mirror domain concepts, but the C
+  ABI is not the network protocol.
+
+### 4.1 Project layout
+
+```text
 client/
-  DungeonBarrage.csproj
-  project.godot
-  Interop/
-    DbSimNative.cs          the only file with DllImport
-    MatchHandle.cs          SafeHandle wrapper
-    Snapshots.cs            [StructLayout] mirrors of the FFI structs
-    LocalMatch.cs           idiomatic C# facade over the handle
-  Scenes/
-    Main.tscn               root, scene switching
-    MainMenu.tscn
-    CharacterSelect.tscn
-    Match.tscn              the match view
-    Results.tscn
-  Match/
-    MatchController.cs      owns LocalMatch, drives the view
-    TerrainRenderer.cs
-    BlockRenderer.cs
-    CharacterView.cs
-    ProjectilePlayer.cs
-    EffectPlayer.cs
-    CameraRig.cs
-  UI/
-    Hud.tscn / Hud.cs
-    AimControl.cs
-    AbilityBar.cs
-    PassivePrompt.cs
-    NetworkIndicator.cs
-  Assets/
-    Characters/<id>/        sprites, animation, sockets
-    Terrain/
-    Effects/
-    Audio/
-    Fonts/
-  Settings/
-    SettingsStore.cs
-    InputMap.cs
+  DungeonBarrage.sln
+  Directory.Build.props
+  src/
+    DungeonBarrage.Client.Contracts/
+      IMatchSession.cs
+      Commands.cs
+      MatchConfig.cs
+      MatchSnapshot.cs
+      MatchTransition.cs
+      PresentationEvents.cs
+    DungeonBarrage.Client.Interop/
+      DbSimNative.cs
+      DbSimBuffer.cs
+      MatchSafeHandle.cs
+      LocalMatchSession.cs
+      NativeLibraryResolver.cs
+    DungeonBarrage.Client/
+      DungeonBarrage.Client.csproj
+      project.godot
+      export_presets.cfg
+      App/
+      Match/
+      UI/
+      Scenes/
+      Assets/
+      Settings/
+  tests/
+    DungeonBarrage.Client.Contracts.Tests/
+    DungeonBarrage.Client.Interop.Tests/
+  native/
+    win-x64/
+    linux-x64/
+    osx-x64/
+    osx-arm64/
+tests/
+  fixtures/
+    matches/                 machine-readable fixtures shared by Rust and C#
+
+global.json                  pinned .NET SDK for the whole repository
+rust-toolchain.toml          pinned Rust toolchain for the whole repository
 ```
 
-**`Interop/` never references Godot types, and `Match/` never calls `DbSimNative` directly.**
-That separation is what lets the interop layer be unit-tested headlessly and what stops
-rendering concerns leaking into the boundary.
+Do not place test projects under the Godot resource root if that makes Godot import their files.
 
 ---
 
-## 6. The match loop from the client's side
+## 5. Two state machines, not one
 
-### 6.1 States
+### 5.1 Authoritative match state
 
-```
-MainMenu → CharacterSelect → Match → Results
-                               ↑        │
-                               └────────┘  rematch
-```
+Rust `MatchPhase` remains authoritative for command acceptance and replay/hash semantics. It may pass
+through `CommandLocked`, `Resolution`, `Settling`, `StatusResolution`, and `VictoryCheck` entirely
+inside one host call. The client must not poll those transient values to drive animation.
 
-### 6.2 Within a match
+The snapshot normally exposes a stable input boundary:
 
-The core's `MatchPhase` is authoritative. The client reads it and renders accordingly; it
-never sets it.
+- `Movement` or `AimingAndSelection`: the active player may submit allowed intent.
+- `PassiveSelection`: only the owed passive choice is accepted.
+- `MatchComplete`: terminal.
 
-| `MatchPhase` | Client behaviour |
-|---|---|
-| `MatchIntro` | Intro animation, camera sweep, roster reveal |
-| `TurnStart` | Highlight the active character, refresh HUD, start the turn clock |
-| `Movement` | **Accept input.** Movement and aiming both legal here |
-| `AimingAndSelection` | Accept input. Same as above; the core distinguishes, the player need not |
-| `PassiveSelection` | **Show the passive prompt. Block all other input.** |
-| `CommandLocked` | Input off. Brief muzzle anticipation |
-| `Resolution` | Play the projectile timeline from the outcome |
-| `Settling` | Debris, dust, falling characters |
-| `StatusResolution` | Status icons tick; damage-over-time numbers |
-| `VictoryCheck` | Nothing visible — usually a single frame |
-| `MatchComplete` | Freeze, then transition to Results |
+Other phases may appear in diagnostics or a reconnect snapshot, but no client correctness depends on
+observing them for a particular number of frames.
 
-**Never advance the phase locally to make the UI feel responsive.** Poll after each submitted
-intent. Local aim and charge animation are fine and encouraged — they are not state.
+### 5.2 Client playback state
 
-### 6.3 Submitting an ability
+```text
+LoadingSnapshot
+      ↓
+ReadyForInput ──submit──> Submitting
+      ↑                     │
+      │                     ├── rejected ──> ReadyForInput
+      │                     │
+      │                     └── accepted ──> PlayingTransition
+      │                                        │
+      │                      ┌─────────────────┼──────────────────┐
+      │                      ▼                 ▼                  ▼
+      └──────────────── ReadyForInput   PassivePrompt      MatchComplete
 
-```csharp
-var command = new AbilityCommand {
-    CommandId   = Guid.NewGuid().ToString(),   // idempotency key
-    PlayerId    = _localPlayerId,
-    ExpectedTurnNumber = _match.TurnNumber,    // read fresh; never cache across a turn
-    Slot        = selectedSlot,
-    AngleMillidegrees = (int)MathF.Round(aimAngleDegrees * 1000f),
-    PowerBasisPoints  = (int)MathF.Round(chargeFraction * 10000f),
-};
-
-var outcome = _match.SubmitAbility(command);
-if (outcome.Rejected) { ShowRejection(outcome.Reason); return; }
-await _projectilePlayer.Play(outcome.Timeline);
-RefreshFromCore();
+Any state ── unrecoverable boundary/desync fault ──> MatchFaulted
 ```
 
-`ExpectedTurnNumber` must be read fresh. `turn_number` previously advanced twice per action —
-a real bug, now fixed — and a cached value would have been silently rejected as stale. Read
-it, do not remember it.
+`PlayingTransition` is local presentation state. It never advances Rust phases. The session may
+already hold the authoritative post-transition snapshot while views animate from the prior visual
+state. During playback all gameplay submission is blocked.
 
-**Angle and power are quantized at the boundary.** Millidegrees and basis points, integers.
-Never send a float, never send a screen coordinate.
+When playback ends, every view snaps to the post-transition snapshot before input opens. Cosmetic
+interpolation never accumulates into the next transition.
+
+### 5.3 Clock ownership
+
+- Local: `LocalMatchSession`, not a Godot scene, owns a monotonic planning clock and calls the core's
+  timeout operation. An accepted transition supplies `inputLockTicks`; the session opens the next
+  planning window when that deterministic minimum has elapsed, whether cosmetic playback finished
+  normally or had to be accelerated. No animation-complete callback starts the authority clock.
+- Online: the Rust server supplies `inputOpensAt` and `deadlineAt` in server time. The client displays
+  a clock using a measured offset. It never submits a timeout command.
+- Replays: timeout is a recorded authoritative event, not reconstructed from wall-clock time.
 
 ---
 
-## 7. Rendering
+## 6. Version model
 
-### 7.1 Terrain
+Four versions have distinct purposes:
 
-The core owns a byte-per-cell mask (`0` Empty, `1` Soil, `2` Wood, `3` ReinforcedStone).
+| Version | Governs | Compatibility rule |
+|---|---|---|
+| `ABI_VERSION` | Native export names, call signatures, buffer ownership | Exact match before first native handle is created |
+| `SIMULATION_VERSION` | Deterministic gameplay/replay behavior | Pinned for a match; exact for local fixture replay |
+| `CONTENT_VERSION` | Character, ability, passive, mode, and map definitions | Snapshot/asset manifest must agree |
+| `PROTOCOL_VERSION` | Future client/server messages | Server advertises a supported range before join |
 
-**Do not draw a sprite per cell.** A 50×20 map is 1,000 cells; a real map will be far larger.
-Build one `ImageTexture` from the mask and update only dirty regions.
+This is a **coarse ABI**: a small set of functions carries versioned envelopes. Adding a field to an
+envelope does not add an export. Increment `ABI_VERSION` only when the native calling convention,
+function set, ownership, or envelope decoding compatibility breaks. Every envelope also contains a
+`schemaVersion` so decoders fail clearly rather than guessing.
 
-```csharp
-// Full rebuild on match start; per-action partial updates thereafter.
-private void RebuildTerrain(ReadOnlySpan<byte> cells, uint w, uint h)
+Startup behavior:
+
+1. Resolve the library from the application-owned native directory.
+2. Call version functions only.
+3. Compare `ABI_VERSION` exactly and verify supported simulation/content versions.
+4. On mismatch, show a fatal repair/update screen. Do not throw an unhandled exception or attempt a
+   match.
+
+Online play does not require a local core match. The server protocol handshake, not the bundled
+library's simulation version, determines online compatibility.
+
+---
+
+## 7. Domain contracts
+
+The JSON definitions below are the normative schema for the initial gameplay ABI, not illustrative
+pseudocode. C2 implements matching Rust and C# DTOs plus byte-for-byte fixtures. Wire casing is
+`camelCase`; enums use the exact string values shown; duplicate object keys, unknown fields, unknown
+enum values, non-integer numbers, and trailing data are rejected. Inputs are UTF-8 bytes with an
+explicit length, not NUL-terminated strings.
+
+### 7.1 `MatchConfig`
+
+`db_sim_match_create` receives this exact `MatchCreateRequest` shape:
+
+```json
 {
-    var image = Image.CreateEmpty((int)w, (int)h, false, Image.Format.Rgba8);
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++)
-            image.SetPixel(x, y, MaterialColor(cells[y * (int)w + x]));
-    _texture.Update(image);
+  "schemaVersion": 1,
+  "matchId": "local-opaque-id",
+  "simulationVersion": 5,
+  "contentVersion": 1,
+  "match": {
+    "seed": 12345,
+    "mapId": "horizontal-test-array",
+    "mode": "turnBased",
+    "players": [
+      {
+        "playerId": "local-player-1",
+        "team": 0,
+        "characterId": "huck",
+        "appearance": {
+          "skinId": "default",
+          "abilitySkinIds": ["default", "default", "default"],
+          "victoryPoseId": "default"
+        }
+      },
+      {
+        "playerId": "local-bot-1",
+        "team": 1,
+        "characterId": "zeke",
+        "appearance": {
+          "skinId": "default",
+          "abilitySkinIds": ["default", "default", "default"],
+          "victoryPoseId": "default"
+        }
+      }
+    ]
+  }
 }
 ```
 
-After an action, the outcome carries `terrainOps` with shapes and radii. Recompute only the
-bounding box of each op — `PLATFORM_STRATEGY.md` §15 budgets a normal crater under 4 ms, and
-a full rebuild will not meet that on a large map.
+Requirements:
 
-Use **nearest-neighbour filtering.** Linear filtering on a cell mask produces soft edges that
-lie about where collision actually is, and players will aim at the lie.
+- The outer request is FFI/session metadata. It validates the exact simulation/content versions and
+  retains `matchId` for diagnostics and envelopes; neither `matchId` nor snapshot generation is part
+  of the authoritative state hash.
+- The nested object maps one-to-one to the transport-free Rust `match_setup::MatchConfig`. Rust
+  validates IDs, a two-to-four-player count, uniqueness, at least two teams, roster membership,
+  spawn availability, and mode limits before allocating a live match. C2 also bounds every
+  appearance identifier; C4 validates local appearance references against the version-matched
+  presentation manifest before creation. Online ownership/entitlement validation remains server
+  authority. Cosmetic appearance never enters the simulation hash.
+- Player array order is lobby order and deterministically assigns map spawn points before players are
+  sorted by ID. There is no client-supplied `spawnIndex` in the initial contract.
+- Human/bot ownership is `LocalMatchSession` configuration and never crosses this gameplay creation
+  envelope. Bot decisions are generated by a future Rust bot coordinator and submitted as ordinary
+  normalized commands.
+- A passive is not chosen here. It is selected when the authoritative match raises the first-gauge
+  interrupt.
+- The initial implementation supports one real fixture: a two-player duel on
+  `horizontal-test-array`. General map loading follows only after that fixture passes end to end.
 
-### 7.2 Blocks
+### 7.2 `MatchCommand`
 
-Blocks are rendered from the same mask — their cells *are* mask cells — but they are
-**addressable entities** and want their own presentation:
+Every mutating command has:
 
-- A health bar or tint per block, since health is what the player is actually attacking.
-- Damage numbers on hit.
-- **Erosion reads as the block shrinking, not as a hole appearing.** Health maps to surviving
-  columns (ADR 0005), so a damaged platform gets narrower (or thinner, on the `Rows` axis).
-  Animate the transition; a snap looks like a rendering glitch.
+- `schemaVersion`.
+- A deterministic, match-unique `commandId`.
+- `playerId`.
+- `expectedTurnNumber`.
+- `expectedSnapshotGeneration`.
+- One explicit command kind and its bounded payload.
 
-Read block health via `db_sim_block_snapshot`. **Do not infer it from the mask** — that is
-backwards, and the whole point of the block model is that health is the authority.
+Initial command kinds:
 
-### 7.3 Characters
+| Kind | Payload | Notes |
+|---|---|---|
+| `move` | signed fixed-point `dx` | Immediate authoritative movement; capped by allowance |
+| `ability` | slot, angle millidegrees, power basis points, optional target IDs | No float or screen coordinate crosses the boundary |
+| `passiveChoice` | passive ID | Accepted only during `PassiveSelection` |
+| `pass` | no gameplay payload | Ends the current turn explicitly |
 
-One `Node2D` per player. Layered sprites for the paper-doll system (`PRODUCT_SPEC.md` §5):
+The exact discriminated shapes are:
 
+```text
+move:
+  { schemaVersion, commandId, playerId, expectedTurnNumber,
+    expectedSnapshotGeneration, kind: "move", dx }
+
+ability:
+  { schemaVersion, commandId, playerId, expectedTurnNumber,
+    expectedSnapshotGeneration, kind: "ability",
+    slot: "basic" | "basicAlt" | "special",
+    angleMillidegrees, powerBasisPoints,
+    targetPlayerId: string | null,
+    secondaryTargetPlayerId: string | null }
+
+passiveChoice:
+  { schemaVersion, commandId, playerId, expectedTurnNumber,
+    expectedSnapshotGeneration, kind: "passiveChoice", passiveId }
+
+pass:
+  { schemaVersion, commandId, playerId, expectedTurnNumber,
+    expectedSnapshotGeneration, kind: "pass" }
 ```
-back accessory → hair back → rear arm → body → outfit → face
-→ hair front → headwear → front arm → held weapon skin
-→ front accessory → combat effect
+
+All named fields are required, including nullable target IDs; no variant accepts fields from another
+variant. `jump` is reserved and rejected until the core tracks its action budget. `timeout` is an
+authority-only operation and a remote client can never send it.
+
+For idempotency, Rust first decodes into this closed typed union and then hashes its deterministic
+canonical encoding. JSON whitespace and object-key order therefore do not make semantically
+identical commands different; a changed typed field does.
+
+Idempotency behavior is exact:
+
+- The Rust session-host layer, immediately outside `MatchHost`, owns the command ledger. It records
+  canonical request bytes/digest plus the serialized result for every first well-formed receipt.
+- First receipt applies at most once. The command ledger is session metadata: recording a rejection
+  does not alter simulation state, snapshot generation, or the state hash.
+- Same `commandId` plus identical request returns the original transition without mutation.
+- Same `commandId` plus different request is rejected as a security event without mutation.
+- Rejected, accepted, and duplicate results remain in the ledger for the lifetime of a live match.
+  The initial limits are 16,384 entries and 64 MiB of canonical request/response bytes. The layer
+  checks both limits before committing a cloned host; crossing either returns a resource-limit fault
+  without mutation and closes the session to further commands. Server rate limits are additional.
+- The ledger is persisted with an online match and reproduced from recorded commands during replay;
+  it is not silently evicted. A rejected command never consumes a turn.
+
+Tests use fixed command IDs from fixtures. Runtime UUIDs are recorded in the command log and replayed
+unchanged.
+
+### 7.3 `MatchSnapshot`
+
+A snapshot is one atomic authoritative read, never a sequence of independently indexed FFI calls.
+It contains:
+
+- Envelope, ABI, simulation, content, and schema versions.
+- Match ID, snapshot generation, authoritative tick, turn number, stable phase, active player,
+  current/upcoming turn order, wind, movement remaining, and whether an attack is committed.
+- Planning-window timestamps when a clock is active.
+- Outcome, including winning team or draw.
+- State hash for the exact authoritative state represented.
+- Players sorted by ID: team, health/max health, fixed-point position, character ID, passive ID,
+  gauge, statuses, elimination state, and appearance.
+- Blocks sorted by ID: bounds, material, health/max health, and erosion axis.
+- Persistent objects sorted by sequence: kind, owner, position, health, and remaining lifetime.
+- Terrain width, height, and `terrainGeneration`.
+
+The engine-neutral Rust core projection owns the state-derived fields, turn order, terrain
+generation, and state hash. The Rust session-host/FFI adapter adds match ID, ABI/schema envelope,
+snapshot generation, map metadata, and local clock timestamps while holding the same per-handle
+lock. The serialized object is the composite of those layers; the C# client never joins two reads.
+
+The terrain cell bytes are read through the separate coarse terrain export in §8.3 when
+`terrainGeneration` changes. This avoids base64 expansion without returning one struct per cell.
+
+Snapshots reference character/ability/passive IDs. Localized names and descriptions come from the
+version-matched presentation manifest; authoritative numeric previews come from Rust.
+
+### 7.4 `MatchTransition`
+
+A transition is the atomic response to one command or one authority-generated action:
+
+```text
+MatchTransition
+  schemaVersion
+  commandId
+  disposition: accepted | rejected | duplicateReplay
+  rejectionReason?
+  preSnapshotGeneration
+  postSnapshotGeneration
+  presentationTickRate
+  inputLockTicks
+  events[]
+  postSnapshot
+  postStateHash
 ```
 
-Every wearable layer for a rig shares frame tags and pivots: `idle`, `walk`, `aim`, `charge`,
-`fire`, `melee`, `hit`, `fall`, `victory`, `defeat`. Every frame exposes a ground pivot plus
-`mainHand`, `offHand`, `muzzle`, and `effectOrigin` sockets.
+Binding invariants:
 
-**Cosmetics never affect gameplay.** All characters share one collision capsule regardless of
-skin. A skin may not change reach, hitbox, projectile origin, or animation timing, and may not
-obscure which ability was used.
+- Snapshot generation is `u64` session-host metadata and is not part of canonical simulation state or
+  its hash. The initial snapshot is generation `0`. Each accepted operation that mutates the host —
+  move, ability plus all synchronous settling/interrupt work, passive choice, pass, timeout, or
+  authority action — increments it exactly once after bounded serialization succeeds. Rejection does
+  not increment it; duplicate replay returns the recorded original pre/post generations.
+- `postStateHash` is computed by `MatchHost` after every mutation performed by that host call.
+- `postStateHash == postSnapshot.stateHash == hash_state(host.state())` in the direct Rust path.
+- An ordinary rejection has no events, identical pre/post generation, and an unchanged hash.
+- A legal accepted operation that produces no authoritative change, such as a zero/fully blocked
+  move, also keeps the same generation and has no fabricated state-change events. It is still
+  retained for idempotent replay.
+- Events are sorted by `(presentationTick, sequence)`; `sequence` is unique within the transition.
+- Every projectile or moving entity has a stable transition-local ID. Samples from different
+  projectiles are never concatenated into one anonymous list.
+- `inputLockTicks` is the authority/session minimum before the next local planning window can open;
+  it is computed from the last required event tick plus a versioned post-action lock. It is not the
+  duration of optional camera, particle, or audio tails. A rejection uses zero. Online timestamps,
+  not this relative value, govern the server deadline.
+- The transition is sufficient to present the action; transient `MatchPhase` polling is not needed.
+- The post-snapshot is the reconciliation authority. If a view ends elsewhere, it snaps to it.
+- A `duplicateReplay` carries the recorded original post-snapshot, which may be older than the live
+  session after later commands. It acknowledges the original receipt; a client must not install it
+  over a newer generation.
 
-Position comes from the core every frame it changes. Interpolate for smoothness, but **snap to
-the authoritative position** whenever they differ by more than a threshold — a client that
-smooths away a correction is lying to the player about where they are.
+### 7.5 Presentation events
 
-### 7.4 Projectile playback
+Initial closed event kinds:
 
-The outcome carries sampled path points with tick indices. The core samples at a fixed stride
-(not every tick) to bound bandwidth.
+| Event | Required payload |
+|---|---|
+| `projectileTrace` | trace ID, owner, ability, sampled fixed-point positions with ticks, terminal impact |
+| `impact` | trace ID, position, cause, material/entity target where known |
+| `strikeResolved` | owner and ability; exact strike point once the authoritative outcome retains it |
+| `terrainChanged` | terrain generation and authoritative dirty rectangles |
+| `blockChanged` | block ID, previous/new health and surviving bounds |
+| `healthChanged` | player ID and itemized direct/splash/Backlash/hazard/wall/heal values |
+| `gaugeChanged` | player ID, previous/new gauge, actual delta |
+| `randomOutcome` | roll purpose, bounded public result, and affected action/entity IDs |
+| `statusChanged` | player ID, status kind, previous/new magnitude and duration |
+| `entityMoved` | player/object ID, cause, sampled or start/end positions |
+| `objectSpawned` | complete persistent-object snapshot |
+| `objectChanged` | object ID and authoritative new state |
+| `objectRemoved` | object ID and cause |
+| `playerEliminated` | player ID and identifiable cause |
+| `passiveChoiceRequired` | player ID and three allowed passive IDs |
+| `passiveChosen` | player ID and accepted passive ID |
+| `turnEnded` | player ID and attacked/passed/timedOut/eliminated reason |
+| `turnOpened` | active player, turn number, input-open and deadline timestamps |
+| `matchCompleted` | victory team or draw |
 
-```csharp
-// Interpolate between samples against a wall clock; the SAMPLES are authoritative, the
-// interpolation is not. Never extrapolate past the final sample — the impact point is
-// exactly where the core says it is.
-float t = elapsed / SecondsPerTick;
-var (a, b) = SurroundingSamples(timeline, t);
-sprite.Position = Coord.SimToScreen(Lerp(a, b, Fraction(t)));
+Damage, terrain, and health values are authoritative. Particle count, camera shake, easing, and the
+spacing of purely cosmetic anticipation frames are not. An event at an impact tick is not shown
+before the projectile reaches that tick.
+
+If a mechanic cannot be represented by this vocabulary, extend and version the event contract in
+Rust before implementing bespoke C# inference.
+
+The current C1 implementation is deliberately truthful where authoritative provenance is not yet
+retained: a net health change may carry no itemized breakdown, and object/elimination changes may be
+labelled `authoritativeResolution`; it does not synthesize a target, strike point, RNG roll, or
+per-strike timestamp from the final state. Those labels are implementation-state evidence, not a
+weakening of the required payloads above. C1 remains open until the outcome/resolver records enough
+information for every §20.1 scenario.
+
+### 7.6 Presentation manifest and previews
+
+The versioned presentation manifest supplies localized keys, icons, animation/effect IDs, ability
+names, concise rules, passive descriptions, and cosmetic compatibility. It is generated or validated
+against Rust content IDs during the build. It never defines damage, range, gauge cost, or legality.
+
+Exact Backlash cost and legal target sets come from a read-only Rust preview query. A preview:
+
+- Operates on a clone/read-only view.
+- Does not mutate tick, state, command ledger, or RNG.
+- Returns only information the selected mode's official UI is allowed to show.
+- Is available locally for training. The initial remote client does not run the core for prediction;
+  a future server endpoint/event supplies any remote guide.
+
+ABI schema version 1 has one closed preview request:
+
+```text
+AbilityPreviewRequest
+  schemaVersion: 1
+  expectedSnapshotGeneration
+  playerId
+  kind: "ability"
+  slot: "basic" | "basicAlt" | "special"
+  angleMillidegrees
+  powerBasisPoints
+  targetPlayerId: string | null
+  secondaryTargetPlayerId: string | null
+
+AbilityPreviewResponse
+  schemaVersion: 1
+  snapshotGeneration
+  legal
+  rejectionReason: string | null
+  gaugeCost
+  legalTargetPlayerIds[]
+  projectileTraces[]
 ```
 
-Play the impact, terrain change, and damage numbers **at the impact sample**, never earlier.
-Showing a hit before the core confirms it is the one visual lie that directly undermines trust
-in an authoritative game.
+The response uses the same trace/sample DTO as a transition but contains no damage roll, hidden
+random result, terrain mutation, or promised final impact against moving targets. IDs are sorted;
+stale generation is a normal `legal: false` response. Future preview kinds require a schema change.
 
-### 7.5 Effects
-
-Data-driven, not bespoke per-ability scene code. An effect definition names textures, counts,
-lifetimes, speeds, and camera shake.
-
-Cap active particles (~500–2,000, device-tier dependent) and degrade automatically. Reduce
-particle count, debris lifetime, and post-processing **before** touching anything that affects
-readability — and never reduce simulation fidelity, which the client does not control anyway.
+A modified client can calculate its own trajectory from known state. Restricting the official ranked
+guide is a UX/rules promise, not an anti-cheat guarantee. Server authority prevents forged outcomes,
+not external aim assistance.
 
 ---
 
-## 8. Input
+## 8. Coarse native ABI
 
-### 8.1 Default bindings
+### 8.1 Export surface
+
+The initial gameplay ABI is intentionally small. It is ABI version 1 and replaces the unshipped,
+non-versioned scaffold: `db_sim_create`, `db_sim_destroy`, `db_sim_state_hash`, and
+`db_sim_string_free` are retired rather than supported in parallel.
+
+```c
+uint32_t db_sim_abi_version(void);
+uint32_t db_sim_simulation_version(void);
+uint32_t db_sim_content_version(void);
+
+int32_t db_sim_match_create(
+    const uint8_t* config_json,
+    size_t config_len,
+    SimHandle** handle_out,
+    DbOwnedBuffer* response_out);
+
+int32_t db_sim_match_apply(
+    SimHandle* handle,
+    const uint8_t* command_json,
+    size_t command_len,
+    DbOwnedBuffer* transition_out);
+
+int32_t db_sim_match_snapshot(
+    const SimHandle* handle,
+    DbOwnedBuffer* snapshot_out);
+
+int32_t db_sim_match_terrain(
+    const SimHandle* handle,
+    uint64_t known_generation,
+    uint32_t* width_out,
+    uint32_t* height_out,
+    uint64_t* generation_out,
+    DbOwnedBuffer* cells_out);
+
+int32_t db_sim_match_preview(
+    const SimHandle* handle,
+    const uint8_t* request_json,
+    size_t request_len,
+    DbOwnedBuffer* preview_out);
+
+void db_sim_match_destroy(SimHandle* handle);
+void db_sim_buffer_free(DbOwnedBuffer* buffer);
+```
+
+`DbOwnedBuffer` is the only returned allocation:
+
+```c
+typedef struct {
+    uint8_t* ptr;
+    size_t len;
+} DbOwnedBuffer;
+```
+
+Rust allocates it and Rust frees it. C# copies/parses it inside a `try/finally` and calls
+`db_sim_buffer_free` exactly once. A zero-length buffer has `ptr == NULL`; free tolerates that form.
+Every non-empty buffer is allocated as an exact Rust `Box<[u8]>`. Free reconstructs that boxed slice
+from the original pointer and length, drops it, and then writes `{ NULL, 0 }` back to the caller's
+struct. A `Vec` allocation with hidden spare capacity does not cross this two-field ABI.
+
+`db_sim_match_create` returns a real `MatchHost`, not a seed placeholder. On success its response is
+the initial snapshot. A domain-level invalid config is an `OK` ABI call containing
+`created: false` plus a categorized diagnostic and a null handle; malformed bytes or an ABI fault use
+the negative statuses below.
+
+### 8.2 Status codes
+
+ABI status and gameplay disposition are separate:
+
+| Code | Meaning |
+|---:|---|
+| `0` | ABI call completed; inspect the response envelope |
+| `-1` | required null pointer |
+| `-2` | invalid UTF-8 or malformed envelope |
+| `-3` | unsupported envelope schema/version |
+| `-4` | caught internal panic; abandon the match |
+| `-5` | response exceeded the documented cap |
+
+An out-of-range aim, stale turn, or invalid target is a successful ABI call containing a rejected
+`MatchTransition`; it is not a negative ABI status.
+
+### 8.3 Terrain reads
+
+`db_sim_match_terrain` returns raw row-major material bytes only when the generation differs from
+`known_generation`. When unchanged it returns `OK`, the current dimensions/generation, and an empty
+buffer. The byte count must equal `width * height` under checked arithmetic.
+
+The transition supplies dirty rectangles for incremental rendering. A reconnect/full snapshot may
+discard them and rebuild all chunks.
+
+### 8.4 Safety, atomicity, and limits
+
+- Every fallible export catches unwinding panics. The native FFI release profile must use
+  `panic = "unwind"`; an aborting shipped profile does not satisfy this promise.
+- Every exported function validates nulls and lengths before dereference.
+- Arbitrary non-null pointers remain outside the C contract. C# prevents them through `SafeHandle`;
+  the Rust server never accepts handles from the network.
+- No call mutates a match unless its complete response can be produced within the response cap.
+  `apply` resolves against a working clone, serializes the bounded transition, and commits that
+  working state only after serialization succeeds.
+- Maximum input envelope: 256 KiB. Maximum transition/snapshot: 8 MiB. Maximum terrain bytes and map
+  dimensions are validated by Rust content rules before match creation.
+- JSON nesting depth is at most 12. `matchId`, `commandId`, and `playerId` are 1–64 ASCII bytes from
+  `[A-Za-z0-9._:-]`; display names are separate localized/user-content fields. Definition IDs are
+  1–64 lowercase ASCII bytes from `[a-z0-9-]`. Appearance IDs are 1–128 ASCII bytes from
+  `[A-Za-z0-9._-]`. Parsers enforce schema collection counts and known fields before allocation;
+  unknown command fields are rejected.
+- Native calls for one handle are serialized. Destroy waits for any in-flight call through
+  `SafeHandle` marshalling and the local executor.
+- `SimHandle` contains a poison flag. The panic guard sets it before returning `INTERNAL_PANIC`;
+  every later operation on that handle returns `INTERNAL_PANIC` without entering `MatchHost`, and
+  only destroy remains permitted.
+- `db_sim_match_destroy(NULL)` and freeing an empty buffer are no-ops. Double destroy remains a
+  caller bug prevented by `SafeHandle`; a freed `DbOwnedBuffer` is zeroed before wrapper disposal can
+  repeat.
+- Arbitrary non-null and already-destroyed pointers are outside the C ABI contract and are never
+  dereferenced by correct C#. The native negative-path suite tests null and live handles; stale raw
+  pointer injection is not claimed safe unless a future registry/generation-handle ADR replaces
+  opaque pointers.
+
+### 8.5 C# binding rules
+
+- Prefer source-generated `LibraryImport` with UTF-8 byte spans/pointers; do not use implicit ANSI
+  string marshalling.
+- Native methods receive `MatchSafeHandle` directly so .NET holds a dangerous reference for the
+  duration of each call.
+- `LocalMatchSession` is `IAsyncDisposable`; disposal is idempotent.
+- Native response decoding validates schema and size before allocating unbounded collections.
+- C# zero-initializes every `DbOwnedBuffer`; `db_sim_buffer_free` clears its pointer and length after
+  freeing so wrapper-level repeated disposal is harmless.
+- No DTO contains `Godot.Vector2`, `Godot.Color`, `Node`, or another engine type.
+- Godot editor hot reload does not preserve a live native match. Sessions dispose on tree exit and
+  are recreated explicitly.
+
+### 8.6 Native library resolution and packaging
+
+Use `NativeLibrary.SetDllImportResolver` and application-owned absolute paths. Do not rely on the
+working directory or the OS's broad DLL search path.
+
+| RID | File | Development source |
+|---|---|---|
+| `win-x64` | `db_sim_ffi.dll` | `client/native/win-x64/` |
+| `linux-x64` | `libdb_sim_ffi.so` | `client/native/linux-x64/` |
+| `osx-x64` | `libdb_sim_ffi.dylib` | `client/native/osx-x64/` |
+| `osx-arm64` | `libdb_sim_ffi.dylib` | `client/native/osx-arm64/` |
+
+The export process copies the correct artifact beside the executable or into the platform's required
+bundle location. macOS libraries participate in code signing. CI launches each export from a clean
+temporary directory so an accidental source-tree search cannot make a broken package pass.
+
+---
+
+## 9. Match-session interface
+
+The exact C# names may change, but the semantics may not:
+
+```csharp
+public interface IMatchSession : IAsyncDisposable
+{
+    MatchSessionCapabilities Capabilities { get; }
+    MatchSnapshot CurrentSnapshot { get; }
+
+    ValueTask<MatchTransition> SubmitAsync(
+        MatchCommand command,
+        CancellationToken cancellationToken);
+
+    ValueTask<MatchPreview> PreviewAsync(
+        PreviewRequest request,
+        CancellationToken cancellationToken);
+
+    IAsyncEnumerable<MatchSessionEvent> ReadEventsAsync(
+        CancellationToken cancellationToken);
+}
+```
+
+Rules:
+
+- All submissions are asynchronous to scenes, even when local execution completes synchronously.
+- At most one gameplay command is in flight from one local user.
+- Cancellation stops waiting/presentation; it does not claim that a command already delivered to an
+  authority was rolled back.
+- `CurrentSnapshot` changes only after an accepted transition or installed reconnect snapshot.
+- Session events carry remote-player/authority transitions, connection state, or replacement
+  snapshots. They do not expose native pointers.
+
+### 9.1 `LocalMatchSession`
+
+- Owns one `MatchSafeHandle`, local clock, and optional Rust bot coordinator.
+- Converts commands and native envelopes without introducing rules.
+- Locks submission during transition playback according to the deterministic input-open boundary.
+- Calls authority-only timeout itself when its planning deadline expires.
+
+### 9.2 `RemoteMatchSession` — future
+
+- Uses WSS and a versioned Rust-server protocol.
+- Does not create a local simulation handle for prediction.
+- Renders only server transitions and snapshots.
+- Handles duplicate/reordered messages by server sequence and snapshot generation.
+- On reconnect, installs one atomic snapshot, discards stale queued playback, and optionally plays a
+  bounded server-supplied recent transition. It never simulates missing turns.
+- If playback falls behind an authoritative input window, it shortens cosmetic holds or skips
+  nonessential particles; it never changes event order or hides the resulting state.
+
+Prediction may be proposed later only with measured same-region latency, a reconciliation design,
+and an ADR. `IMatchSession` is the seam; speculative state is not prebuilt now.
+
+---
+
+## 10. Coordinates, ticks, and quantization
+
+| Space | Unit | Authority |
+|---|---|---|
+| Simulation | fixed-point integer | Rust |
+| Terrain | whole cells, row-major top-left origin | Rust |
+| Presentation | Godot floating-point pixels | C# view only |
+
+The snapshot/bootstrap contract exposes `positionScale` and `fixedTickRate`; C# does not duplicate
+them as unexplained constants. Current values are `1024` fixed units per cell and `60` simulation
+ticks per second.
+
+Y is positive downward in simulation and screen space. Angles are millidegrees measured
+counter-clockwise from world `+X`, exactly as the Rust contract defines. Power is basis points
+`0..=10000`.
+
+```csharp
+public static Vector2 SimToScreen(
+    int x,
+    int y,
+    int positionScale,
+    float pixelsPerCell) => new(
+        x / (float)positionScale * pixelsPerCell,
+        y / (float)positionScale * pixelsPerCell);
+```
+
+Rules:
+
+- Screen coordinates never cross the match boundary.
+- C# may use floats for cursor movement and animation, then quantizes angle/power once with an
+  explicitly tested rounding mode before constructing a command.
+- Rust still range-checks; client clamping is usability, not security.
+- Projectile playback interpolates only between authoritative samples. It never extrapolates beyond
+  the terminal sample.
+- Character/object interpolation ends exactly at the authoritative position. A new transition or
+  snapshot cancels stale tweens.
+- `pixelsPerCell` is art-direction configuration, not gameplay state.
+
+---
+
+## 11. Application flow and scene ownership
+
+Initial flow:
+
+```text
+Boot → MainMenu → LocalSetup → CharacterSelect → Match → Results
+                                                ↑         │
+                                                └─rematch─┘
+```
+
+`Boot` verifies tool/runtime prerequisites, native library versions, presentation manifest, settings,
+and required assets before enabling local play. A failure transitions to a recoverable/fatal problem
+screen with a copyable diagnostic ID.
+
+Suggested scene responsibilities:
+
+```text
+Main.tscn                    owns application navigation only
+MainMenu.tscn                chooses local play/settings/quit
+LocalSetup.tscn              map, mode, human/bot slots
+CharacterSelect.tscn         character and cosmetic selection
+Match.tscn                   composes controller, world, camera, HUD
+Results.tscn                 authoritative result and rematch
+
+Match/
+  MatchController.cs         IMatchSession + playback coordination
+  PlaybackCoordinator.cs     ordered PresentationEvent playback
+  TerrainRenderer.cs         material mask chunks
+  BlockRenderer.cs           block identity/health presentation
+  CharacterView.cs           paper-doll layers and authoritative motion
+  PersistentObjectView.cs
+  ProjectilePlayer.cs
+  EffectPlayer.cs
+  CameraRig.cs
+```
+
+Scenes receive dependencies from the application composition root. They do not find native/session
+singletons by string path.
+
+---
+
+## 12. Input contract
+
+### 12.1 Contexts
+
+Semantic actions are enabled by context so one physical control never triggers two match commands:
+
+- `MenuNavigation`
+- `MatchFreeCamera`
+- `MatchMovementAim`
+- `MatchTargetSelection`
+- `PassiveSelection`
+- `PlaybackLocked`
+- `Results`
+
+Only `MatchMovementAim` and `MatchTargetSelection` can build gameplay commands.
+
+### 12.2 Default bindings
 
 | Action | Keyboard | Mouse | Gamepad |
 |---|---|---|---|
-| Move left / right | A / D, ← / → | — | Left stick X |
-| Aim up / down | W / S, ↑ / ↓ | Drag aim handle | Right stick Y |
-| Charge power | Hold Space | Hold LMB | Hold RT |
-| Fine aim | Shift + aim | Wheel | LT + stick |
-| Ability 1 / 2 / 3 | 1 / 2 / 3 | Ability bar | Y / X / B |
-| Camera pan | Middle drag / edge | Middle drag | Right stick + LB |
-| Reset camera | R, Home | HUD button | Right stick click |
-| Confirm | Enter | LMB | A |
-| Cancel | Escape | RMB | B |
-| Pass turn | P | HUD button | Back |
-| Scoreboard | Tab (hold) | — | Select (hold) |
+| Move left/right | A / D | optional held HUD buttons | Left stick X |
+| Jump | W | HUD button | X |
+| Aim | Up / Down | drag aim handle | Right stick |
+| Charge/commit | hold/release Space | hold/release primary | RT |
+| Fine aim | Shift | wheel | LT |
+| Basic / Basic Alt / Special | 1 / 2 / 3 | ability bar | D-pad left / down / right |
+| Pass | hold P | hold HUD button | hold D-pad up |
+| Pan camera | Ctrl + arrows | middle drag | LB + right stick |
+| Reset camera | R / Home | HUD button | right-stick click |
+| Focus active character | F | HUD button | RB |
+| Confirm | Enter | primary | A |
+| Cancel | Escape | secondary | B |
+| Scoreboard | hold Tab | HUD button | hold View |
 
-### 8.2 Requirements
+Bindings are fully remappable. The settings UI detects conflicts within a context and requires the
+player to resolve them; it may allow the same physical input in mutually exclusive contexts.
 
-- **Semantic action map**, not raw keys: `MoveLeft`, `AimUp`, `Charge`, `Commit`, `Cancel`,
-  `FocusCharacter`. Godot's `InputMap` supplies this; use it from day one so remapping and
-  controller support are not retrofits.
-- **Fully remappable**, even if the first UI exposes only presets.
-- **Never assume a mouse.** No hover-only affordance, no right-click-only action. Console is a
-  stated future target and controller-only navigation is a Steam release gate.
-- **Mouse sensitivity must not be a competitive advantage.** Fine aim is a modifier with a
-  fixed increment, not "move the mouse slower".
-- Suppress browser-style scroll/context behaviour only while the game surface has deliberate
-  focus — irrelevant on desktop today, but the rule survives for a future web build.
+### 12.3 Movement
 
----
+- Held movement emits at most one outstanding command and repeats at a capped 20 Hz.
+- The default request quantum is one quarter cell. Analog magnitude changes repeat intent only after
+  a deadzone; it does not grant a larger movement allowance.
+- The authoritative returned distance and position drive presentation.
+- Jump remains disabled until Rust tracks and enforces its action budget. The existence of a jump
+  helper alone is not a release-ready rule.
 
-## 9. HUD
+### 12.4 Aim, power, and targeting
 
-`PRODUCT_SPEC.md` §6 requires all of the following visible during a match. This is a
-checklist, not a suggestion:
+- Keyboard/controller aim uses fixed-rate quantized steps; fine aim uses the smaller documented step.
+- Pointer aim computes a direction around the authoritative muzzle presentation socket, then sends
+  only the quantized angle.
+- Charge is uncommitted local state. Release constructs one ability command after required target
+  selection. Cancel clears it without a native call.
+- Targeted abilities enter `MatchTargetSelection`, highlight only the authoritative legal-target
+  list, and require explicit confirmation. Stick/directional focus selects spatially and LB/RB cycle
+  the bounded legal-target list in that context. No nearest-target guess is committed silently.
+- UI displays the exact quantized angle/power that will be sent.
+- Tuning constants such as repeat rate, aim step, fine step, and charge duration live in one reviewed
+  presentation configuration and have input tests.
 
-- [ ] Active player and team
-- [ ] Turn timer
-- [ ] Current and upcoming turn order
-- [ ] Wind direction and magnitude — **with a numeric readout**, not just an arrow
-- [ ] Angle and power — numeric
-- [ ] Selected ability, its name, and a concise special rule
-- [ ] **Special gauge**, 0–100% (the core stores hundredths; divide by 100 for display)
-- [ ] Movement allowance remaining
-- [ ] Health, max health, and active statuses for every player
-- [ ] Predicted Backlash cost **before commitment** — never a surprise
-- [ ] Camera reset and focus-active-character controls
-- [ ] Connection state (online only)
-- [ ] Chat, mute, report (online only)
-
-### The passive prompt
-
-When `MatchPhase == PassiveSelection`, show three character-specific options and **block all
-other input.** This is a one-time per-match choice at the player's first power spike; it must
-not be dismissible or skippable. The core enforces this too — commands are refused in that
-phase — but the UI should not let a player try.
-
-### Result panel
-
-Damage is itemized by the core: direct, splash, backlash, hazard, wall impact, healing,
-critical flag, knockback vector, elimination flag. **Show the breakdown**, not just a final
-health number. `PRODUCT_SPEC.md` §4 requires the elimination cause be identifiable, and the
-itemization exists specifically so players can learn the systems rather than guess at them.
+No hover-only, right-click-only, or mouse-precision-only action is permitted.
 
 ---
 
-## 10. Camera
+## 13. Rendering contract
 
-- Follows the active character by default; frames the projectile during resolution.
-- Manual pan with a spring return to the action.
-- Zoom limits chosen so the whole map fits at minimum zoom — artillery is a game about reading
-  geometry, and a player who cannot see the target cannot plan.
-- **Reduced-motion setting removes camera shake entirely** without changing timing.
-- Never move the camera so fast that the projectile leaves frame; if the shot outruns the
-  camera, widen instead of chasing.
+### 13.1 Terrain
 
----
+The terrain mask is an authoritative material-index texture, not final art. Render it through a
+material/palette shader or use it to clip approved terrain art.
 
-## 11. Audio
+- Store the CPU mask in one row-major byte array.
+- Divide large maps into 128×128-cell render chunks initially; benchmark may change the chunk size.
+- A full snapshot rebuilds all chunks.
+- `terrainChanged` marks authoritative dirty cell rectangles; update only intersecting chunks.
+- Use nearest-neighbour sampling for the collision/readability edge. Decorative overlays may filter
+  independently but cannot hide the solid/empty boundary.
+- Validate every returned byte against known material values before upload.
+- Never infer terrain from crater VFX.
 
-| Category | Notes |
-|---|---|
-| Music | Menu, match, victory. Independent volume bus |
-| Ability SFX | Per-ability, per-skin variants permitted |
-| Impact | Varies by material — soil, wood, stone, character |
-| UI | Selection, confirm, reject, timer warning |
-| Voice | Per-character, optional; must be mutable separately |
+The old `ImageTexture.Update(fullImage)` example is not an incremental algorithm and is not the
+implementation target.
 
-**Every important audio cue needs a visual equivalent** (`PRODUCT_SPEC.md` §6). A player with
-sound off must lose no information — including the turn-timer warning and the
-gauge-ready cue.
+### 13.2 Destructible blocks
 
----
+- Render solidity from the mask and identity/health from block snapshots/events.
+- Never infer block health from occupied cells.
+- Animate erosion toward the authoritative final mask, including row-axis erosion.
+- A block health bar/tint and damage indication identify the addressable block.
+- Dirty rectangles come from Rust because health-directed erosion can change cells outside a simple
+  crater bounding box.
 
-## 12. Accessibility
+### 13.3 Characters
 
-Not a post-launch pass. Gate items from `PRODUCT_SPEC.md` §6:
+One view per player uses the shared paper-doll order:
 
-- **No information conveyed by colour alone.** Team identity needs shape or icon as well as
-  colour; projectile trails must differ in shape or pattern, not just hue.
-- Wind, angle, power, gauge, and health all have **text or numeric** forms.
-- Contrast checked on the HUD and all menus.
-- **Reduced motion** removes shake and limits flashes, without changing timing — a
-  reduced-motion player must not be at a competitive disadvantage.
-- Full keyboard focus navigation; controller focus navigation before any console work.
-- Scalable UI text.
-- Remappable controls via the action map.
-
----
-
-## 13. Settings
-
-Persisted with Godot's `user://` config. **Device settings and account progression are separate
-stores** (`PLATFORM_STRATEGY.md` §8) — graphics settings are per-machine, unlocks are per-account.
-
-Graphics: resolution, fullscreen/borderless, vsync, particle density, screen shake, reduced
-motion, UI scale.
-Audio: master, music, SFX, voice, UI.
-Gameplay: trajectory-guide level (see below), turn-timer warning threshold, camera follow
-strength, damage-number display.
-Controls: full remap, gamepad glyph style, stick deadzone.
-
-**Trajectory guide, by mode** (`PRODUCT_SPEC.md`): training shows the full predicted arc and
-impact marker; casual shows the first 20–35% of the path; ranked shows muzzle direction and
-charge only. The client must not offer a "full arc" option in ranked — that would be a
-client-side competitive advantage, which is exactly the thing the authority model exists to
-prevent.
-
----
-
-## 14. Local vs online
-
-**Build local-only first.** `MatchHost` in-process, no network. This is a complete, playable
-game against a bot and is the fastest path to knowing whether the firing loop is fun.
-
-Online (M4+) changes only *where the authority lives*:
-
-| Concern | Local | Online |
-|---|---|---|
-| Authority | in-process core | server's core |
-| Intent | direct call | WSS message |
-| Result | returned outcome | authoritative event |
-| Client's core | is the authority | prediction + playback only |
-
-`LocalMatch` and a future `RemoteMatch` implement one interface, so `MatchController` does not
-know which it is talking to. That seam pays for itself precisely once — but it pays completely.
-
-Online additions: reconnect with state snapshot, server clock offset, connection indicator,
-turn deadline from the server (**never the local clock**), and a spectator path.
-
----
-
-## 15. Performance budgets
-
-From `PLATFORM_STRATEGY.md` §15, minus the web-specific entries:
-
-| Target | Goal | Floor |
-|---|---:|---:|
-| Frame rate | 60 fps | stable 30 |
-| Frame time p95 | < 16.7 ms | < 33.3 ms |
-| Long tasks while aiming | none > 50 ms | rare, never repeated |
-| Terrain update, normal crater | < 4 ms | < 16.7 ms |
-| Warm start | < 2 s | < 4 s |
-| Process memory | < 350 MB | < 500 MB |
-
-Detect device tier by **measured frame time**, not by GPU name strings. Degrade particles,
-debris lifetime, and post-processing first; never degrade readability.
-
----
-
-## 16. Testing
-
-| Layer | How |
-|---|---|
-| Interop | Headless xUnit against the real native library. No Godot dependency — this is why `Interop/` may not reference Godot |
-| Determinism | Run a scripted match through C#, compare the state hash against `crates/db-sim-core/tests/golden_vectors.rs`. **A mismatch means the binding is wrong**, since the corpus is already frozen |
-| UI | Godot integration tests for scene transitions and input mapping |
-| Manual | The `horizontal_test_array` map is the standard scenario: 8 blocks, 8 spawns, 50×20 cells |
-
-The determinism test is the important one. It is the only thing that catches a marshalling bug
-that produces *plausible* values — and a plausible wrong value is the hardest kind to notice.
-
----
-
-## 17. Build and CI
-
-```bash
-cargo build -p db-sim-ffi --release      # produces the native library
-dotnet build client/DungeonBarrage.csproj
-godot --headless --export-release "Windows Desktop" build/DungeonBarrage.exe
+```text
+back accessory → hair back → rear arm → body → outfit → face
+→ hair front → headwear → front arm → held ability skin
+→ front accessory → combat effect
 ```
 
-CI additions (`.github/workflows/ci.yml` currently has no C# job — add one only when there is
-something to test; a job that tests nothing still reports green, which is worse than absent):
+Required animation tags are `idle`, `walk`, `aim`, `charge`, `fire`, `melee`, `hit`, `fall`,
+`victory`, and `defeat`. Frames expose a ground pivot plus `mainHand`, `offHand`, `muzzle`, and
+`effectOrigin` sockets where applicable.
 
-- `dotnet build` with warnings as errors
-- `dotnet test` for interop and determinism
-- `dotnet format --verify-no-changes`
-- Native library present in the export preset
-- **Version-match check**: the C# `ExpectedSimulationVersion` equals Rust's
-  `SIMULATION_VERSION`. This one is worth automating early — it has already moved four times.
+Cosmetics never change position, collision, reach, launch origin, timing, or visibility of the used
+ability. A missing/incompatible layer falls back to a validated default rather than shifting a
+socket.
 
----
+### 13.4 Projectiles and events
 
-## 18. Client milestones
+- Create one player per `projectileTrace` ID.
+- Interpolate by transition presentation tick between that trace's samples.
+- Do not extrapolate beyond its last sample or merge samples from different traces.
+- Play impact, terrain, damage, and elimination events at their ordered event tick.
+- If rendering falls behind, drop cosmetic particles before skipping authoritative event
+  presentation. The final snapshot is always installed.
 
-**C1 — Interop spike.** Load the library, call the version functions, start and destroy a
-match. Nothing rendered. *Gate:* version check passes; no leaks under repeated start/destroy.
+### 13.5 Persistent objects and effects
 
-**C2 — Static render.** Draw terrain, blocks, and characters from a real snapshot. No input.
-*Gate:* the `horizontal_test_array` map renders recognisably and matches the mask exactly.
+Persistent objects have their own views keyed by authoritative sequence. Spawn/change/remove only
+from events or reconciliation snapshots.
 
-**C3 — One playable turn.** Movement, aiming, firing, projectile playback, terrain update.
-*Gate:* a human can take a turn end to end without a debugger.
-
-**C4 — Complete local match.** Full HUD, turn cycle, passive prompt, victory, results, rematch.
-*Gate:* a first-time player completes a match and understands the result without explanation.
-This is `PROGRAM_PLAN.md`'s M3 gate.
-
-**C5 — Polish.** Effects, audio, accessibility, settings, controller.
-*Gate:* accessibility checklist passes; controller-only navigation completes a whole match.
-
-**C6 — Online.** `RemoteMatch`, reconnect, spectate.
+Effects are data-driven presentation definitions. Device-tier degradation reduces particle count,
+debris lifetime, post-processing, and shake in that order. It never removes target markers, status
+icons, terrain edges, damage breakdowns, or other tactical information.
 
 ---
 
-## 19. Open questions
+## 14. HUD and match feedback
 
-Genuinely undecided. Do not resolve them silently.
+During an input window the HUD exposes:
 
-1. **Art direction.** Pixel art or high-resolution illustrated? This drives `PixelsPerCell`,
-   filtering, atlas budgets, and animation authoring. The reference screenshot cited in
-   `PRODUCT_SPEC.md` §12 was supplied in an earlier session and is not currently in the repo.
-2. **Bot AI location.** Rust (deterministic, shared with the server, replayable) or C#
-   (easier to iterate)? **Recommendation: Rust** — a bot that behaves differently in a replay
-   than it did live is a debugging nightmare, and training mode uses the same host as a real
-   match by design.
-3. **Turn timer.** `PRODUCT_SPEC.md` §2 sets 25 seconds of planning, but the core has no timer
-   — `time_out_turn` exists and nothing calls it. Locally the client can own the clock;
-   online the **server must**, and the client only displays it.
-4. **Camera during opponent turns.** Follow their action, or let the player free-look and plan?
-   §"waiting-time UX" argues for permitting non-state-changing activity.
-5. **`PixelsPerCell`.** 16 is a placeholder. Depends entirely on (1).
+- Active player and team, with icon/shape as well as color.
+- Planning time remaining from the session authority.
+- Current and upcoming turn order.
+- Wind direction and numeric magnitude.
+- Quantized angle and power.
+- Selected Basic/Basic Alt/Special name, icon, availability, and concise rule.
+- Special gauge as numeric percent and progress graphic.
+- Movement allowance remaining.
+- Health/max health and statuses for every player.
+- Legal target and target-selection state when applicable.
+- Exact predicted Backlash cost before commitment.
+- Camera reset and focus-active-character controls.
+- Connection/reconnect state online.
+
+There is no ammunition or shield field unless a future accepted character/mode contract adds one.
+
+### 14.1 Passive prompt
+
+After playback reaches a post-snapshot whose stable phase is `PassiveSelection`, show the three
+allowed character-specific passives from the authoritative event/manifest. Disable every other
+gameplay action. It is not dismissible or skippable.
+
+Local play does not let the planning timer expire behind this modal. Before online implementation,
+the server specification must define a separate passive deadline and deterministic disconnect/
+timeout choice; the client does not invent one.
+
+### 14.2 Results and damage explanation
+
+Show authoritative direct, splash, Backlash, hazard, wall-impact, healing, critical, knockback, and
+elimination-cause information. Random rolls that materially affected the action are explained when
+the transition exposes them. Never reduce an action to an unexplained final health number.
+
+Results use the terminal snapshot and `matchCompleted` event. Rematch constructs a new config/seed
+and handle; it never rewinds or reuses a completed host.
 
 ---
 
-## 20. Things that will bite
+## 15. Camera and audio
 
-Collected from what has already gone wrong in this codebase. Every one of these is a real
-pattern here, not a hypothetical.
+Camera rules:
 
-- **Do not cache `turn_number`.** Read it fresh for every command. It desynchronised once
-  already.
-- **Do not infer block health from the mask.** Health is the authority; the mask is derived.
-- **Do not use Godot physics for anything the player can feel.** It is not deterministic.
-- **Do not smooth away an authoritative correction.** Snap when the divergence is real.
-- **Do not show a hit before the core confirms it.**
-- **Do not let `Interop/` reference Godot types.** It kills headless testing, which is where
-  the determinism test lives.
-- **Do not add a C# CI job before it tests something.** A green job that runs nothing is worse
-  than no job — this project has shipped correct, tested, unreachable code four times, and a
-  vacuous gate is the same failure wearing a different hat.
-- **Check what calls your code, not just what tests it.** That single question would have
-  caught all four.
+- Follow the active character by default during input.
+- Frame each authoritative projectile trace during playback; widen rather than chase so fast that
+  the projectile leaves frame.
+- Allow manual pan and an explicit reset/focus action.
+- Minimum zoom can frame the whole playable map.
+- Show the cause of an unrecoverable fall/elimination.
+- Reduced motion disables shake and aggressive zoom/pan without changing event timing.
+
+Audio buses: master, music, effects, voice, and UI. Important cues—including timer warning, gauge
+ready, impact material, rejection, and elimination—have synchronized visual equivalents. Voice is
+optional and separately mutable.
+
+---
+
+## 16. Accessibility
+
+These are release gates, not post-launch polish:
+
+- No tactical information conveyed by color alone.
+- Wind, angle, power, gauge, health, status duration, and timer have text/numeric forms.
+- HUD and menus pass the selected contrast standard under supported UI scales.
+- Reduced motion removes shake, limits flashes, and replaces rapid motion while preserving action
+  order and planning time.
+- Full keyboard focus navigation.
+- Controller-only navigation through boot, setup, character selection, match, passive prompt,
+  results, rematch, settings, and quit.
+- Remappable controls with conflict detection, deadzone configuration, and glyph switching.
+- Scalable UI text and safe-area support.
+- Important effects audio has captions or visual equivalents.
+- No hover-only information.
+
+Automated checks cover focus reachability, missing accessible labels, and minimum UI-scale layouts;
+manual testing covers readability and motion settings.
+
+---
+
+## 17. Settings, saves, and localization
+
+Device settings live under Godot `user://` and are separate from future account state. Use a
+versioned schema, bounded values, atomic temp-write/replace, and a last-known-good/default fallback
+for corruption. Never put tokens or server credentials in the settings file.
+
+Settings groups:
+
+- Graphics: display mode, resolution, vsync, frame cap, particle density, UI scale.
+- Accessibility: reduced motion, shake, flash reduction, high-clarity effects, captions.
+- Audio: master, music, effects, voice, UI.
+- Gameplay presentation: guide level where mode permits it, timer warning, camera follow, damage
+  numbers.
+- Controls: bindings, deadzones, sensitivity/rate, glyph family.
+
+Gameplay-affecting mode policy is not a device setting. A local preference cannot enable a full
+guide where an online mode disallows it.
+
+All player-facing strings use localization keys from the start. Logs and stable wire IDs are not
+localized. Layout tests include long-string expansion and supported UI scales.
+
+---
+
+## 18. Fault handling and diagnostics
+
+| Condition | Client behavior |
+|---|---|
+| Native library missing/wrong architecture | Fatal boot repair screen with expected path/RID |
+| ABI/simulation/content mismatch | Fatal local-play error; do not create a handle |
+| Ordinary command rejection | Inline contextual feedback; keep the input window if authority does |
+| Caught native panic | Dispose session, mark match faulted, never continue that state |
+| Invalid native envelope | Treat as boundary fault, include schema/version in diagnostic |
+| State-hash mismatch | Stop submission; local fails closed, online requests one authoritative resync then fails if repeated |
+| Asset missing | Validated fallback if cosmetic; fatal content mismatch if tactical readability is affected |
+| Settings corruption | Preserve bad file for diagnosis, load safe defaults, notify once |
+| Network loss | Lock submission, show reconnect state, install only an atomic server snapshot |
+
+Logs are structured and privacy-minimized. Include build, ABI/simulation/content/protocol versions,
+match-local opaque ID, turn, command ID, status/rejection category, and diagnostic ID. Exclude tokens,
+emails, provider IDs, chat content, and full IP addresses.
+
+The UI offers a copyable diagnostic summary without exposing native pointers or secrets.
+
+---
+
+## 19. Performance contract
+
+Measure release exports after a 30-second warm-up over at least 60 seconds. Report median and p95,
+the machine profile, resolution, map fixture, particle tier, build commit, and Godot/Rust/.NET
+versions. A number without that context is not a gate result.
+
+Standard stress fixture:
+
+- 512×256 terrain cells.
+- Eight player views.
+- 128 persistent-object views.
+- A transition with eight independently sampled projectile traces.
+- Dirty terrain updates spanning four chunks.
+- Up to 2,000 cosmetic particles at the high tier.
+
+| Area | Goal | Floor/failure threshold |
+|---|---:|---:|
+| Rendering | 60 fps | stable 30 fps |
+| Frame time p95 while aiming | <16.7 ms | <33.3 ms |
+| Repeated main-thread stalls | none >50 ms | any repeated stall fails |
+| Normal dirty terrain update | <4 ms | <16.7 ms |
+| Standard local shot resolution | <50 ms | profile before continuing |
+| Transition JSON decode | <4 ms normal | <16.7 ms |
+| Warm start to interactive menu | <2 s | <4 s |
+| Process working set after warm-up | <350 MB | <500 MB |
+
+Device tier is selected by measured frame-time history, not GPU-name strings. Degradation never
+changes authoritative simulation or tactical readability.
+
+---
+
+## 20. Testing and release gates
+
+### 20.1 Rust transition tests
+
+- `postStateHash` equals the actual host hash after every host-owned mutation.
+- Normal projectile, multi-strike, strike/melee, passive interruption, status tick, persistent
+  object lifecycle, terrain/block change, elimination, pass, timeout, and victory each produce a
+  representable ordered transition.
+- Every projectile retains its own samples and impact.
+- An actor eliminated during settling cannot enter `PassiveSelection`; pass and timeout cannot bypass
+  an owed passive choice.
+- Rejection and duplicate replay have exact non-mutation/idempotency assertions.
+- Dirty rectangles cover every changed terrain cell.
+
+### 20.2 FFI tests
+
+- Real config creates and snapshots a real `MatchHost`.
+- Nulls, malformed UTF-8/JSON, unknown fields/enums, invalid lengths, oversized counts, poisoned live
+  handles, and output caps fail without mutation or memory violation.
+- Every status path returns initialized outputs.
+- Buffer ownership is exercised on success and failure.
+- A deliberate panic inside the common FFI guard is caught by a release-profile test. No test-only
+  panic export is present in the shipped dynamic library.
+- Repeated create/apply/snapshot/terrain/destroy loops are leak-checked.
+
+### 20.3 Shared golden fixtures
+
+Move client-consumable inputs and expected hashes into machine-readable fixtures under
+`tests/fixtures/matches/`. Both direct Rust and C#→FFI tests consume the same bytes. Fixtures include
+fixed command IDs and meaningful outcome assertions so a stable no-op cannot pass.
+
+Parsing Rust test source from C# is prohibited.
+
+### 20.4 Headless .NET tests
+
+- Contract serialization and enum exhaustiveness.
+- `SafeHandle` disposal under normal, exception, cancellation, and forced-GC paths.
+- Native resolver selects only the expected RID directory.
+- A scripted match through `LocalMatchSession` matches the direct Rust fixture hash.
+- Interop assemblies load and test with no Godot dependency.
+- Input context conflict and command-construction tests.
+
+### 20.5 Godot/export smoke tests
+
+The minimum smoke scenario:
+
+1. Launch an export from outside the repository.
+2. Reach the menu with correct build/version diagnostics.
+3. Start the real horizontal-test duel.
+4. Render terrain, blocks, and two placeholder characters from a snapshot.
+5. Move, fire one real shot, play its transition, and reconcile to its post-snapshot.
+6. Exit and verify clean native-handle disposal.
+
+Run it first on Windows, then on every claimed target. Headless scene tests cover navigation and
+input maps; a real rendered run remains required for graphics and packaging.
+
+### 20.6 CI/build commands
+
+The eventual pinned scripts wrap commands equivalent to:
+
+```text
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test --release -p db-sim-ffi
+cargo build --release -p db-sim-ffi
+
+dotnet restore client/DungeonBarrage.sln --locked-mode
+dotnet build client/DungeonBarrage.sln -c Release --no-restore
+dotnet test client/DungeonBarrage.sln -c Release --no-build
+dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore
+
+godot --headless --path client/src/DungeonBarrage.Client --editor --quit-after 1
+godot --headless --path client/src/DungeonBarrage.Client \
+  --export-release "Windows Desktop" <artifact-path>
+```
+
+Use the pinned Godot 4.7.1 .NET executable; `godot` above is shorthand. CI adds an OS matrix when the
+corresponding export becomes a claimed target. A C# job is added with C3, when it has a real contract
+test to run.
+
+Dependencies are locked, advisory-scanned, and license-reviewed. Release artifacts include version
+metadata and checksums; signing/notarization is required before public distribution.
+
+---
+
+## 21. Ordered implementation milestones
+
+### C0 — Decisions and reproducible toolchain
+
+ADR 0006, this v2 specification, `global.json`, `rust-toolchain.toml`, governing-plan status
+reconciliation, and `scripts/verify-toolchain.ps1` landed in the initial slice. On 2026-08-25 the
+pinned Godot 4.7.1 .NET editor and matching `4.7.1.stable.mono` export templates were installed and
+verified alongside .NET SDK 10.0.302 and Rust/Cargo 1.94.0. The validator now checks the editor,
+template version file, and Windows x86_64 debug/release template binaries. Remaining: wire this same
+validator into CI and reproduce the gate on a clean development machine.
+
+**Gate:** a clean machine can report the exact Godot/.NET/Rust versions, and no current-status or
+governing document still assigns authoritative gameplay or the future server to C#. Superseded ADRs
+remain unchanged as historical records.
+
+### C1 — Rust transition contract
+
+Delivered so far: transport-free `MatchConfig`, engine-neutral snapshots, multi-projectile traces,
+post-host turn/hash semantics, correct gauge deltas, the normalized command union, canonical command
+identity, generation-owning/idempotent `MatchSessionHost`, accepted/rejected duplicate replay,
+atomic post-snapshot/hash transitions, deterministic net-diff events, exact terrain dirty row-runs,
+bounded canonical ledger-byte accounting, movement-fall elimination progression, terminal-turn
+reason correctness at `SIMULATION_VERSION = 5`, plus a strict shared raw-request fixture bundle
+whose direct Rust replay freezes meaningful semantic expectations and exact hashes.
+
+Still required before the gate closes: complete per-strike/strike-impact/RNG/status/object
+provenance, authority-timeout transition, read-only preview, the session/ABI composite snapshot
+envelope, and the remaining §20.1 direct transition scenarios including real multi-strike, passive
+choice, object lifecycle, terrain/block change, timeout, and victory transitions. Full serialized
+response bytes remain a C2 production-serializer gate.
+
+**Gate:** §20.1 passes, including a real multi-strike and
+`transition.postStateHash == hash_state(host.state())`.
+
+### C2 — Real coarse FFI
+
+Replace the placeholder handle with the Rust session host; implement
+create/apply/snapshot/terrain/preview, exact boxed-slice owned buffers, ABI versioning, handle
+poisoning, limits, and negative-path tests. Preserve the verified unwind profile and run its release
+guard test in CI.
+
+**Gate:** the horizontal-test duel executes through the C ABI with the same transitions and final
+hash as the direct Rust fixture; leak and panic gates pass.
+
+### C3 — Headless .NET session
+
+Create contracts, interop, `SafeHandle`, native resolver, `LocalMatchSession`, and xUnit fixture
+replay. Do not create Godot scenes yet.
+
+**Gate:** the same machine-readable scripted match passes direct Rust and C#→FFI, with no Godot
+assembly loaded.
+
+### C4 — Minimal Godot render/export spike
+
+Pin Godot 4.7.1 .NET in the project; render one authoritative snapshot with placeholder assets and
+export it on Windows.
+
+**Gate:** §20.5 steps 1–4 and 6 pass from a clean export directory.
+
+### C5 — One playable authoritative turn
+
+Add input contexts, movement, aim/charge, target selection needed by the fixture, transition
+playback, terrain dirty updates, HUD essentials, and reconciliation.
+
+**Gate:** a human moves and fires one complete turn without a debugger; input is locked during
+playback; every view ends at the post-snapshot; direct and C# hashes still match.
+
+### C6 — Complete local match
+
+Add all nine starter kits, passive prompt, Rust bot, local clock/timeout, victory/results/rematch,
+objects, statuses, camera, and full HUD.
+
+**Gate:** a first-time player selects a character, completes and understands a bot match, and
+rematches without developer explanation. Controller-only play completes the whole flow.
+
+### C7 — Desktop release quality
+
+Add validated art/audio manifests, accessibility, settings recovery, localization infrastructure,
+performance tiers, Windows signing, Linux/macOS exports, and tester distribution.
+
+**Gate:** accessibility, stress, clean-package, and target-platform gates pass with recorded
+evidence.
+
+### C8 — Authoritative online adapter
+
+After the Rust server/protocol exists, add `RemoteMatchSession`, private rooms, clock offset,
+reconnect snapshots, chat/mute/report UI, and spectator playback. Do not add prediction.
+
+**Gate:** duplicate, late, reordered, malformed, cross-player, and version-mismatched commands cannot
+alter server state; reconnect during planning and playback reaches the same snapshot/hash as an
+uninterrupted observer.
+
+---
+
+## 22. Decisions still open
+
+These do not block C1–C3 unless stated:
+
+1. **Art direction:** pixel art or high-resolution illustration. This determines final
+   `pixelsPerCell`, filtering beyond the authoritative mask edge, atlas budgets, and animation
+   authoring. Placeholder shapes are mandatory until decided.
+2. **Presentation timing:** spacing between simultaneous/multi-strike traces and maximum cosmetic
+   holds. Rust must provide ordering; presentation durations need playtesting.
+3. **Camera during another player's input:** follow the active actor by default, but the exact
+   free-look policy is a UX decision.
+4. **Launch architecture breadth:** Windows x64 is first; the date at which macOS/Linux become
+   release-blocking depends on distribution planning, but no untested platform may be advertised.
+
+Settled here and no longer open: Godot/C# versus an all-Rust client, bot location (Rust), local versus
+server timer ownership, initial online prediction (none), and future server language (Rust).
+
+---
+
+## 23. Failure patterns to guard permanently
+
+- Do not poll transient `MatchPhase` values as an animation timeline.
+- Do not call a pre-settle command hash the final host hash.
+- Do not merge multiple projectile traces or retain only the last impact.
+- Do not infer block health from the mask or dirty cells from crater geometry alone.
+- Do not send floats, screen positions, client timer values, hits, damage, terrain, or outcomes to an
+  authority.
+- Do not let a view call native exports or own a raw handle.
+- Do not promise `catch_unwind` while shipping the FFI library with `panic = "abort"`.
+- Do not use a local core for initial online prediction.
+- Do not describe an official trajectory-guide restriction as anti-cheat enforcement.
+- Do not add a green CI job until it executes a real fixture through the layer it claims to test.
+- Check what calls a subsystem and what observable event it produces; correct, tested, unreachable
+  code is still non-functional.

@@ -295,6 +295,12 @@ fn resolve_ability(
     }
     state.has_attacked_this_turn = true;
 
+    // Measured after any special-gauge consumption and before this action's award. The
+    // outcome reports what this action earned, not the actor's resulting total.
+    let gauge_before_award = state
+        .player(&command.player_id)
+        .map_or(0, |player| player.special_gauge);
+
     let actor_position = state
         .player(&command.player_id)
         // Re-validated defensively: `validate_ability` already proved this player exists
@@ -304,8 +310,7 @@ fn resolve_ability(
         .position;
 
     let mut rng = Rng::from_state(state.rng_state);
-    let mut samples: Vec<BallisticSample> = Vec::new();
-    let mut impact: Option<BallisticImpact> = None;
+    let mut projectile_traces: Vec<ProjectileTrace> = Vec::new();
     let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
     let mut terrain_cells_removed: u32 = 0;
     let mut damage_by_player: BTreeMap<String, DamageEvent> = BTreeMap::new();
@@ -320,7 +325,7 @@ fn resolve_ability(
     match ability.attack {
         Attack::Projectile(projectile) => {
             let strikes = ability.strikes_per_turn.max(1);
-            for _ in 0..strikes {
+            for sequence in 0..u32::from(strikes) {
                 let input = BallisticInput {
                     origin: actor_position,
                     angle_millidegrees: command.angle_millidegrees,
@@ -355,11 +360,14 @@ fn resolve_ability(
                 .map_err(|_| CommandRejection::InvalidTarget)?;
                 let impact_position = result.impact.position;
                 let hit_character = matches!(result.impact.cause, ImpactCause::Character);
-                samples.extend(result.samples);
-                impact = Some(result.impact);
-                // Overwritten on every iteration of a multi-strike projectile, same as
-                // `impact` above — the effects loop below sees only the final strike's
-                // landing point, matching how `impact`/`terrain_ops` already behave.
+                projectile_traces.push(ProjectileTrace {
+                    sequence,
+                    samples: result.samples,
+                    impact: result.impact,
+                });
+                // Effects currently resolve once per command at the final strike's landing
+                // point. Presentation nevertheless retains every independently identifiable
+                // trace and impact instead of concatenating paths and discarding impacts.
                 impact_point = impact_position;
 
                 if hit_character {
@@ -537,25 +545,24 @@ fn resolve_ability(
         command_id: command.command_id.clone(),
         turn_number_before: turn_before,
         turn_number_after: state.turn_number,
-        samples,
-        impact,
+        projectile_traces,
         terrain_ops,
         damage: damage_by_player.into_values().collect(),
         objects_created,
-        gauge_gained: gauge_gained(state, &command.player_id),
+        gauge_gained: gauge_gained(state, &command.player_id, gauge_before_award),
         terrain_cells_removed,
         final_state_hash: hash::hash_state(state),
     })
 }
 
-/// Tracks the pre-award gauge value so [`resolve_ability`] can report the actual delta
-/// after [`PlayerState::add_gauge`]'s caps are applied, without a second mutable pass.
+/// Reports the actual gauge delta after [`PlayerState::add_gauge`]'s caps are applied.
 ///
-/// Kept as a tiny free function (rather than inlined) because it is called from two
-/// distinct points in [`resolve_ability`]'s control flow (before and after the award) in
-/// earlier drafts of this function; kept as a named step for clarity even collapsed to one.
-fn gauge_gained(state: &SimulationState, player_id: &str) -> u16 {
-    state.player(player_id).map_or(0, |p| p.special_gauge)
+/// `before_award` is captured after a committed special consumes its old gauge, so spending
+/// a full gauge cannot turn this action's earned amount into an underflow or a total.
+fn gauge_gained(state: &SimulationState, player_id: &str, before_award: u16) -> u16 {
+    state.player(player_id).map_or(0, |player| {
+        player.special_gauge.saturating_sub(before_award)
+    })
 }
 
 /// Awards gauge to the actor for this action, per `CHARACTERS.md` §2's per-point rates
@@ -867,8 +874,7 @@ fn resolve_passive_choice(
         command_id: command.command_id.clone(),
         turn_number_before: turn_before,
         turn_number_after: state.turn_number,
-        samples: Vec::new(),
-        impact: None,
+        projectile_traces: Vec::new(),
         terrain_ops: Vec::new(),
         damage: Vec::new(),
         objects_created: Vec::new(),
@@ -1248,6 +1254,64 @@ mod tests {
         };
         assert_eq!(character.id, "huck");
         assert_eq!(ability.id, "huck-haymaker");
+    }
+
+    #[test]
+    fn multi_projectile_command_preserves_each_trace_and_impact() {
+        let attacker = player("attacker", "karl", FixedPoint::new(0, 0));
+        let defender = player("defender", "huck", FixedPoint::new(1024, 0));
+        let mut state = state_with_players("attacker", vec![attacker, defender]);
+        let command = AbilityCommand {
+            command_id: "karl-three-shot".to_owned(),
+            player_id: "attacker".to_owned(),
+            expected_turn_number: 1,
+            slot: AbilitySlot::Basic,
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("defender".to_owned()),
+            secondary_target_player_id: None,
+        };
+
+        let CommandResult::Accepted(outcome) = apply_ability(&mut state, &command) else {
+            panic!("Karl's valid basic must resolve");
+        };
+
+        assert_eq!(outcome.projectile_traces.len(), 3);
+        assert_eq!(
+            outcome
+                .projectile_traces
+                .iter()
+                .map(|trace| trace.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(
+            outcome
+                .projectile_traces
+                .iter()
+                .all(|trace| !trace.samples.is_empty())
+        );
+    }
+
+    #[test]
+    fn gauge_gained_is_the_capped_action_delta_not_the_resulting_total() {
+        let mut state = base_state();
+        let Some(actor) = state.player_mut("attacker") else {
+            panic!("fixture actor must exist");
+        };
+        actor.special_gauge = 1_000;
+        let before = actor.special_gauge;
+        let command = ability_command("gauge-delta", Some("defender"));
+
+        let CommandResult::Accepted(outcome) = apply_ability(&mut state, &command) else {
+            panic!("valid command must resolve");
+        };
+        let Some(after) = state.player("attacker").map(|player| player.special_gauge) else {
+            panic!("fixture actor must remain present");
+        };
+
+        assert_eq!(outcome.gauge_gained, after.saturating_sub(before));
+        assert_ne!(outcome.gauge_gained, after);
     }
 
     // -----------------------------------------------------------------------------------

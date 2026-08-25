@@ -6,7 +6,8 @@ recommendation, say so and pick the other — but do not invent a third silently
 
 **Status legend:** 🔴 blocking · 🟠 important · 🟡 deferred · ✅ resolved
 
-Updated: 2026-08-07 · Companion to [`docs/PROGRAM_PLAN.md`](docs/PROGRAM_PLAN.md) (milestones)
+Updated: 2026-08-24 · Companion to [`docs/CLIENT_SPEC.md`](docs/CLIENT_SPEC.md) (current client
+milestones), [`docs/PROGRAM_PLAN.md`](docs/PROGRAM_PLAN.md) (historical plan),
 and [`docs/BUILD_LOG.md`](docs/BUILD_LOG.md) (history).
 
 ---
@@ -41,7 +42,7 @@ one concept is how effects go inert.
 
 ---
 
-## 🟠 P2 — `terrain_cells_removed` reaches state from `command.rs` only — PARTIAL
+## ✅ P2 — `terrain_cells_removed` reaches state from `command.rs` only — RESOLVED 2026-08-14
 
 **The problem.** `terrain::apply_operation` returns the count of cells destroyed.
 `CommandOutcome::terrain_cells_removed` needs it — the Excavator XP bonus
@@ -76,9 +77,15 @@ fix is mechanical — accumulate into `*ctx.terrain_cells_removed` at each of th
 and is folded into the P3 crater-routing work, since those call sites are exactly the ones
 being rerouted.
 
+**Resolved as recommended in `ef3c41f`.** All four resolver producers now route terrain
+operations through `block_ops::apply_operation` and saturating-add the returned cell count to
+`ResolveContext::terrain_cells_removed`. `command.rs` publishes that accumulator, and its
+terrain-destroying ability test asserts the result is nonzero. The historical partial diagnosis
+above is retained because it records why testing only the consumer was insufficient.
+
 ---
 
-## 🟠 P3 — Terrain blocks have hit points, but craters still bypass them
+## ✅ P3 — Terrain blocks have hit points, but craters still bypass them — RESOLVED 2026-08-14
 
 **The problem.** `TerrainMask` stores one `Material` byte per cell. A cell is solid or empty,
 full stop. The product requirement is that **destructible blocks have HP, and remaining HP
@@ -143,6 +150,13 @@ the exact drift the block model exists to prevent. Two fixes:
 horizontally), top-down (platform thins), or ammunition-dependent? Recommendation is
 edge-inward as the default with an ammunition-specific override, because a shrinking ledge
 reads clearly to a player deciding whether they can still stand there.
+
+**Resolved as recommended in `ef3c41f`.** `SimulationState.blocks` is authoritative and
+hashed; authored maps populate it; every crater producer calls `block_ops::apply_operation`;
+and erosion is ammunition-dependent through the stored `ErosionAxis` (columns by default,
+rows for penetrating effects). Tests cover health/mask consistency, material permissions,
+deterministic routing, and a real command path. The “WHAT REMAINS” section above is historical
+evidence of the once-real gap, not current work.
 
 ---
 
@@ -281,6 +295,13 @@ different things about the player. Turn-timeout rate is also a named launch metr
 **Trap:** the parameter currently *looks* wired. An exhaustive match on a value that changes
 nothing reads as intentional design until you follow it to the call site.
 
+**Resolution evidence.** `4ac6b09` added pending/last reason state and versioned it, but the
+terminal branch still skipped `end_turn` and could leave the preceding turn's reason visible.
+The 2026-08-24 working slice now commits `pending_turn_end_reason` before returning from a terminal
+victory check. A scheduler regression and movement-fall host tests cover terminal and continuing
+matches. Because this changes replay-visible state, `SIMULATION_VERSION` is 5 and every golden
+vector records its prior v4 hash.
+
 ---
 
 ## ✅ P12 — The passive prompt only fired for the acting player — RESOLVED 2026-08-07
@@ -304,6 +325,36 @@ fills, not the first time the player attacks afterwards.
 
 ---
 
+## 🟠 P13 — The native client path stops at a partial Rust session contract
+
+**The problem.** ADR 0006 settled Godot/C# for presentation, Rust for authoritative rules,
+and a client-only C ABI. The working tree now has validated match creation, atomic snapshots,
+normalized commands, a generation/idempotency-owning `MatchSessionHost`, ordered net-diff
+transitions, exact terrain dirty row-runs, and the first shared machine-readable match fixture.
+It still has no preview contract, authority-timeout transition, complete per-strike/RNG/status
+provenance, real FFI match handle, C# session, or Godot project.
+The game is therefore not playable despite the simulation being substantial.
+
+**Why it matters.** Starting scenes now would force C# to infer missing authoritative events or
+bind to the placeholder FFI. Either creates a second behavior path and makes green UI tests say
+nothing about the real Rust host.
+
+**Solutions.**
+
+1. **Continue the ordered C1 → C2 → C3 → C4 gates in `CLIENT_SPEC.md`.** *(Recommended.)*
+   Finish truthful Rust provenance/preview and the remaining direct transition scenarios; then
+   make the same raw fixture pass through the C ABI and headless C# before creating Godot scenes.
+   This is slower to first pixels but every layer proves the one below it.
+2. **Build a Godot vertical prototype against hand-authored C# DTOs now.** Faster visual feedback,
+   but it must later be replaced and cannot validate authority, buffer ownership, duplicate replay,
+   or hash parity. It repeats the repository's established “correct but unreachable” failure mode
+   at the client boundary.
+
+**Decision:** solution 1 is locked by ADR 0006 and `CLIENT_SPEC.md` §21. Current operational state,
+exact commands, and ownership warnings live in `docs/HANDOFF.md`.
+
+---
+
 ## 🟡 P9 — Deferred by owner decision
 
 | Item | Note |
@@ -311,8 +362,8 @@ fills, not the first time the player attacks afterwards.
 | Player-created champions | Post-launch. Analysis preserved in `PROGRAM_PLAN.md` §4 — at one champion/year a **review process** suffices; no sandbox needed |
 | Real-time PvP mode | Deliberately last; shares terrain/collision/damage with the turn-based mode |
 | 15 unspecified characters, 45 undrafted passives | Content backlog, real scheduling commitment |
-| C# client (Godot 4) | Not started; ADR 0004 |
-| ASP.NET match server | Not started; ADR 0004 |
+| Godot/C# presentation client | Moved to active P13 and `CLIENT_SPEC.md` C1–C5; no project exists yet |
+| Future match server | Rust-native per ADR 0006, not ASP.NET; deferred until the local-client gates establish the shared contract |
 
 ---
 
@@ -337,6 +388,8 @@ fills, not the first time the player attacks afterwards.
 | Terrain truncating cast | `terrain.rs` — wrapped negative, silently touched zero cells |
 | Zeke's Lifeshare destroying health | `command.rs` — debited before checking receivable |
 | 14 roster defects | `character.rs` — incl. missing ChainDetonate, 10× harpoon threshold error |
+| P2 terrain-removal accounting | `ef3c41f` — every crater producer accumulates the routed count |
+| P3 authoritative block routing | `ef3c41f` — state/hash/map wiring plus block-aware crater path |
 | Repo published | `Crownelius/DungeonBarrage` |
 
 ---

@@ -362,9 +362,6 @@ fn resolve_cluster(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimR
             },
             material_mask: MaterialMask::SOFT,
         };
-        // Cell count discarded: `ResolveContext` has nowhere to accumulate it until
-        // `resolve_effect` is wired into `command.rs`. Tracked in PROGRAM_PLAN §6 —
-        // `CommandOutcome::terrain_cells_removed` feeds the Excavator XP bonus.
         // Routed through `block_ops` so block health stays the authority inside a
         // block span (ADR 0005), and the count is accumulated rather than discarded
         // (`todolist.md` P2 -- it feeds the Excavator XP bonus).
@@ -555,9 +552,6 @@ fn resolve_tunnel(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
         },
         material_mask: MaterialMask::SOFT,
     };
-    // Cell count discarded: `ResolveContext` has nowhere to accumulate it until
-    // `resolve_effect` is wired into `command.rs`. Tracked in PROGRAM_PLAN §6 —
-    // `CommandOutcome::terrain_cells_removed` feeds the Excavator XP bonus.
     // Routed through `block_ops` so block health stays the authority inside a
     // block span (ADR 0005), and the count is accumulated rather than discarded
     // (`todolist.md` P2 -- it feeds the Excavator XP bonus).
@@ -574,9 +568,6 @@ fn resolve_tunnel(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
         },
         material_mask: MaterialMask::SOFT,
     };
-    // Cell count discarded: `ResolveContext` has nowhere to accumulate it until
-    // `resolve_effect` is wired into `command.rs`. Tracked in PROGRAM_PLAN §6 —
-    // `CommandOutcome::terrain_cells_removed` feeds the Excavator XP bonus.
     // Routed through `block_ops` so block health stays the authority inside a
     // block span (ADR 0005), and the count is accumulated rather than discarded
     // (`todolist.md` P2 -- it feeds the Excavator XP bonus).

@@ -41,7 +41,7 @@ use crate::{command, movement, scheduler, victory};
 /// Owns the authoritative state. The client never holds a `SimulationState` directly — it
 /// submits intents and reads results, which is the trust boundary `SECURITY_BASELINE.md` §2
 /// requires.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MatchHost {
     state: SimulationState,
 }
@@ -134,6 +134,18 @@ impl MatchHost {
         let travelled = movement::walk(&mut self.state, player_id, dx)?;
         // Walking off a ledge must drop the character in the same action, not next turn.
         movement::settle(&mut self.state)?;
+        // Settling can eliminate the actor after an unrecoverable fall. Leaving that dead
+        // actor in `Movement` would strand the match: they cannot submit an ability and no
+        // valid client command can revive them. Drive the ordinary turn/victory cycle just
+        // as an attack-caused elimination would. In a match with other surviving teams this
+        // rotates to the next living player; in a duel it completes the match.
+        let actor_was_eliminated = self
+            .state
+            .player(player_id)
+            .is_some_and(crate::types::PlayerState::is_eliminated);
+        if actor_was_eliminated && self.state.active_player_id == player_id {
+            self.finish_turn(TurnEndReason::Eliminated)?;
+        }
         Ok(travelled)
     }
 
@@ -145,9 +157,12 @@ impl MatchHost {
     /// 1. Apply the command. A rejection leaves state untouched and does **not** end the turn;
     ///    a client sending a malformed command must not lose its turn to it.
     /// 2. Settle anything the action left airborne.
-    /// 3. Raise the passive-selection interrupt if the actor's gauge just filled for the
-    ///    first time, so the choice cannot be skipped.
+    /// 3. Raise the passive-selection interrupt if the surviving actor's gauge just filled
+    ///    for the first time, so the choice cannot be skipped. An eliminated actor cannot
+    ///    owe an unfulfillable choice.
     /// 4. Otherwise run the turn to completion and hand over.
+    /// 5. Replace the command-layer hash with the hash after all host-owned mutations, so
+    ///    the returned outcome describes the same state [`Self::state`] exposes.
     ///
     /// # Errors
     ///
@@ -159,7 +174,7 @@ impl MatchHost {
             ));
         }
 
-        let result = command::apply_ability(&mut self.state, ability);
+        let mut result = command::apply_ability(&mut self.state, ability);
         if matches!(result, CommandResult::Rejected(_)) {
             // A rejected command costs nothing. Ending the turn here would let a client
             // grief itself into a skipped turn, and would let a *replayed* command end a
@@ -171,10 +186,18 @@ impl MatchHost {
 
         if self.raise_passive_selection_if_due(&ability.player_id) {
             // Hold the turn open. The scheduler resumes the cycle once the choice lands.
-            return Ok(result);
+        } else {
+            self.finish_turn(TurnEndReason::Attacked)?;
         }
 
-        self.finish_turn(TurnEndReason::Attacked)?;
+        // `command::apply_ability` hashes before this host settles characters, raises a
+        // passive interrupt, or drives the scheduler through status/victory/turn rotation.
+        // The public host result must describe the public host state, not that internal
+        // intermediate state.
+        if let CommandResult::Accepted(outcome) = &mut result {
+            outcome.turn_number_after = self.state.turn_number;
+            outcome.final_state_hash = crate::hash::hash_state(&self.state);
+        }
         Ok(result)
     }
 
@@ -187,11 +210,15 @@ impl MatchHost {
         &mut self,
         choice: &PassiveChoiceCommand,
     ) -> SimResult<CommandResult> {
-        let result = command::apply_passive_choice(&mut self.state, choice);
+        let mut result = command::apply_passive_choice(&mut self.state, choice);
         if matches!(result, CommandResult::Rejected(_)) {
             return Ok(result);
         }
         self.finish_turn(TurnEndReason::Attacked)?;
+        if let CommandResult::Accepted(outcome) = &mut result {
+            outcome.turn_number_after = self.state.turn_number;
+            outcome.final_state_hash = crate::hash::hash_state(&self.state);
+        }
         Ok(result)
     }
 
@@ -199,8 +226,14 @@ impl MatchHost {
     ///
     /// # Errors
     ///
-    /// Propagates scheduler failures.
+    /// Returns [`crate::error::SimError::OutOfRange`] while a passive choice is owed;
+    /// otherwise propagates scheduler failures.
     pub fn pass_turn(&mut self) -> SimResult<()> {
+        if self.state.phase == MatchPhase::PassiveSelection {
+            return Err(crate::error::SimError::OutOfRange {
+                field: "passive selection",
+            });
+        }
         self.finish_turn(TurnEndReason::Passed)
     }
 
@@ -211,20 +244,29 @@ impl MatchHost {
     ///
     /// # Errors
     ///
-    /// Propagates scheduler failures.
+    /// Returns [`crate::error::SimError::OutOfRange`] while a passive choice is owed;
+    /// otherwise propagates scheduler failures. Local play pauses its planning clock for
+    /// this prompt; an online passive-timeout policy must be defined before online play.
     pub fn time_out_turn(&mut self) -> SimResult<()> {
+        if self.state.phase == MatchPhase::PassiveSelection {
+            return Err(crate::error::SimError::OutOfRange {
+                field: "passive selection",
+            });
+        }
         self.finish_turn(TurnEndReason::TimedOut)
     }
 
-    /// Raises [`MatchPhase::PassiveSelection`] if `player_id` just earned their first choice.
+    /// Raises [`MatchPhase::PassiveSelection`] if the living `player_id` just earned their
+    /// first choice.
     ///
     /// Returns whether the interrupt was raised. This is the entry point that did not exist
     /// before: without it, a full gauge never prompts and the passive is never chosen.
     fn raise_passive_selection_if_due(&mut self, player_id: &str) -> bool {
-        let due = self
-            .state
-            .player(player_id)
-            .is_some_and(|player| !player.has_chosen_passive && player.special_gauge >= GAUGE_FULL);
+        let due = self.state.player(player_id).is_some_and(|player| {
+            !player.is_eliminated()
+                && !player.has_chosen_passive
+                && player.special_gauge >= GAUGE_FULL
+        });
         if due {
             self.state.phase = MatchPhase::PassiveSelection;
         }
@@ -281,7 +323,7 @@ mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
     use crate::map;
-    use crate::types::{Appearance, PlayerState};
+    use crate::types::{AbilitySlot, Appearance, PlayerState};
 
     fn player(id: &str, team: u8, character_id: &str, position: FixedPoint) -> PlayerState {
         PlayerState {
@@ -337,6 +379,19 @@ mod tests {
             next_terrain_sequence: 0,
             next_object_sequence: 0,
             rng_state: 20_260_807,
+        }
+    }
+
+    fn basic_command(host: &MatchHost, command_id: &str) -> AbilityCommand {
+        AbilityCommand {
+            command_id: command_id.to_owned(),
+            player_id: host.active_player().to_owned(),
+            expected_turn_number: host.state().turn_number,
+            slot: AbilitySlot::Basic,
+            angle_millidegrees: 45_000,
+            power_basis_points: 1_500,
+            target_player_id: None,
+            secondary_target_player_id: None,
         }
     }
 
@@ -410,6 +465,237 @@ mod tests {
         };
         assert!(travelled > 0, "some distance must be covered");
         assert_ne!(before, after, "the character must actually move");
+    }
+
+    #[test]
+    fn an_active_player_who_falls_during_movement_cannot_strand_the_match() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let Ok(map_height_cells) = i32::try_from(host.state.terrain.height) else {
+            panic!("fixture map height must fit in i32");
+        };
+        let below_map = map_height_cells.saturating_mul(crate::fixed::POSITION_SCALE);
+        let Some(player) = host.state.player_mut(&actor) else {
+            panic!("the active player must exist");
+        };
+        player.position.y = below_map;
+
+        let Ok(_) = host.submit_move(&actor, 0) else {
+            panic!("settling a movement action must succeed");
+        };
+
+        let Some(actor_state) = host.state.player(&actor) else {
+            panic!("the eliminated actor remains addressable");
+        };
+        assert!(actor_state.is_eliminated());
+        assert!(
+            host.is_complete(),
+            "the surviving duel team must be evaluated"
+        );
+        assert_eq!(host.outcome(), MatchOutcome::Victory { team: 1 });
+        assert_eq!(host.state.last_turn_end_reason, TurnEndReason::Eliminated,);
+    }
+
+    #[test]
+    fn movement_fall_rotates_to_a_living_player_when_the_match_continues() {
+        let mut state = duel();
+        state.players.push(player(
+            "c_karl",
+            2,
+            "karl",
+            FixedPoint::new(
+                25 * crate::fixed::POSITION_SCALE,
+                5 * crate::fixed::POSITION_SCALE,
+            ),
+        ));
+        state.players.sort_by(|left, right| left.id.cmp(&right.id));
+        let Ok(mut host) = MatchHost::start(state) else {
+            panic!("a three-player match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let Ok(map_height_cells) = i32::try_from(host.state.terrain.height) else {
+            panic!("fixture map height must fit in i32");
+        };
+        let below_map = map_height_cells.saturating_mul(crate::fixed::POSITION_SCALE);
+        let Some(player) = host.state.player_mut(&actor) else {
+            panic!("the active player must exist");
+        };
+        player.position.y = below_map;
+
+        let Ok(_) = host.submit_move(&actor, 0) else {
+            panic!("settling a movement action must succeed");
+        };
+
+        assert!(!host.is_complete(), "two opposing teams still survive");
+        assert_ne!(host.active_player(), actor);
+        let Some(next_player) = host.state.player(host.active_player()) else {
+            panic!("the rotated active player must exist");
+        };
+        assert!(!next_player.is_eliminated());
+        assert_eq!(host.state.last_turn_end_reason, TurnEndReason::Eliminated,);
+    }
+
+    #[test]
+    fn accepted_ability_reports_the_post_turn_host_hash() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let turn_before = host.state().turn_number;
+        let command = basic_command(&host, "post-turn-hash");
+
+        let Ok(CommandResult::Accepted(outcome)) = host.submit_ability(&command) else {
+            panic!("a valid basic ability must be accepted");
+        };
+
+        assert!(
+            host.state().turn_number > turn_before,
+            "the host must finish the accepted action's turn",
+        );
+        assert_eq!(outcome.turn_number_after, host.state().turn_number);
+        assert_eq!(
+            outcome.final_state_hash,
+            crate::hash::hash_state(host.state()),
+            "the outcome hash must include settling and turn rotation",
+        );
+    }
+
+    #[test]
+    fn a_cloned_host_can_be_resolved_without_mutating_the_live_host() {
+        let Ok(host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let original_hash = crate::hash::hash_state(host.state());
+        let original_actor = host.active_player().to_owned();
+        let mut candidate = host.clone();
+
+        let Ok(()) = candidate.pass_turn() else {
+            panic!("the candidate host must accept a valid pass");
+        };
+
+        assert_eq!(host.active_player(), original_actor);
+        assert_eq!(crate::hash::hash_state(host.state()), original_hash);
+        assert_ne!(candidate.active_player(), original_actor);
+        assert_ne!(
+            crate::hash::hash_state(candidate.state()),
+            original_hash,
+            "the working clone must evolve independently before an adapter commits it",
+        );
+    }
+
+    #[test]
+    fn accepted_ability_reports_the_passive_interrupt_host_hash() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let Some(player) = host.state.player_mut(&actor) else {
+            panic!("the active player must exist");
+        };
+        // Model a gauge that filled during the already-open turn. Setting it after start
+        // avoids `open_turn` raising the interrupt before the ability can be submitted.
+        player.special_gauge = GAUGE_FULL;
+        let command = basic_command(&host, "passive-interrupt-hash");
+
+        let Ok(CommandResult::Accepted(outcome)) = host.submit_ability(&command) else {
+            panic!("a valid basic ability must be accepted");
+        };
+
+        assert_eq!(host.phase(), MatchPhase::PassiveSelection);
+        assert_eq!(outcome.turn_number_after, host.state().turn_number);
+        assert_eq!(
+            outcome.final_state_hash,
+            crate::hash::hash_state(host.state()),
+            "the outcome hash must include the passive-selection phase change",
+        );
+    }
+
+    #[test]
+    fn an_actor_eliminated_during_settling_never_enters_passive_selection() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let Ok(map_height_cells) = i32::try_from(host.state.terrain.height) else {
+            panic!("fixture map height must fit in i32");
+        };
+        let below_map = map_height_cells.saturating_mul(crate::fixed::POSITION_SCALE);
+        let Some(player) = host.state.player_mut(&actor) else {
+            panic!("the active player must exist");
+        };
+        player.special_gauge = GAUGE_FULL;
+        player.position.y = below_map;
+        let command = basic_command(&host, "eliminated-before-passive");
+
+        let Ok(CommandResult::Accepted(_)) = host.submit_ability(&command) else {
+            panic!("the valid ability must resolve before settling eliminates its actor");
+        };
+
+        let Some(actor_state) = host.state.player(&actor) else {
+            panic!("the eliminated player remains addressable in match state");
+        };
+        assert!(actor_state.is_eliminated());
+        assert_ne!(host.phase(), MatchPhase::PassiveSelection);
+        assert!(host.is_complete(), "the surviving team must be evaluated");
+        assert_eq!(host.outcome(), MatchOutcome::Victory { team: 1 });
+    }
+
+    #[test]
+    fn pass_and_timeout_cannot_skip_a_required_passive_choice() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        host.state.phase = MatchPhase::PassiveSelection;
+        let before = host.state.clone();
+        let expected = Err(crate::error::SimError::OutOfRange {
+            field: "passive selection",
+        });
+
+        assert_eq!(host.pass_turn(), expected);
+        assert_eq!(host.state, before);
+        assert_eq!(
+            host.time_out_turn(),
+            Err(crate::error::SimError::OutOfRange {
+                field: "passive selection",
+            })
+        );
+        assert_eq!(host.state, before);
+    }
+
+    #[test]
+    fn accepted_passive_choice_reports_the_post_turn_host_hash() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let turn_number = host.state().turn_number;
+        let Some(player) = host.state.player_mut(&actor) else {
+            panic!("the active player must exist");
+        };
+        player.special_gauge = GAUGE_FULL;
+        host.state.phase = MatchPhase::PassiveSelection;
+        let choice = PassiveChoiceCommand {
+            command_id: "post-passive-hash".to_owned(),
+            player_id: actor,
+            expected_turn_number: turn_number,
+            passive_id: "arzum-momentum".to_owned(),
+        };
+
+        let Ok(CommandResult::Accepted(outcome)) = host.submit_passive_choice(&choice) else {
+            panic!("a valid passive choice must be accepted");
+        };
+
+        assert_eq!(
+            outcome.turn_number_after,
+            host.state().turn_number,
+            "the passive outcome turn must include resumed turn progression",
+        );
+        assert_eq!(
+            outcome.final_state_hash,
+            crate::hash::hash_state(host.state()),
+            "the passive outcome hash must include resumed turn progression",
+        );
     }
 
     #[test]

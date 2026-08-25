@@ -1,6 +1,6 @@
 [package]
 name = "db-sim-ffi"
-description = "C ABI boundary exposing the Dungeon Barrage simulation core to C# (client and server)."
+description = "Client-only C ABI exposing the Dungeon Barrage simulation core to Godot/C#."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 db-sim-core = { path = "../db-sim-core" }
 
 [lints.rust]
-# This crate is the ONE place `unsafe` is permitted (ADR 0001 §1, ADR 0004), because a C ABI
+# This crate is the ONE place `unsafe` is permitted (ADR 0001 §1, ADR 0006), because a C ABI
 # cannot be expressed without it. The workspace `forbid`s it everywhere else.
 #
 # `allow` rather than `warn`: with `-D warnings` in CI a warn-level lint fails the build on

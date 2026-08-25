@@ -172,6 +172,11 @@ fn leave_victory_check(state: &mut SimulationState) -> SimResult<MatchPhase> {
         Ok(state.phase)
     } else {
         // `check_and_finalize` already committed `MatchPhase::MatchComplete`.
+        // There is no next player, so `end_turn` is intentionally not called; nevertheless
+        // the terminal action did complete the final turn and its reason must not remain the
+        // previous turn's value. Transition/replay consumers read this field to distinguish
+        // a final attack, timeout, pass, or movement fall.
+        state.last_turn_end_reason = state.pending_turn_end_reason;
         Ok(state.phase)
     }
 }
@@ -215,16 +220,10 @@ fn force_draw(state: &mut SimulationState) -> SimResult<()> {
 /// Returns [`SimError::UnknownDefinition`] if the next player's `character_id` is not in the
 /// roster.
 pub fn end_turn(state: &mut SimulationState, reason: TurnEndReason) -> SimResult<()> {
-    // `reason` has no dedicated field in `SimulationState` to record into (`types.rs` is
-    // frozen for this task) and no behavioral fork in this module today — every variant
-    // produces identical bookkeeping below. Matched exhaustively anyway, rather than
-    // ignored, so a newly added `TurnEndReason` variant fails this build instead of being
-    // silently folded into "just another turn end" — the same discipline `resolve_effect`
-    // uses for `EffectKind`. A future replay or telemetry consumer is the intended reader of
-    // this parameter; this module is not that consumer.
-    // Recorded rather than discarded (`todolist.md` P11). Matched exhaustively above its
-    // assignment so a newly added variant still fails this build rather than being folded
-    // silently into "just another turn end".
+    // Recorded for replay, telemetry, and presentation consumers (`todolist.md` P11).
+    // Match exhaustively before assignment so a newly added variant fails this build instead
+    // of being silently folded into "just another turn end"; every current variant otherwise
+    // shares the bookkeeping below.
     match reason {
         TurnEndReason::Attacked
         | TurnEndReason::Passed
@@ -525,14 +524,16 @@ mod tests {
     }
 
     #[test]
-    fn victory_check_goes_straight_to_match_complete_when_a_team_is_already_wiped() {
+    fn victory_check_commits_the_terminal_turn_reason_when_a_team_is_already_wiped() {
         let mut a = player("a", 0);
         a.health = 0;
         let mut state = base_state(vec![a, player("b", 1)]);
         state.phase = MatchPhase::VictoryCheck;
+        state.pending_turn_end_reason = TurnEndReason::Eliminated;
 
         assert_eq!(advance_phase(&mut state), Ok(MatchPhase::MatchComplete));
         assert_eq!(state.phase, MatchPhase::MatchComplete);
+        assert_eq!(state.last_turn_end_reason, TurnEndReason::Eliminated);
     }
 
     #[test]

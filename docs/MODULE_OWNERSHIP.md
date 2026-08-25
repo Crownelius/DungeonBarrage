@@ -12,11 +12,15 @@ coordination.
 1. **One file, one owner.** Every task below owns exactly one file. No task edits a file
    it does not own, for any reason — not to fix a typo, not to add a helper, not to
    "quickly correct" a neighbour.
-2. **`types.rs` is the contract and is frozen during parallel work.** All shared data
-   structures live there. A module that needs a type reads it; it never redefines one and
-   never adds a variant. If a type is genuinely missing, the task stops and reports it
-   rather than inventing a local version — two local versions of one concept is exactly
-   the drift this protocol prevents.
+2. **`types.rs` is the authoritative simulation contract and is frozen during parallel
+   work.** Authoritative gameplay structures live there. Client/session DTOs live in their
+   named boundary modules and must not be smuggled into `types.rs` merely because more than
+   one adapter consumes them. If an authoritative type is genuinely missing, the task stops
+   and reports it rather than inventing a local version — two local versions of one concept
+   is exactly the drift this protocol prevents. The integrator may deliberately unfreeze it
+   for one coordinated contract slice, such as adding resolver-owned event provenance, after
+   stopping parallel writers and updating every producer/consumer and the golden evidence
+   together.
 3. **`lib.rs` is owned by the integrator.** Module declarations are added centrally. A
    task never edits `lib.rs`.
 4. **A broken sibling is not your bug.** While work is in flight, `cargo build` may report
@@ -35,7 +39,7 @@ coordination.
 |---|---|---|
 | `fixed.rs` | Fixed-point math primitives | Integrator (complete) |
 | `canonical.rs` | Byte encoding + FNV-1a hashing | Integrator (complete) |
-| `types.rs` | Shared data contract | Integrator (complete, frozen) |
+| `types.rs` | Shared authoritative data contract | Integrator (stable during parallel work; coordinated provenance extension is open) |
 | `error.rs` | Error types | Integrator (complete) |
 | `lib.rs` | Module wiring, versions | Integrator |
 | `rng.rs` | Versioned seeded PRNG | Implementation task |
@@ -44,13 +48,27 @@ coordination.
 | `ballistics.rs` | Trajectory integration + collision | Implementation task |
 | `hash.rs` | `Canonical` impls for state types | Implementation task |
 | `command.rs` | Command validation + application | Implementation task |
+| `match_host.rs` | Authoritative orchestration; no transport/session policy | Integrator |
+| `scheduler.rs` | Phase progression, turn reasons, victory handoff | Integrator |
+| `match_setup.rs` | Validated transport-free match construction | Integrator (C1 slice complete) |
+| `client_contract.rs` | Engine-neutral read-only snapshot projection | Integrator (C1 slice complete) |
+| `match_session.rs` | Normalized commands, generations, bounded idempotency ledger, transitions | Integrator (C1 foundation complete; provenance/timeout/preview/restore open) |
+| `db-sim-ffi/**` | Sole native ABI and `unsafe` boundary | Integrator (C2; scaffold only) |
+| `tests/fixtures/matches/**` | Shared machine-readable client fixtures | Fixture task (direct Rust replay complete); schema changes require integrator review |
+| `crates/db-sim-core/tests/shared_match_fixtures.rs` | Strict direct-session consumer of shared bytes | Fixture task (C1 direct replay complete) |
+| `crates/db-sim-core/tests/golden_vectors.rs` | Versioned whole-match replay hashes | Integrator; regenerate only under the documented compatibility procedure |
+| `docs/HANDOFF.md` | Mutable operational handoff for the next agent | Documentation task |
+| `docs/BUILD_LOG.md` | Append-only historical checkpoints | Integrator appends; existing entries are never rewritten |
 
 ## Constraints binding every module
 
 Enforced by `Cargo.toml` lints and CI (`SECURITY_BASELINE.md` §10). These are not
 suggestions; a violation fails the build.
 
-- **No `unsafe`.** Forbidden workspace-wide.
+- **No `unsafe` in authoritative or presentation-independent Rust.** It is forbidden by
+  workspace default. `db-sim-ffi` is the one explicit crate-level exception and must keep
+  every unsafe function contract and unsafe block documented; CI must reject `unsafe`
+  anywhere else.
 - **No floating point.** `clippy::float_arithmetic` is `deny`. Use `fixed.rs`.
 - **No `unwrap`, `expect`, or `panic!`.** Return `SimResult`. Untrusted input must never
   panic the room process.
