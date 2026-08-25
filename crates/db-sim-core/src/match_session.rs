@@ -204,6 +204,73 @@ pub enum MatchCommandKind {
     Pass,
 }
 
+/// A turn ended by the authority because its planning deadline expired.
+///
+/// **This is deliberately not a [`MatchCommandKind`] variant.** The server owns the clock
+/// (`SECURITY_BASELINE.md` §2), and a client must never be able to end a turn — its own or
+/// anyone else's — by claiming time ran out. Keeping timeout out of the client command union
+/// makes that structural rather than a validation rule: a remote peer sends bytes that are
+/// decoded into a `MatchCommand`, and no byte sequence decodes into this type. A validation
+/// check could be bypassed by one decoding bug; an absent variant cannot be.
+///
+/// It still travels through the same session ledger as client commands, sharing one
+/// idempotency key space, so a retried timeout replays rather than ending a second turn and a
+/// client cannot reuse a timeout's id to smuggle a different action into its slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityTimeout {
+    /// Client-contract schema version used to interpret this action.
+    pub schema_version: u32,
+    /// Deterministic match-unique idempotency key, sharing the client command id space.
+    pub action_id: String,
+    /// The player whose turn is being ended, validated against the active player.
+    ///
+    /// Required rather than implied so a timeout raced against a turn handover is refused
+    /// instead of silently ending whoever happens to be active by the time it arrives.
+    pub player_id: String,
+    /// Turn number the authority observed when the deadline expired.
+    pub expected_turn_number: u32,
+    /// Session snapshot generation the authority observed when the deadline expired.
+    pub expected_snapshot_generation: u64,
+}
+
+impl AuthorityTimeout {
+    /// Returns the deterministic digest used by the session ledger.
+    #[must_use]
+    pub fn canonical_digest(&self) -> String {
+        hash_canonical(self)
+    }
+
+    fn validate_structure(&self) -> Result<(), SessionFault> {
+        if self.schema_version != CLIENT_CONTRACT_VERSION {
+            return Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: self.schema_version,
+            });
+        }
+        if !is_valid_match_local_id(&self.action_id) {
+            return Err(SessionFault::InvalidCommand { field: "action_id" });
+        }
+        if !is_valid_match_local_id(&self.player_id) {
+            return Err(SessionFault::InvalidCommand { field: "player_id" });
+        }
+        Ok(())
+    }
+}
+
+impl Canonical for AuthorityTimeout {
+    fn write_canonical(&self, hasher: &mut CanonicalHasher) {
+        // A domain tag of its own, distinct from the client command's `0x20`. Without this a
+        // timeout and a command carrying the same identifiers could hash identically, and the
+        // ledger's digest comparison would stop being able to tell them apart.
+        hasher.write_domain_separator(0x21);
+        hasher.write_u32(self.schema_version);
+        hasher.write_str(&self.action_id);
+        hasher.write_str(&self.player_id);
+        hasher.write_u32(self.expected_turn_number);
+        hasher.write_u64(self.expected_snapshot_generation);
+    }
+}
+
 /// Whether a transition is a new success, a new refusal, or a replayed first result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionDisposition {
@@ -603,9 +670,22 @@ pub struct MatchTransition {
     pub post_state_hash: String,
 }
 
+/// One retained first receipt, whoever authored it.
+///
+/// Client commands and authority actions share a single ledger because they share a single
+/// identifier space. Two ledgers would let a client pick an id an authority action already
+/// used and receive a different answer than the one the authority recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerRequest {
+    /// A normalized command received from a client.
+    Client(MatchCommand),
+    /// An action authored by the server itself.
+    Authority(AuthorityTimeout),
+}
+
 #[derive(Debug, Clone)]
 struct LedgerEntry {
-    command: MatchCommand,
+    request: LedgerRequest,
     canonical_digest: String,
     transition: MatchTransition,
 }
@@ -672,10 +752,32 @@ impl RetainedByteCounter {
 }
 
 fn retained_ledger_entry_bytes(
-    command: &MatchCommand,
+    request: &LedgerRequest,
     transition: &MatchTransition,
 ) -> Option<u64> {
-    retained_command_bytes(command)?.checked_add(retained_transition_bytes(transition)?)
+    let request_bytes = match request {
+        LedgerRequest::Client(command) => retained_command_bytes(command)?,
+        LedgerRequest::Authority(timeout) => retained_authority_timeout_bytes(timeout)?,
+    };
+    request_bytes.checked_add(retained_transition_bytes(transition)?)
+}
+
+fn retained_authority_timeout_bytes(timeout: &AuthorityTimeout) -> Option<u64> {
+    let AuthorityTimeout {
+        schema_version,
+        action_id,
+        player_id,
+        expected_turn_number,
+        expected_snapshot_generation,
+    } = timeout;
+    let mut counter = RetainedByteCounter::default();
+    counter.add(RETAINED_TOP_LEVEL_HEADER_BYTES)?;
+    counter.u32(*schema_version)?;
+    counter.string(action_id)?;
+    counter.string(player_id)?;
+    counter.u32(*expected_turn_number)?;
+    counter.u64(*expected_snapshot_generation)?;
+    Some(counter.finish())
 }
 
 fn retained_command_bytes(command: &MatchCommand) -> Option<u64> {
@@ -1552,7 +1654,9 @@ impl MatchSessionHost {
         let digest = command.canonical_digest();
 
         if let Some(entry) = self.ledger.get(&command.command_id) {
-            if entry.command == command {
+            // A client id colliding with an authority action's id is a conflict, never a
+            // replay: the two are different requests that happen to share a key.
+            if matches!(&entry.request, LedgerRequest::Client(existing) if *existing == command) {
                 if entry.canonical_digest != digest {
                     self.closed = true;
                     return Err(SessionFault::ContractInvariant);
@@ -1668,11 +1772,171 @@ impl MatchSessionHost {
         };
 
         self.record_and_commit(
-            command,
+            LedgerRequest::Client(command),
             digest,
             transition,
             Some(working_host),
             post_generation,
+        )
+    }
+
+    /// Ends the active player's turn because the authority's planning deadline expired.
+    ///
+    /// The server owns the clock (`SECURITY_BASELINE.md` §2). This is the only entry point
+    /// that can end a turn on time, it takes an [`AuthorityTimeout`] rather than a
+    /// [`MatchCommand`], and no client-decodable byte sequence produces that type — so a
+    /// remote peer cannot reach this path at all, however malformed its input.
+    ///
+    /// Otherwise it behaves exactly like [`Self::apply`]: same generation checks, same
+    /// idempotency ledger and identifier space, same ordered transition. A retried timeout
+    /// replays its original result instead of ending a second turn.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionFault::Closed`] once the session has closed, [`SessionFault::UnsupportedSchema`]
+    /// or [`SessionFault::InvalidCommand`] for a malformed action, [`SessionFault::ResourceLimit`]
+    /// at the ledger bounds, and [`SessionFault::ContractInvariant`] if the authoritative host
+    /// contradicts itself. A refusal the authority could legitimately race into — a stale
+    /// generation, the wrong player, the wrong phase — is a rejected transition, not an error.
+    pub fn apply_authority_timeout(
+        &mut self,
+        timeout: AuthorityTimeout,
+    ) -> Result<MatchTransition, SessionFault> {
+        if self.closed {
+            return Err(SessionFault::Closed);
+        }
+        timeout.validate_structure()?;
+        let digest = timeout.canonical_digest();
+
+        if let Some(entry) = self.ledger.get(&timeout.action_id) {
+            // Only an identical authority action replays. A client command that reused this
+            // id is a conflict, and so is a different timeout wearing the same id.
+            if matches!(&entry.request, LedgerRequest::Authority(existing) if *existing == timeout)
+            {
+                if entry.canonical_digest != digest {
+                    self.closed = true;
+                    return Err(SessionFault::ContractInvariant);
+                }
+                let mut replay = entry.transition.clone();
+                replay.disposition = TransitionDisposition::DuplicateReplay;
+                return Ok(replay);
+            }
+            return Ok(
+                self.current_rejection(&timeout.action_id, TransitionRejection::CommandIdConflict)
+            );
+        }
+
+        if self.ledger.len() >= self.ledger_entry_limit {
+            self.closed = true;
+            return Err(SessionFault::ResourceLimit);
+        }
+
+        if timeout.expected_snapshot_generation != self.generation {
+            let rejection = TransitionRejection::SnapshotGenerationMismatch {
+                expected: timeout.expected_snapshot_generation,
+                actual: self.generation,
+            };
+            return self.record_authority_rejection(timeout, digest, rejection);
+        }
+
+        if let Some(reason) = authority_timeout_rejection(self.host.state(), &timeout) {
+            return self.record_authority_rejection(
+                timeout,
+                digest,
+                TransitionRejection::Core(reason),
+            );
+        }
+
+        let pre_state = self.host.state().clone();
+        let pre_snapshot = self.snapshot();
+        let mut working_host = self.host.clone();
+
+        // `time_out_turn` refuses while a passive choice is owed. That is a legitimate race
+        // rather than a contract breach — the interrupt may have been raised by the very
+        // action that preceded this deadline — so it is reported as a refusal and the working
+        // host is discarded unexamined.
+        if working_host.time_out_turn().is_err() {
+            return self.record_authority_rejection(
+                timeout,
+                digest,
+                TransitionRejection::Core(CommandRejection::WrongPhase),
+            );
+        }
+
+        let mutated = working_host.state() != self.host.state();
+        let post_generation = if mutated {
+            let Some(next) = self.generation.checked_add(1) else {
+                self.closed = true;
+                return Err(SessionFault::GenerationExhausted);
+            };
+            next
+        } else {
+            self.generation
+        };
+        let post_snapshot = MatchSnapshot::from_host(&working_host, post_generation);
+
+        let events = match derive_events(
+            &timeout_as_pass(&timeout),
+            &pre_state,
+            working_host.state(),
+            &pre_snapshot,
+            &post_snapshot,
+            AppliedRecords {
+                // A timeout resolves no ability, so there is no outcome to carry. The
+                // end-of-turn transitions it caused still come from the host.
+                outcome: None,
+                status_changes: working_host.status_changes(),
+                object_changes: working_host.object_changes(),
+            },
+        ) {
+            Ok(events) => events,
+            Err(fault) => {
+                self.closed = true;
+                return Err(fault);
+            }
+        };
+
+        let input_lock_ticks = events
+            .last()
+            .map_or(0, |event| event.presentation_tick)
+            .saturating_add(POST_ACTION_LOCK_TICKS);
+        let post_state_hash = post_snapshot.authoritative_state_hash.clone();
+        let transition = MatchTransition {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: timeout.action_id.clone(),
+            disposition: TransitionDisposition::Accepted,
+            rejection_reason: None,
+            pre_snapshot_generation: self.generation,
+            post_snapshot_generation: post_generation,
+            presentation_tick_rate: FIXED_TICK_RATE,
+            input_lock_ticks,
+            events,
+            post_snapshot,
+            post_state_hash,
+        };
+
+        self.record_and_commit(
+            LedgerRequest::Authority(timeout),
+            digest,
+            transition,
+            Some(working_host),
+            post_generation,
+        )
+    }
+
+    fn record_authority_rejection(
+        &mut self,
+        timeout: AuthorityTimeout,
+        digest: String,
+        rejection: TransitionRejection,
+    ) -> Result<MatchTransition, SessionFault> {
+        let transition = self.current_rejection(&timeout.action_id, rejection);
+        self.record_and_commit(
+            LedgerRequest::Authority(timeout),
+            digest,
+            transition,
+            None,
+            self.generation,
         )
     }
 
@@ -1736,12 +2000,18 @@ impl MatchSessionHost {
         rejection: TransitionRejection,
     ) -> Result<MatchTransition, SessionFault> {
         let transition = self.current_rejection(&command.command_id, rejection);
-        self.record_and_commit(command, digest, transition, None, self.generation)
+        self.record_and_commit(
+            LedgerRequest::Client(command),
+            digest,
+            transition,
+            None,
+            self.generation,
+        )
     }
 
     fn record_and_commit(
         &mut self,
-        command: MatchCommand,
+        request: LedgerRequest,
         canonical_digest: String,
         transition: MatchTransition,
         working_host: Option<MatchHost>,
@@ -1749,7 +2019,7 @@ impl MatchSessionHost {
     ) -> Result<MatchTransition, SessionFault> {
         use std::collections::btree_map::Entry;
 
-        let Some(entry_bytes) = retained_ledger_entry_bytes(&command, &transition) else {
+        let Some(entry_bytes) = retained_ledger_entry_bytes(&request, &transition) else {
             self.closed = true;
             return Err(SessionFault::ResourceLimit);
         };
@@ -1762,12 +2032,15 @@ impl MatchSessionHost {
             return Err(SessionFault::ResourceLimit);
         }
 
-        let key = command.command_id.clone();
+        let key = match &request {
+            LedgerRequest::Client(command) => command.command_id.clone(),
+            LedgerRequest::Authority(timeout) => timeout.action_id.clone(),
+        };
         let retained_transition = transition.clone();
         match self.ledger.entry(key) {
             Entry::Vacant(slot) => {
                 slot.insert(LedgerEntry {
-                    command,
+                    request,
                     canonical_digest,
                     transition: retained_transition,
                 });
@@ -1843,6 +2116,48 @@ fn apply_to_working_host(
             host.pass_turn()?;
             Ok(AppliedCommand::Accepted(None))
         }
+    }
+}
+
+/// Whether the authoritative state refuses this timeout outright.
+///
+/// Mirrors [`preflight_rejection`] rather than reusing it, because a timeout is not a
+/// `MatchCommand` and must not be made into one just to share a check. The rules are the same
+/// in substance: the named player must still be the one on the clock.
+fn authority_timeout_rejection(
+    state: &SimulationState,
+    timeout: &AuthorityTimeout,
+) -> Option<CommandRejection> {
+    if timeout.expected_turn_number != state.turn_number {
+        return Some(CommandRejection::TurnVersionMismatch);
+    }
+    // A deadline that expired for one player must never end a different player's turn, which
+    // is exactly what a timeout raced against a handover would otherwise do.
+    if timeout.player_id != state.active_player_id {
+        return Some(CommandRejection::NotActivePlayer);
+    }
+    if state
+        .player(&timeout.player_id)
+        .is_none_or(crate::types::PlayerState::is_eliminated)
+    {
+        return Some(CommandRejection::PlayerEliminated);
+    }
+    (!state.phase.accepts_ability_command()).then_some(CommandRejection::WrongPhase)
+}
+
+/// Projects a timeout onto the shape `derive_events` reads for non-ability commands.
+///
+/// `derive_events` only inspects `kind` to decide whether to walk an ability's traces, and a
+/// timeout has none. Building this locally keeps `MatchCommandKind` free of a timeout variant,
+/// which is the property that stops a client from ever selecting one.
+fn timeout_as_pass(timeout: &AuthorityTimeout) -> MatchCommand {
+    MatchCommand {
+        schema_version: timeout.schema_version,
+        command_id: timeout.action_id.clone(),
+        player_id: timeout.player_id.clone(),
+        expected_turn_number: timeout.expected_turn_number,
+        expected_snapshot_generation: timeout.expected_snapshot_generation,
+        kind: MatchCommandKind::Pass,
     }
 }
 
@@ -2864,8 +3179,11 @@ mod tests {
         assert_eq!(session.ledger_len(), 1);
         assert_eq!(
             session.ledger_bytes(),
-            retained_ledger_entry_bytes(&retained_command, &transition)
-                .expect("fixture entry must be countable"),
+            retained_ledger_entry_bytes(
+                &LedgerRequest::Client(retained_command.clone()),
+                &transition
+            )
+            .expect("fixture entry must be countable"),
         );
     }
 
@@ -2937,8 +3255,11 @@ mod tests {
         assert_eq!(session.ledger_len(), 1);
         assert_eq!(
             session.ledger_bytes(),
-            retained_ledger_entry_bytes(&original_command, &original)
-                .expect("fixture entry must be countable"),
+            retained_ledger_entry_bytes(
+                &LedgerRequest::Client(original_command.clone()),
+                &original
+            )
+            .expect("fixture entry must be countable"),
         );
     }
 
@@ -2952,8 +3273,9 @@ mod tests {
             .expect("staleness is a domain rejection");
         assert_eq!(first.disposition, TransitionDisposition::Rejected);
         assert_eq!(first.post_snapshot_generation, 0);
-        let rejected_entry_bytes = retained_ledger_entry_bytes(&stale, &first)
-            .expect("rejected fixture entry must be countable");
+        let rejected_entry_bytes =
+            retained_ledger_entry_bytes(&LedgerRequest::Client(stale.clone()), &first)
+                .expect("rejected fixture entry must be countable");
         assert_eq!(session.ledger_bytes(), rejected_entry_bytes);
 
         let valid_pass = pass_command(&session, "advance-after-rejection");
@@ -3039,8 +3361,11 @@ mod tests {
         let probe_transition = probe
             .apply(probe_command.clone())
             .expect("probe command must resolve");
-        let entry_bytes = retained_ledger_entry_bytes(&probe_command, &probe_transition)
-            .expect("fixture entry must be countable");
+        let entry_bytes = retained_ledger_entry_bytes(
+            &LedgerRequest::Client(probe_command.clone()),
+            &probe_transition,
+        )
+        .expect("fixture entry must be countable");
 
         let exact_host = create_match(&duel()).expect("fixture host must start");
         let mut exact = MatchSessionHost::with_ledger_limits(
@@ -3809,5 +4134,339 @@ mod object_lifecycle_tests {
             );
             assert_eq!(cause.wire_name(), "detonated");
         }
+    }
+}
+
+/// The authority-only timeout path.
+///
+/// The property these exist to protect is that a client can never end a turn by claiming time
+/// ran out — its own turn or anyone else's. That is enforced structurally: timeout is not a
+/// [`MatchCommandKind`] variant, so no decoded client command can select it. These tests cover
+/// what a structural guarantee cannot: that the authority path itself is bounded, idempotent,
+/// and refuses the races a real clock will produce.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod authority_timeout_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig};
+    use crate::types::{Appearance, TurnEndReason};
+
+    fn duel() -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-local-player".to_owned(),
+                    team: 0,
+                    character_id: "zeke".to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-local-bot".to_owned(),
+                    team: 1,
+                    character_id: "huck".to_owned(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    fn timeout_for(session: &MatchSessionHost, action_id: &str) -> AuthorityTimeout {
+        AuthorityTimeout {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            action_id: action_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+        }
+    }
+
+    fn pass_for(session: &MatchSessionHost, command_id: &str) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: command_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind: MatchCommandKind::Pass,
+        }
+    }
+
+    #[test]
+    fn a_timeout_ends_the_active_turn_and_records_why() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let first = session.host().active_player().to_owned();
+        let timeout = timeout_for(&session, "deadline-1");
+
+        let transition = session
+            .apply_authority_timeout(timeout)
+            .expect("a well-formed timeout must be accepted");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_eq!(transition.post_snapshot_generation, 1);
+        assert_ne!(
+            session.host().active_player(),
+            first,
+            "the turn must actually hand over",
+        );
+        // A timeout must stay distinguishable from a pass downstream: the result panel and
+        // the turn-timeout metric both read this, and conflating them was `todolist.md` P11.
+        assert_eq!(
+            session.host().state().last_turn_end_reason,
+            TurnEndReason::TimedOut,
+        );
+    }
+
+    #[test]
+    fn a_retried_timeout_replays_instead_of_ending_a_second_turn() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let timeout = timeout_for(&session, "deadline-1");
+        let first = session
+            .apply_authority_timeout(timeout.clone())
+            .expect("first delivery must be accepted");
+        let turn_after_first = session.host().state().turn_number;
+
+        let replay = session
+            .apply_authority_timeout(timeout)
+            .expect("a retry must be answered, not faulted");
+
+        assert_eq!(replay.disposition, TransitionDisposition::DuplicateReplay);
+        assert_eq!(
+            replay.post_snapshot_generation,
+            first.post_snapshot_generation
+        );
+        assert_eq!(
+            session.host().state().turn_number,
+            turn_after_first,
+            "a redelivered timeout must not burn a second turn",
+        );
+    }
+
+    #[test]
+    fn a_timeout_naming_a_player_who_is_no_longer_active_is_refused() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let stale = AuthorityTimeout {
+            player_id: "b-local-bot".to_owned(),
+            ..timeout_for(&session, "deadline-1")
+        };
+        assert_ne!(
+            session.host().active_player(),
+            "b-local-bot",
+            "fixture must name the player who is not on the clock",
+        );
+        let before = session.host().state().turn_number;
+
+        let transition = session
+            .apply_authority_timeout(stale)
+            .expect("a losing race is a refusal, not an error");
+
+        // The real failure this prevents: a deadline that expired for one player arriving
+        // after the turn already handed over, and ending the innocent player's turn instead.
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::Core(CommandRejection::NotActivePlayer)),
+        );
+        assert_eq!(session.host().state().turn_number, before);
+    }
+
+    #[test]
+    fn a_timeout_against_a_stale_generation_is_refused_without_mutating() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let stale = AuthorityTimeout {
+            expected_snapshot_generation: session.generation().saturating_add(7),
+            ..timeout_for(&session, "deadline-1")
+        };
+        let before_hash = session.snapshot().authoritative_state_hash.clone();
+
+        let transition = session
+            .apply_authority_timeout(stale)
+            .expect("a stale generation is a refusal");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            session.generation(),
+            0,
+            "a refusal must not bump generation"
+        );
+        assert_eq!(
+            session.snapshot().authoritative_state_hash,
+            before_hash,
+            "a refused timeout must leave authoritative state untouched",
+        );
+    }
+
+    #[test]
+    fn a_timeout_for_the_wrong_turn_number_is_refused() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let stale = AuthorityTimeout {
+            expected_turn_number: session.host().state().turn_number.saturating_add(3),
+            ..timeout_for(&session, "deadline-1")
+        };
+
+        let transition = session
+            .apply_authority_timeout(stale)
+            .expect("a stale turn number is a refusal");
+
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::Core(
+                CommandRejection::TurnVersionMismatch
+            )),
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_reuse_an_authority_action_id_to_obtain_its_slot() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        session
+            .apply_authority_timeout(timeout_for(&session, "shared-id"))
+            .expect("timeout must be accepted");
+
+        // The client now sends a command under the identifier the authority already used.
+        // Answering it with the timeout's recorded transition would let a client learn — and
+        // replay — an authority result it never authored, so this must conflict.
+        let command = pass_for(&session, "shared-id");
+        let transition = session.apply(command).expect("the collision is answerable");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::CommandIdConflict),
+        );
+        assert!(
+            transition
+                .rejection_reason
+                .is_some_and(|r| r.is_security_event()),
+            "an id collision across the authority boundary is security telemetry",
+        );
+    }
+
+    #[test]
+    fn an_authority_action_cannot_reuse_a_client_command_id_either() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        session
+            .apply(pass_for(&session, "shared-id"))
+            .expect("pass must be accepted");
+
+        let transition = session
+            .apply_authority_timeout(timeout_for(&session, "shared-id"))
+            .expect("the collision is answerable");
+
+        // Symmetric to the test above. One identifier space means one owner per identifier,
+        // whichever side claimed it first.
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::CommandIdConflict),
+        );
+    }
+
+    #[test]
+    fn two_different_timeouts_sharing_an_id_conflict_rather_than_replay() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        session
+            .apply_authority_timeout(timeout_for(&session, "deadline-1"))
+            .expect("first timeout must be accepted");
+
+        // Same id, different content. Replaying the first would let a later, differently
+        // scoped deadline silently inherit an earlier one's answer.
+        let different = AuthorityTimeout {
+            expected_turn_number: 99,
+            ..timeout_for(&session, "deadline-1")
+        };
+        let transition = session
+            .apply_authority_timeout(different)
+            .expect("the collision is answerable");
+
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::CommandIdConflict),
+        );
+    }
+
+    #[test]
+    fn a_malformed_authority_action_is_a_fault_rather_than_a_refusal() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+
+        let bad_schema = AuthorityTimeout {
+            schema_version: CLIENT_CONTRACT_VERSION.saturating_add(1),
+            ..timeout_for(&session, "deadline-1")
+        };
+        assert_eq!(
+            session.apply_authority_timeout(bad_schema),
+            Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: CLIENT_CONTRACT_VERSION.saturating_add(1),
+            }),
+        );
+
+        let bad_id = AuthorityTimeout {
+            action_id: "not a valid id".to_owned(),
+            ..timeout_for(&session, "deadline-1")
+        };
+        assert_eq!(
+            session.apply_authority_timeout(bad_id),
+            Err(SessionFault::InvalidCommand { field: "action_id" }),
+        );
+
+        // A malformed action is the authority's own bug, not a gameplay outcome, so it must
+        // never be recorded as a refusal a client could observe and replay.
+        assert_eq!(session.ledger_len(), 0);
+    }
+
+    #[test]
+    fn the_authority_action_encoding_is_frozen() {
+        let timeout = AuthorityTimeout {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            action_id: "deadline-1".to_owned(),
+            player_id: "a-local-player".to_owned(),
+            expected_turn_number: 1,
+            expected_snapshot_generation: 0,
+        };
+
+        // Frozen 2026-08-25. The ledger compares digests to decide whether a redelivered
+        // action is the same action, so the encoding is a compatibility surface: silently
+        // changing it would make previously recorded entries unrecognizable and turn replays
+        // into conflicts. Changing this value is a deliberate act that needs the same
+        // treatment as a golden-vector regeneration — a documented reason and a version bump.
+        //
+        // This also pins the `0x21` domain separator, which
+        // `a_timeout_and_a_command_with_identical_fields_never_share_a_digest` does not: that
+        // test passes even with a colliding tag, because a `MatchCommand` additionally
+        // encodes its `kind`. Only a frozen value catches a change to the tag itself.
+        assert_eq!(timeout.canonical_digest(), "8cac07183828cf43");
+    }
+
+    #[test]
+    fn a_timeout_and_a_command_with_identical_fields_never_share_a_digest() {
+        let session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let timeout = timeout_for(&session, "same-id");
+        let command = pass_for(&session, "same-id");
+
+        // Both carry the same schema, id, player, turn, and generation, and must still
+        // digest differently. Note this holds even if the two domain tags collided, because a
+        // `MatchCommand` also encodes its `kind` — so this asserts the property, while
+        // `the_authority_action_encoding_is_frozen` is what actually pins the tag.
+        assert_eq!(timeout.action_id, command.command_id);
+        assert_eq!(timeout.player_id, command.player_id);
+        assert_ne!(
+            timeout.canonical_digest(),
+            command.canonical_digest(),
+            "an authority action must never digest identically to a client command",
+        );
+    }
+
+    #[test]
+    fn a_closed_session_refuses_the_authority_path_too() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        // Set directly: the session closes itself on a fault, and no public opener exists.
+        session.closed = true;
+        assert_eq!(
+            session.apply_authority_timeout(timeout_for(&session, "deadline-1")),
+            Err(SessionFault::Closed),
+        );
     }
 }

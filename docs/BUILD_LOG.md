@@ -1388,3 +1388,98 @@ cannot supply one record stream without the others and leave the event stream ha
 `PersistentObjectRemovalCause::Expired` and `Destroyed` are defined but never produced: no
 scheduler-owned object-lifetime tick and no object targeting or damage exist yet. Both are marked
 reserved in their doc comments. C1 steps 3 through 8 remain untouched.
+
+---
+
+## C1 step 3 — authority-only turn timeout
+
+`MatchSessionHost::apply_authority_timeout` is the session entry point for a turn ended because
+the server's planning deadline expired. `MatchHost::time_out_turn` already existed; nothing at the
+session boundary could reach it.
+
+### The security property, and why it is structural
+
+The requirement is that a remote client must never be able to end a turn — its own or anyone
+else's — by claiming time ran out. The obvious implementation is a `MatchCommandKind::Timeout`
+variant refused by validation. That was rejected.
+
+A client does not construct Rust values; it sends bytes that a decoder turns into a
+`MatchCommand`. If the variant exists, the guarantee rests on a runtime check that one decoding
+bug can bypass. So timeout is **not** a `MatchCommandKind` variant at all. It is a separate
+`AuthorityTimeout` type reached through a separate method, and no client-decodable byte sequence
+produces it. An absent variant cannot be bypassed.
+
+### One ledger, one identifier space
+
+The timeout still travels through the same session ledger. `LedgerEntry` now holds a
+`LedgerRequest::{Client, Authority}` rather than a bare `MatchCommand`.
+
+Two ledgers would have been simpler and wrong: a client could pick an identifier an authority
+action already used and receive a different answer than the one the authority recorded. Sharing
+the space means whoever claims an id owns it, and the other side gets `CommandIdConflict` — which
+`is_security_event()` already reports as telemetry. The entry and byte bounds also stay global
+rather than becoming two independently exhaustible budgets.
+
+`AuthorityTimeout` carries domain separator `0x21` against the client command's `0x20`, so the two
+cannot digest identically.
+
+### Validation
+
+`authority_timeout_rejection` mirrors `preflight_rejection` rather than reusing it, since a
+timeout is not a `MatchCommand` and must not be converted into one merely to share a check.
+
+The load-bearing rule is that `player_id` is **required and validated against the active player**.
+A deadline expires for a specific player; without this, a timeout arriving just after a turn handed
+over would end an innocent player's turn instead. That is the race a real clock produces, and it is
+refused rather than absorbed.
+
+A timeout arriving while a passive choice is owed is reported as a refusal, not a fault: the
+interrupt may have been raised by the very action that preceded the deadline, so it is a
+legitimate race. The working host is discarded unexamined.
+
+### Evidence
+
+Twelve tests; 498 passing, up from 486. Beyond the accept path they cover: a retried timeout
+replaying instead of burning a second turn; a timeout naming a non-active player refused with
+`NotActivePlayer`; stale generation and stale turn number refused without mutating the state hash;
+a client command reusing an authority id conflicting rather than inheriting its recorded answer,
+and the symmetric case; two different timeouts sharing an id conflicting rather than replaying; a
+malformed action faulting without leaving a ledger entry a client could observe; and a closed
+session refusing the authority path.
+
+Mutation-checked. Removing the active-player check fails the race test. Letting a client id replay
+an authority entry fails the collision test.
+
+**A third mutation initially passed, and the test was wrong.** Changing the domain separator from
+`0x21` to `0x20` did not fail `a_timeout_and_a_command_with_identical_fields_never_share_a_digest`,
+because a `MatchCommand` additionally encodes its `kind` — the digests differed for an incidental
+reason, not the one the comment claimed. The test asserted a true property while proving nothing
+about the separator.
+
+Added `the_authority_action_encoding_is_frozen`, pinning the exact digest `8cac07183828cf43`, which
+does fail under that mutation. The ledger compares digests to decide whether a redelivered action
+is the same action, so the encoding is a compatibility surface: changing it silently would make
+recorded entries unrecognizable and turn replays into conflicts. Treat a change to that value like
+a golden-vector regeneration. The weaker test was kept, with its comment corrected to say what it
+does and does not establish.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 498 pass, 0 fail (was 486) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `betterleaks git` (full history) | no leaks |
+| `git diff --check` | clean |
+
+Golden vectors unchanged and `SIMULATION_VERSION` stays at 5: the timeout drives the existing
+`MatchHost::time_out_turn`, adding a session entry point rather than new simulation behaviour.
+
+### Still open
+
+Steps 4 through 8: the read-only preview DTO, restore semantics requiring host plus a verified
+complete ledger, the composite session/ABI envelope and remaining §20.1 fixtures, then C2 and C3.

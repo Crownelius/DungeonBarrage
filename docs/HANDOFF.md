@@ -181,7 +181,7 @@ entire repository merely to silence Git's “LF will be replaced by CRLF” noti
 - `CommandOutcome` still does not retain exact object removal causes, and has no
   `objects_removed` counterpart to `objects_created`. `match_session.rs` labels those net changes
   honestly and does not invent them.
-- Authority-generated timeout has no `MatchTransition` session entry point yet.
+- ~~Authority-generated timeout has no session entry point~~ — added; see §6 step 3.
 - No read-only authoritative trajectory preview contract exists.
 - Match ID, ABI/envelope version, clocks, and serialized terrain bytes remain adapter metadata.
 - Duplicate replay deliberately contains the original (possibly old) post-snapshot. It is an
@@ -226,8 +226,14 @@ Continue C1; do not begin C2 or Godot UI yet.
    duration-one status, object lifecycle, block/terrain, elimination, passive selection/chosen,
    pass, timeout, and victory. Keep ordering deterministic and version the client contract if
    released semantics change.
-3. Add an authority-only timeout method to `MatchSessionHost`. A remote client command must never be
-   able to select timeout.
+3. ~~Add an authority-only timeout method to `MatchSessionHost`~~ — **done.**
+   `apply_authority_timeout` takes an `AuthorityTimeout`, which is deliberately **not** a
+   `MatchCommandKind` variant. A client sends bytes that a decoder turns into a `MatchCommand`, so
+   an absent variant is a stronger guarantee than a validation rule that one decoding bug could
+   bypass. It shares the single ledger and identifier space via
+   `LedgerRequest::{Client, Authority}`, so an id claimed by either side conflicts for the other
+   rather than replaying its answer. `player_id` is required and validated against the active
+   player, so a deadline racing a turn handover cannot end an innocent player's turn.
 4. Add the read-only preview DTO/path with stale-generation refusal and no mutation/RNG consumption.
 5. Add restore semantics that require host plus the complete ledger and its verified byte count.
    Never expose public `from_host(host)` with an empty ledger.
