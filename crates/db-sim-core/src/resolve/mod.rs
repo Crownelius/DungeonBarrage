@@ -35,7 +35,8 @@ use crate::error::SimResult;
 use crate::fixed::FixedPoint;
 use crate::rng::Rng;
 use crate::types::{
-    DamageEvent, EffectKind, PersistentObject, SimulationState, SpecialEffect, TerrainOperation,
+    DamageEvent, EffectKind, PersistentObjectChange, SimulationState, SpecialEffect, StatusChange,
+    StrikeResolution, TerrainOperation,
 };
 use std::collections::BTreeMap;
 
@@ -62,8 +63,8 @@ pub struct ResolveContext<'a> {
     pub damage: &'a mut BTreeMap<String, DamageEvent>,
     /// Terrain mutations produced by this action, in sequence order.
     pub terrain_ops: &'a mut Vec<TerrainOperation>,
-    /// Persistent objects created by this action.
-    pub objects_created: &'a mut Vec<PersistentObject>,
+    /// Persistent-object lifecycle transitions produced by this action, in exact order.
+    pub object_changes: &'a mut Vec<PersistentObjectChange>,
     /// Terrain cells removed by this action, accumulated across every
     /// `terrain::apply_operation` call any resolver makes. Seeded by
     /// `command.rs::apply_ability` from the primary attack's own terrain removal and
@@ -72,6 +73,13 @@ pub struct ResolveContext<'a> {
     /// `todolist.md` P2). A resolver that calls `terrain::apply_operation` must add the
     /// returned count here rather than discarding it with `let _removed = …`.
     pub terrain_cells_removed: &'a mut u32,
+    /// Status lifecycle transitions produced by this action, in the order they happened.
+    ///
+    /// Recorded where the transition occurs, never diffed from the final status list: a
+    /// status applied and expired within one turn, or a charge-based status decremented
+    /// several times by one multi-strike ability, leaves no observable trace in a pre/post
+    /// comparison.
+    pub status_changes: &'a mut Vec<StatusChange>,
 }
 
 impl ResolveContext<'_> {
@@ -138,38 +146,52 @@ impl ResolveContext<'_> {
 ///
 /// Returns [`crate::error::SimError`] when an effect's parameters are out of range or a
 /// fixed-point computation would overflow. A resolver never panics on hostile input.
-pub fn resolve_effect(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResult<()> {
+pub fn resolve_effect(
+    ctx: &mut ResolveContext<'_>,
+    effect: &SpecialEffect,
+) -> SimResult<Vec<StrikeResolution>> {
     match effect.kind {
         EffectKind::Knockback
         | EffectKind::Push
         | EffectKind::Pull
         | EffectKind::Recoil
-        | EffectKind::WallImpact => displacement::resolve(ctx, effect),
+        | EffectKind::WallImpact => {
+            displacement::resolve(ctx, effect)?;
+            Ok(Vec::new())
+        }
 
         EffectKind::Teleport | EffectKind::Relocate | EffectKind::Obscure => {
-            relocation::resolve(ctx, effect)
+            relocation::resolve(ctx, effect)?;
+            Ok(Vec::new())
         }
 
         EffectKind::SpawnTurret | EffectKind::EmbedProjectile | EffectKind::ChainDetonate => {
-            objects::resolve(ctx, effect)
+            objects::resolve(ctx, effect)?;
+            Ok(Vec::new())
         }
 
         EffectKind::Chill | EffectKind::Lockdown | EffectKind::Embers => {
-            status::resolve(ctx, effect)
+            status::resolve(ctx, effect)?;
+            Ok(Vec::new())
         }
 
-        EffectKind::MultiStrike
-        | EffectKind::GuaranteeCrit
+        EffectKind::MultiStrike => attack_mods::resolve_multi_strike_with_records(ctx, effect),
+
+        EffectKind::GuaranteeCrit
         | EffectKind::Cluster
         | EffectKind::Return
-        | EffectKind::Tunnel => attack_mods::resolve(ctx, effect),
+        | EffectKind::Tunnel => {
+            attack_mods::resolve(ctx, effect)?;
+            Ok(Vec::new())
+        }
 
         // Formerly resolved inline inside `command.rs`, with this arm routed to a silent
         // `Ok(())` — two resolution paths for one concept, and precisely the shape of bug
         // that left the other 19 kinds inert. `command.rs` no longer resolves these three
         // itself; `resolve::support` is now the only place they resolve (`todolist.md` P1).
         EffectKind::Heal | EffectKind::HealthTransfer | EffectKind::SelfDamage => {
-            support::resolve(ctx, effect)
+            support::resolve(ctx, effect)?;
+            Ok(Vec::new())
         }
     }
 }

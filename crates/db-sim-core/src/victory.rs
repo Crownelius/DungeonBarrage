@@ -26,7 +26,10 @@
 //! there.
 
 use crate::error::SimResult;
-use crate::types::{MatchOutcome, MatchPhase, PersistentObject, SimulationState};
+use crate::types::{
+    MatchOutcome, MatchPhase, PersistentObject, PersistentObjectChange,
+    PersistentObjectRemovalCause, PersistentObjectTransition, SimulationState,
+};
 
 /// Evaluates the current match state and reports whether it has ended.
 ///
@@ -70,10 +73,15 @@ pub fn living_teams(state: &SimulationState) -> Vec<u8> {
 /// Eliminates `player_id`: sets health to zero and removes every persistent object they
 /// own.
 ///
+/// Every owned-object removal is appended to `object_changes` at this producer, in the
+/// objects' existing sequence order, with the complete last authoritative object snapshot.
+/// A consumer must never reconstruct these removals from final state.
+///
 /// Idempotent. Eliminating an already-dead player changes nothing and is not an error — a
 /// simultaneous-elimination effect (backlash plus a lethal counter-hit) may call this twice
-/// for the same player in one resolution, and the second call must be a harmless no-op
-/// rather than a double-cleanup or an error the caller has to special-case.
+/// for the same player in one resolution, and the second call must be a harmless no-op that
+/// emits no duplicate lifecycle records rather than a double-cleanup or an error the caller
+/// has to special-case.
 ///
 /// The player entry itself is never removed from `state.players` (see module docs); only
 /// `health` changes.
@@ -83,7 +91,11 @@ pub fn living_teams(state: &SimulationState) -> Vec<u8> {
 /// Returns [`crate::error::SimError::UnknownDefinition`] when `player_id` does not name a
 /// player in `state.players` — eliminating a player who does not exist is a caller bug, not
 /// a normal game event, so it is reported rather than silently ignored.
-pub fn eliminate(state: &mut SimulationState, player_id: &str) -> SimResult<()> {
+pub fn eliminate(
+    state: &mut SimulationState,
+    player_id: &str,
+    object_changes: &mut Vec<PersistentObjectChange>,
+) -> SimResult<()> {
     let Some(player) = state.player_mut(player_id) else {
         return Err(crate::error::SimError::UnknownDefinition);
     };
@@ -97,17 +109,35 @@ pub fn eliminate(state: &mut SimulationState, player_id: &str) -> SimResult<()> 
     // acting. Iterate in `sequence` order — `state.objects` is documented as kept sorted by
     // it — and `retain` preserves that order in the survivors, so this never needs to
     // re-sort afterward.
-    remove_owned_objects(&mut state.objects, player_id);
+    remove_owned_objects(&mut state.objects, player_id, object_changes);
 
     Ok(())
 }
 
-/// Removes every object owned by `player_id` from `objects`, in place.
+/// Removes every object owned by `player_id` from `objects`, in place, and appends one
+/// producer-owned lifecycle record per removal.
 ///
 /// Split out from [`eliminate`] so the ordering guarantee — sequence order preserved,
-/// because `retain` never reorders survivors — is documented and tested on its own.
-fn remove_owned_objects(objects: &mut Vec<PersistentObject>, player_id: &str) {
+/// because both collection and `retain` walk the already-sorted vector in order — is
+/// documented and tested on its own. Existing records in `object_changes` are preserved;
+/// this producer only appends what it did.
+fn remove_owned_objects(
+    objects: &mut Vec<PersistentObject>,
+    player_id: &str,
+    object_changes: &mut Vec<PersistentObjectChange>,
+) {
+    let removed: Vec<PersistentObject> = objects
+        .iter()
+        .filter(|object| object.owner_id == player_id)
+        .cloned()
+        .collect();
     objects.retain(|object| object.owner_id != player_id);
+    object_changes.extend(removed.into_iter().map(|object| PersistentObjectChange {
+        object,
+        transition: PersistentObjectTransition::Removed {
+            cause: PersistentObjectRemovalCause::OwnerEliminated,
+        },
+    }));
 }
 
 /// Evaluates the match and, on a terminal outcome, sets `state.phase` to
@@ -218,8 +248,10 @@ mod tests {
             player("a2", 0, 150),
             player("b1", 1, 200),
         ]);
-        assert!(eliminate(&mut state, "a1").is_ok());
-        assert!(eliminate(&mut state, "a2").is_ok());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "a1", &mut object_changes).is_ok());
+        assert!(eliminate(&mut state, "a2", &mut object_changes).is_ok());
+        assert!(object_changes.is_empty());
 
         assert_eq!(evaluate(&state), MatchOutcome::Victory { team: 1 });
     }
@@ -227,8 +259,10 @@ mod tests {
     #[test]
     fn wiping_every_team_yields_draw_not_in_progress() {
         let mut state = base_state(vec![player("a", 0, 200), player("b", 1, 200)]);
-        assert!(eliminate(&mut state, "a").is_ok());
-        assert!(eliminate(&mut state, "b").is_ok());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "a", &mut object_changes).is_ok());
+        assert!(eliminate(&mut state, "b", &mut object_changes).is_ok());
+        assert!(object_changes.is_empty());
 
         assert_eq!(
             evaluate(&state),
@@ -251,7 +285,9 @@ mod tests {
             player("b", 1, 200),
             player("c", 2, 200),
         ]);
-        assert!(eliminate(&mut state, "c").is_ok());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "c", &mut object_changes).is_ok());
+        assert!(object_changes.is_empty());
         assert_eq!(evaluate(&state), MatchOutcome::InProgress);
         assert_eq!(living_teams(&state), vec![0, 1]);
     }
@@ -263,7 +299,9 @@ mod tests {
     #[test]
     fn eliminate_zeroes_health_but_keeps_the_player_in_state() {
         let mut state = base_state(vec![player("a", 0, 200)]);
-        assert!(eliminate(&mut state, "a").is_ok());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "a", &mut object_changes).is_ok());
+        assert!(object_changes.is_empty());
 
         let Some(found) = state.player("a") else {
             panic!("eliminated player must remain in state.players")
@@ -279,64 +317,107 @@ mod tests {
     #[test]
     fn eliminate_twice_is_a_no_op_the_second_time() {
         let mut state = base_state(vec![player("a", 0, 200)]);
-        assert!(eliminate(&mut state, "a").is_ok());
-        assert!(eliminate(&mut state, "a").is_ok());
+        let owned = object(0, "a", PersistentObjectKind::Turret);
+        state.objects.push(owned.clone());
+        let mut object_changes = Vec::new();
+
+        assert!(eliminate(&mut state, "a", &mut object_changes).is_ok());
+        let after_first = object_changes.clone();
+        assert!(eliminate(&mut state, "a", &mut object_changes).is_ok());
 
         let Some(found) = state.player("a") else {
             panic!("player must still be present")
         };
         assert_eq!(found.health, 0);
         assert_eq!(state.players.len(), 1);
+        assert!(state.objects.is_empty());
+        assert_eq!(
+            after_first,
+            vec![PersistentObjectChange {
+                object: owned,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::OwnerEliminated,
+                },
+            }]
+        );
+        assert_eq!(
+            object_changes, after_first,
+            "the second elimination must not emit a duplicate removal"
+        );
     }
 
     #[test]
     fn eliminate_unknown_player_is_an_error() {
         let mut state = base_state(vec![player("a", 0, 200)]);
-        assert!(eliminate(&mut state, "nobody").is_err());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "nobody", &mut object_changes).is_err());
+        assert!(object_changes.is_empty());
     }
 
     #[test]
     fn eliminate_removes_the_dead_players_turret() {
         let mut state = base_state(vec![player("emi", 0, 200), player("foe", 1, 200)]);
-        state
-            .objects
-            .push(object(0, "emi", PersistentObjectKind::Turret));
-        state
-            .objects
-            .push(object(1, "foe", PersistentObjectKind::Turret));
+        let owned = object(0, "emi", PersistentObjectKind::Turret);
+        let other_owner = object(1, "foe", PersistentObjectKind::Turret);
+        state.objects.extend([owned.clone(), other_owner.clone()]);
+        let mut object_changes = Vec::new();
 
-        assert!(eliminate(&mut state, "emi").is_ok());
+        assert!(eliminate(&mut state, "emi", &mut object_changes).is_ok());
 
-        assert!(
-            !state.objects.iter().any(|object| object.owner_id == "emi"),
-            "a dead player's turret must not remain to keep shooting"
+        assert_eq!(
+            state.objects,
+            vec![other_owner],
+            "another player's exact object must be untouched"
         );
-        assert!(
-            state.objects.iter().any(|object| object.owner_id == "foe"),
-            "another player's objects are untouched"
+        assert_eq!(
+            object_changes,
+            vec![PersistentObjectChange {
+                object: owned,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::OwnerEliminated,
+                },
+            }],
+            "the producer must retain the complete removed-object snapshot"
         );
     }
 
     #[test]
     fn eliminate_removes_multiple_owned_objects_preserving_sequence_order() {
         let mut state = base_state(vec![player("aleph", 0, 200)]);
-        state
-            .objects
-            .push(object(0, "aleph", PersistentObjectKind::EmbeddedKnife));
-        state
-            .objects
-            .push(object(1, "other", PersistentObjectKind::Turret));
-        state
-            .objects
-            .push(object(2, "aleph", PersistentObjectKind::EmbeddedKnife));
+        let first_owned = object(0, "aleph", PersistentObjectKind::EmbeddedKnife);
+        let other_owner = object(1, "other", PersistentObjectKind::Turret);
+        let second_owned = object(2, "aleph", PersistentObjectKind::EmbeddedKnife);
+        state.objects.extend([
+            first_owned.clone(),
+            other_owner.clone(),
+            second_owned.clone(),
+        ]);
+        let mut object_changes = Vec::new();
 
-        assert!(eliminate(&mut state, "aleph").is_ok());
+        assert!(eliminate(&mut state, "aleph", &mut object_changes).is_ok());
 
-        let remaining: Vec<u32> = state.objects.iter().map(|object| object.sequence).collect();
         assert_eq!(
-            remaining,
-            vec![1],
-            "only the surviving owner's object remains, sequence order intact"
+            state.objects,
+            vec![other_owner],
+            "only the surviving owner's exact object remains"
+        );
+        assert_eq!(
+            object_changes,
+            vec![
+                PersistentObjectChange {
+                    object: first_owned,
+                    transition: PersistentObjectTransition::Removed {
+                        cause: PersistentObjectRemovalCause::OwnerEliminated,
+                    },
+                },
+                PersistentObjectChange {
+                    object: second_owned,
+                    transition: PersistentObjectTransition::Removed {
+                        cause: PersistentObjectRemovalCause::OwnerEliminated,
+                    },
+                },
+            ],
+            "removal snapshots must retain authoritative sequence order"
         );
     }
 
@@ -347,7 +428,9 @@ mod tests {
     #[test]
     fn check_and_finalize_sets_match_complete_on_victory() {
         let mut state = base_state(vec![player("a", 0, 200), player("b", 1, 200)]);
-        assert!(eliminate(&mut state, "b").is_ok());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "b", &mut object_changes).is_ok());
+        assert!(object_changes.is_empty());
         state.phase = MatchPhase::VictoryCheck;
 
         let outcome = check_and_finalize(&mut state);
@@ -358,8 +441,10 @@ mod tests {
     #[test]
     fn check_and_finalize_sets_match_complete_on_draw() {
         let mut state = base_state(vec![player("a", 0, 200), player("b", 1, 200)]);
-        assert!(eliminate(&mut state, "a").is_ok());
-        assert!(eliminate(&mut state, "b").is_ok());
+        let mut object_changes = Vec::new();
+        assert!(eliminate(&mut state, "a", &mut object_changes).is_ok());
+        assert!(eliminate(&mut state, "b", &mut object_changes).is_ok());
+        assert!(object_changes.is_empty());
         state.phase = MatchPhase::VictoryCheck;
 
         let outcome = check_and_finalize(&mut state);

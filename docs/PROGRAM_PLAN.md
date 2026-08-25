@@ -1,7 +1,17 @@
 # Dungeon Barrage program plan
 
-**Status:** Living plan. Updated at each milestone gate.
+**Status:** Historical plan. Current execution gates live in `CLIENT_SPEC.md` §21.
 **Related:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [CHARACTERS.md](./CHARACTERS.md) · [CLIENT_SPEC.md](./CLIENT_SPEC.md) · [PLATFORM_STRATEGY.md](./PLATFORM_STRATEGY.md) · [adr/0001-rust-wasm-core.md](./adr/0001-rust-wasm-core.md) · [adr/0002-character-kits.md](./adr/0002-character-kits.md) · [adr/0003-shared-trig-table.md](./adr/0003-shared-trig-table.md) · [MODULE_OWNERSHIP.md](./MODULE_OWNERSHIP.md)
+
+> **Planning supersession — 2026-08-14.** The historical plan below predates the current
+> implementation and is retained as an engineering record rather than rewritten in place.
+> For current-state planning use [CLIENT_SPEC v2 §3](./CLIENT_SPEC.md#3-truthful-current-state);
+> for the ordered implementation plan use
+> [CLIENT_SPEC v2 §21](./CLIENT_SPEC.md#21-ordered-implementation-milestones). Client/server
+> language and process boundaries are governed by
+> [ADR 0006](./adr/0006-client-and-server-language-boundaries.md): Godot/C# owns presentation,
+> the C ABI is client-only, and the future match server is Rust-native. Where the body below
+> conflicts with those sources, it is superseded.
 
 ## 1. Where the project actually is
 

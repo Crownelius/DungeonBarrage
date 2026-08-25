@@ -411,9 +411,10 @@ fn resolve_wall_impact(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> 
 mod tests {
     use super::*;
     use crate::rng::Rng;
+    use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
-        Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PersistentObject,
+        Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PersistentObjectChange,
         PlayerState, SimulationState, StatusEffect, TerrainMask, TerrainOperation,
     };
     use std::collections::BTreeMap;
@@ -452,7 +453,8 @@ mod tests {
         damage: BTreeMap<String, DamageEvent>,
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
-        objects: Vec<PersistentObject>,
+        object_changes: Vec<PersistentObjectChange>,
+        status_changes: Vec<StatusChange>,
     }
 
     impl Harness {
@@ -485,7 +487,8 @@ mod tests {
                 damage: BTreeMap::new(),
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
-                objects: Vec::new(),
+                object_changes: Vec::new(),
+                status_changes: Vec::new(),
             }
         }
 
@@ -500,7 +503,8 @@ mod tests {
                 damage: &mut self.damage,
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
-                objects_created: &mut self.objects,
+                object_changes: &mut self.object_changes,
+                status_changes: &mut self.status_changes,
             }
         }
 
@@ -792,7 +796,8 @@ mod tests {
             damage: &mut harness.damage,
             terrain_cells_removed: &mut harness.terrain_cells_removed,
             terrain_ops: &mut harness.terrain_ops,
-            objects_created: &mut harness.objects,
+            object_changes: &mut harness.object_changes,
+            status_changes: &mut harness.status_changes,
         };
 
         assert_eq!(

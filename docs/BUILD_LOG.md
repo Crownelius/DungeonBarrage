@@ -857,3 +857,534 @@ What was attempted, what landed, what was learned. Defects go in §4 with a
 back-reference here. Never edit an entry above this line; correct it with a new
 one that points back.
 -->
+
+### 2026-08-14 — Core orchestration closeout recorded after the fact
+
+**Commits:** `ef3c41f`, `41cfd8d`, `9ebaa64`, `4ac6b09`, `fa7f0af`
+
+The append-only log previously stopped before a material sequence that is now part of the
+baseline. `ef3c41f` closed the real P2/P3 gaps: all crater producers route through block health,
+terrain-removal accounting reaches the outcome, blocks live in state and the hash, and authored
+maps populate them. `41cfd8d` added the top-level `MatchHost`; `9ebaa64` added frozen whole-match
+golden vectors and fixed two orchestration defects those vectors exposed; `4ac6b09` fixed turn-end
+reason recording and passive prompting, then deliberately regenerated both vector sets at
+`SIMULATION_VERSION = 4`. `fa7f0af` added the first C# client specification.
+
+This entry corrects the historical record rather than rewriting earlier analysis. In particular,
+the old P2/P3 text in `todolist.md` described genuine unreachable/partial states but was not updated
+after `ef3c41f`; it is now labelled historical and resolved.
+
+### 2026-08-14 — Client stack decision and first C0/C1 prerequisite slice
+
+**Commits:** none — working tree based on `fa7f0af`; still uncommitted at this checkpoint
+
+The client plan was re-evaluated rather than assuming the earlier “native C#” sentence answered the
+whole architecture. C#, Rust, C++, TypeScript, Unity, Godot, MonoGame, Bevy, desktop/web, and future
+server/console implications were separated by responsibility. ADR 0006 records the resulting
+boundary: Godot 4.7.1 .NET and C# for presentation; Rust as the only authoritative gameplay; a
+coarse client-only C ABI for local matches; and a future Rust-native server linking the core
+directly. C# remains the right language at the Godot presentation seam, not for the authoritative
+simulation or server.
+
+The same working slice rewrote `CLIENT_SPEC.md` into ordered evidence gates; pinned .NET 10.0.302
+and Rust 1.94.0; added a toolchain verifier; added validated transport-free match construction and
+an engine-neutral atomic snapshot; preserved every projectile as an independent trace; corrected
+post-host turn/hash reporting and actual gauge deltas; made `MatchHost` cloneable for adapter
+atomicity; prevented pass/timeout from bypassing passive selection; and made the release FFI panic
+containment promise executable under `panic = "unwind"`.
+
+The full Rust workspace, release FFI tests, and release FFI build passed during that slice. The
+toolchain verifier passed Rust/.NET and stopped clearly at the missing Godot 4.7.1 .NET editor. No
+Godot project was created because the C1–C3 contract gates deliberately precede scenes.
+
+### 2026-08-24 — C1 normalized session, transitions, and shared fixture
+
+**Commits:** none — continuation in the same preserved dirty working tree
+
+The next coherent C1 boundary was implemented in `match_session.rs`. `MatchSessionHost` now owns a
+closed normalized `MatchCommand`, deterministic canonical semantic digests, snapshot generation,
+cloned-host application, a retained first-result ledger for accepted and rejected commands,
+duplicate replay, changed-content command-ID security rejection, and atomic `MatchTransition`
+responses. A digest is never trusted alone: exact typed equality is also required. Generation
+increments once only when the candidate authoritative state differs; a legal zero/blocked move is
+accepted and retained without manufacturing a state generation.
+
+Transitions repeat one detached post-snapshot and exact live-host hash. Events preserve independent
+projectile traces and impacts, and deterministically derive net entity movement, health/gauge/status
+changes, block surviving bounds, persistent-object lifecycle, elimination, passive prompts/choice,
+turn end/open, and match completion. Terrain dirty rectangles are exact changed-cell row-runs,
+sorted by row and column. The implementation explicitly labels absent provenance instead of
+inventing it. C1 remains open because current outcomes do not retain exact strike points,
+per-strike/RNG timing, every status lifecycle, or every removal cause.
+
+Review found and fixed a separate host deadlock: movement settling could eliminate the active
+player while leaving that dead actor in `Movement`. `submit_move` now drives the normal
+`Eliminated` turn/victory cycle; tests cover both duel completion and rotation when other teams
+survive.
+
+The first cross-language fixture bundle lives under
+`tests/fixtures/matches/horizontal-test-duel-v1`. Its compact request files are exact UTF-8/LF bytes
+for a real Zeke-vs-Huck match: move one cell, fire one projectile, and hand the turn over. A strict
+direct Rust consumer rejects BOM/CR/noncompact/unsafe paths and closed-schema violations, then
+asserts nonzero movement, independent trace/sample minima, generation changes, event ordering, turn
+handoff, and transition/snapshot/live-host hash equality. Frozen hashes are:
+
+- initial: `a37f45c1af031a47`
+- after move: `f0c78bdd9d2066cf`
+- after ability/final: `194afe5bc5d13818`
+
+Production `db-sim-core` remains dependency-free; serde/serde_json are dev-only for this shared
+fixture test. Full response JSON bytes wait for C2's production FFI serializer rather than blessing
+a test-only imitation as the ABI.
+
+Documentation was reconciled at the same time: ownership now names the C1/C2 seams and the sole FFI
+unsafe exception; P2/P3 are correctly marked resolved; P13 records the active client-boundary gap;
+`CLIENT_SPEC.md` states implemented versus missing provenance; and `HANDOFF.md` contains the exact
+dirty-tree inventory, validation commands, risks, next sequence, and copy-paste Opus prompt.
+
+**Targeted evidence before the final full pass:** all 12 `match_session` unit tests passed, both
+movement-fall host tests passed, the strict shared fixture passed, and core all-target clippy was
+clean. Final workspace/release/toolchain results are recorded in `HANDOFF.md`; the work remains
+uncommitted until an explicit landing request.
+
+### 2026-08-24 — C1 audit closeout, bounded replay ledger, and simulation version 5
+
+**Commits:** none — continuation in the same preserved dirty working tree
+
+This append corrects and extends the preceding same-day checkpoint; it does not rewrite that
+intermediate evidence. Independent review found two session-boundary issues and one scheduler
+compatibility defect before handoff.
+
+First, the session specified a 64 MiB retained command/result limit but enforced only 16,384
+entries. `MatchSessionHost` now measures the complete retained typed command and transition with a
+deterministic platform-independent logical encoding: fixed primitive widths, one-byte enum/option
+tags, four-byte string/sequence lengths, complete UTF-8 and nested payloads, and top-level canonical
+headers. The exhaustive counter includes snapshots, every event kind, dirty rectangles, damage,
+persistent objects, projectile traces, and every sample. Checked `u64` arithmetic and the byte cap
+run before ledger/host/generation publication; a cap or arithmetic overflow closes the session with
+no authoritative mutation. Exact duplicate and command-ID conflict paths consume no new bytes.
+Tests cover widths, accepted and rejected receipts, no-growth replay/conflict, exact-fit and
+one-byte-over behavior, checked overflow, and a 4,096-sample trace.
+
+Second, the net event builder labelled every active-player position change under a `Move` command
+as `RequestedMove`, even though `MatchHost` always settles immediately afterward. It now uses that
+label only for a same-direction, bounded, purely horizontal displacement. Any vertical component,
+including a settle-only fall or a walk-plus-fall, is conservatively
+`AuthoritativeResolution` until the host retains a post-walk/pre-settle split. A focused regression
+protects both cases.
+
+Third, the earlier movement-fall fix exposed a terminal scheduler omission. A victory path
+deliberately does not call `end_turn` because no next player exists, but it also failed to copy the
+final pending turn reason. The previous turn's reason could therefore survive a terminal attack,
+timeout, pass, or fall. `leave_victory_check` now commits that value before returning
+`MatchComplete`, with direct scheduler and host regressions. This changes replay-visible state, so
+`SIMULATION_VERSION` moved from 4 to 5 under the golden-vector regeneration procedure:
+
+| Vector | Version 4 | Version 5 |
+|---|---|---|
+| all passes | `876de8693b5b75a8` | `b75ec70f007a7a7b` |
+| walking duel | `b28768a38619df88` | `0038e5ddfabfec81` |
+| firing duel | `2fbdca99f94c944c` | `9c53418575ea824d` |
+| mixed actions | `765e76572c02b6b9` | `ea50d7336feb3a94` |
+| low-health decision | `06db50b907568060` | `323672057a1d53af` |
+
+The shared direct fixture was regenerated only after its movement, projectile, turn, generation,
+event-order, and live-hash assertions passed. Its version-4-to-version-5 hash history is:
+
+| Checkpoint | Version 4 | Version 5 |
+|---|---|---|
+| initial | `a37f45c1af031a47` | `65ac3e53023ca6b0` |
+| after movement | `f0c78bdd9d2066cf` | `9d92d3b5d5dad7d0` |
+| after ability/final | `194afe5bc5d13818` | `af724375e588d90b` |
+
+Final local evidence from `C:\Users\rsfit\DungeonBarrage`:
+
+- `git diff --check`, `cargo fmt --all --check`, and workspace all-target clippy with
+  `-D warnings`: pass. Git printed only the existing non-failing `core.autocrlf` notices.
+- `cargo test --workspace --quiet`: 456 tests pass — 440 core unit, 7 whole-match golden,
+  1 strict shared fixture, 7 FFI, and 1 WASM.
+- `cargo test --release -p db-sim-ffi`: 7 pass; `cargo build --release -p db-sim-ffi`: pass.
+- `cargo deny check`: advisories, bans, licenses, and sources pass; only unused license allow-list
+  warnings are emitted.
+- All three raw request files remain UTF-8 with no BOM or CR and exactly one terminal LF.
+- The toolchain verifier confirms .NET SDK 10.0.302 and Rust/Cargo 1.94.0, then exits 1 with the
+  intended actionable error because Godot 4.7.1 .NET is not installed.
+
+C1 remains open only on documented contract breadth: source-owned per-strike/impact/RNG/status and
+object-removal provenance, authority timeout, read-only preview, safe host-plus-complete-ledger
+restore, the composite session/ABI envelope, and the remaining direct transition scenarios. C2's
+production serializer is still the correct place to freeze full response JSON bytes. No C# or
+Godot scene work starts before those evidence gates, and no files were staged or committed.
+
+### 2026-08-24 — Correction: requested-movement provenance remains reserved
+
+**Commits:** none — final review in the same preserved dirty working tree
+
+The preceding closeout was still too optimistic when it said a same-direction, same-height net move
+could be labelled `RequestedMove`. A walk can climb and then settle back to its original height, so
+equal pre/post `y` does not prove the path was purely horizontal. Without a retained
+post-walk/pre-settle position, no net diff can make that attribution safely.
+
+The event builder now labels every current position diff `AuthoritativeResolution` and documents
+`RequestedMove` as reserved for the richer movement outcome contract. Tests assert that a real move
+still increments generation and publishes the authoritative net position, and that neither positive
+nor negative accepted moves emit the reserved cause. This correction affects presentation metadata
+only; authoritative state, `SIMULATION_VERSION = 5`, golden vectors, and shared fixture state hashes
+do not change. The full workspace remains 456 passing tests after replacing the earlier provenance
+regression with this stricter reserved-cause contract.
+
+### 2026-08-25 — Pinned client dependencies installed and campaign committed
+
+**Commit:** the local checkpoint commit containing this entry; not pushed
+
+The owner authorized dependency installation and a local repository commit. The already-pinned
+.NET SDK 10.0.302, Rust/Cargo 1.94.0, rustfmt, clippy, and cargo-deny were present and usable.
+`cargo fetch --locked` materializes the locked Rust dependency graph without changing it.
+
+Godot 4.7.1 .NET was installed for the current Windows user through WinGet package
+`GodotEngine.GodotEngine.Mono` at exact version 4.7.1. WinGet verified the official editor archive
+SHA-256 `764a089809fb1a6f745686ce9f6d3ca83adce8fb60fb9a4e2324b63baaebaa45`; the executable reports
+`4.7.1.stable.mono.official.a13da4feb`. The versioned executable path is persisted in the user-level
+`DUNGEON_BARRAGE_GODOT` variable, so the repository is not coupled to a machine-local absolute path.
+
+The matching official `.NET` export-template archive was downloaded from Godot's 4.7.1-stable
+GitHub release. Its 1,201,759,011-byte payload matched the release API's published SHA-256
+`ef9a708be51ecd974cd7dccdcafd7a1870da3d3e1c24c072bdbb9818c7a7db63` before extraction. Templates
+are installed at `%APPDATA%\Godot\export_templates\4.7.1.stable`; `version.txt` reports
+`4.7.1.stable.mono`, and both Windows x86_64 debug and release binaries are present. The downloaded
+archive remains at `%LOCALAPPDATA%\Temp\DungeonBarrage-Godot-4.7.1\Godot_v4.7.1-stable_mono_export_templates.tpz`:
+the exact-target cleanup attempt was rejected by the execution policy, so no destructive workaround
+was attempted. The retained archive is not part of the repository and is safe to remove manually.
+
+`scripts/verify-toolchain.ps1` now verifies the template directory, exact Mono template version,
+and required Windows x86_64 debug/release files in addition to the editor/.NET/Rust versions. The
+complete toolchain gate passes. The full Rust, release FFI, supply-chain, fixture-byte, diff, and
+format gates are rerun immediately before the checkpoint commit, and the post-commit worktree is
+required to be clean. No push is performed.
+
+---
+
+## C1 — per-strike provenance on the authoritative outcome
+
+Working-tree change on `main` at `327d2ae` (ahead 1 of `origin/main`, unpushed). Three files:
+`crates/db-sim-core/src/types.rs`, `command.rs`, `match_session.rs`. Not committed.
+
+### What was added
+
+`CommandOutcome` gained `strikes: Vec<StrikeResolution>`. Each record carries the resolution-order
+index, the target, the exact impact point, the delivery (`StrikeDelivery::{Projectile { trace_sequence },
+Melee}`), the crit draw, the damage actually applied, and whether that strike caused the elimination.
+
+The crit draw is `CritRoll::{NotEligible, Missed, Landed}` rather than a boolean. This distinction is
+not cosmetic: `roll_crit` never draws at all when an ability's `crit_chance_basis_points` is zero, so
+"did not crit" and "never rolled" are different facts about the seeded generator. A consumer that
+conflated them would predict the wrong next value and desynchronise. The rewritten `roll_crit`
+returns `CritRoll` and preserves the original short-circuit exactly; the golden vectors passing
+unchanged is the evidence that RNG consumption is bit-identical.
+
+`match_session::derive_events` now emits one `StrikeResolved` event per recorded strike, carrying the
+resolver's verbatim record. Projectile-delivered strikes are presented at their own trace's impact
+tick (rank 3, after the trace and its `Impact`), so damage lands with the projectile instead of at
+turn start. A strike citing a trace the outcome does not contain is a `SessionFault::ContractInvariant`
+rather than something quietly tolerated.
+
+### The bug this surfaced
+
+`StrikeResolved` was previously gated on `matches!(ability.attack, Attack::Strike(_))`. Karl's
+Carrion Call is the **only** multi-strike ability in the roster, and the only one whose design note
+promises that "each of the three attacks rolls its crit independently" — and it is an
+`Attack::Projectile`. It therefore emitted **zero** strike events, while 456 tests passed.
+
+This is the fifth occurrence of the repository's signature failure mode: correct, tested, unreachable.
+Emission is now driven by what the outcome actually recorded, never by the ability's declared shape,
+so an ability that finds no target emits nothing and one that lands three emits three.
+
+### Evidence
+
+Eight new tests, five in `match_session.rs` and three in `command.rs`.
+
+The projectile-side tests are anchored to a scenario found by brute-force search rather than guessed:
+Karl at x=2048 versus Huck at x=8192 on `horizontal-test-array`, angle 0, power 4600, which lands all
+three strikes. Each test asserts `landed.len() == 3` first, so the suite cannot pass vacuously if
+ballistics or spawn placement later stops the volley connecting — the failure mode the golden-vector
+no-op guard was built to catch.
+
+The strongest assertion is reconciliation: the three per-strike `damage_applied` values sum exactly to
+the target's authoritative health change. Carrion Call carries no effects and no self-damage, so that
+sum has to be the whole delta. This is what makes the records trustworthy rather than merely
+well-formed.
+
+The tests were mutation-checked. Truncating emission to `outcome.strikes.iter().take(1)` fails all
+five; restoring passes all five.
+
+The melee side is covered in `command.rs` against Huck's Haymaker, which is a `Attack::Strike` with
+`crit_chance_basis_points: 0` — so it covers both the `Melee` delivery and the `NotEligible` draw that
+the projectile fixture cannot reach. Two further tests cover clamping and elimination: a 7-health
+target struck by a 60-damage Haymaker must record `damage_applied == 7`, not 60, and must record the
+elimination. Overkill is otherwise unexercised by the projectile fixture, where 24 damage against 400
+health means applied always equals nominal.
+
+A third melee test was written expecting a strike against an already-eliminated target to record
+`eliminated_target == false`. It failed: validation rejects the command outright with
+`InvalidTarget`. The test was rewritten to assert that stronger, real guarantee. The `was_alive` read
+in the resolver is therefore defence in depth, not the only thing preventing a second kill credit.
+
+### Gates
+
+All run at the working tree described above.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 464 pass, 0 fail (was 456) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `scripts/verify-toolchain.ps1` | pass |
+| `git diff --check` | clean |
+
+Golden vectors and the shared fixture hashes are unchanged, as they must be: this slice records what
+the simulation already did and alters no authoritative state, no RNG consumption, and no state hash.
+`SIMULATION_VERSION` stays at 5 for the same reason.
+
+One note on the toolchain gate: it initially failed with "Godot 4.7.1 .NET is missing". Godot is
+installed and correct — `DUNGEON_BARRAGE_GODOT` is a user-level variable set after this session's
+shell environment was created, so the process had not inherited it. Re-run with the variable in
+scope, the full gate passes. Not a regression, and nothing was reinstalled or modified to make it
+pass.
+
+### Still open in step 1
+
+Status lifecycle records and object removal/change causes remain unrecorded, and `CommandOutcome`
+still has no `objects_removed` counterpart to `objects_created`. Duration-one statuses that apply and
+expire inside a single synchronous call remain invisible to a pre/post diff. C1 is not complete.
+
+---
+
+## C1 — status lifecycle records
+
+Second half of HANDOFF §6 step 1. Thirteen source files, `docs/HANDOFF.md`, this log.
+
+### What was added
+
+`CommandOutcome` gained `status_changes: Vec<StatusChange>`, each naming a player, a status kind,
+and one `StatusTransition`: `Applied`, `Refreshed` (carrying the magnitude and turns it displaced),
+`ChargeConsumed { remaining }`, `Ticked { turns_remaining }`, `Exhausted`, or `Expired`.
+
+All four production producers record where the transition happens:
+
+- `resolve::status::apply_status` — `Applied` / `Refreshed`
+- `resolve::status::tick_statuses` — `Ticked` / `Expired`, now `#[must_use]`
+- `resolve::attack_mods::resolve_guarantee_crit` — `Applied` / `Refreshed`
+- `resolve::attack_mods::consume_guarantee_crit` — `ChargeConsumed` / `Exhausted`
+
+`ResolveContext` carries the accumulator exactly as it already carries `damage`, `terrain_ops`,
+and `objects_created`. `scheduler::advance_phase` takes one too, because the end-of-turn tick runs
+inside it and `command::apply_ability` has already returned by then.
+
+`Refreshed` reports what it replaced because statuses refresh rather than stack: the displaced
+magnitude and duration are gone from state the moment the new status lands, so if the record did
+not carry them, nothing could.
+
+`Ticked` is recorded even though a snapshot diff can see it. Without it the transition stream would
+explain only some observable changes, leaving a consumer unable to distinguish a missing record
+from a change that legitimately had none — and it would make the reconciliation check below
+impossible to state.
+
+### Where the records surface
+
+`MatchHost` owns a `status_changes` record cleared at the start of every public entry point. This
+exists because `pass_turn`, `time_out_turn`, and `submit_move` produce no `CommandOutcome` at all,
+yet still end turns and therefore still run the status tick. `submit_ability` and
+`submit_passive_choice` copy the completed record onto their outcome with `clone_from`, so the two
+cannot disagree.
+
+`match_session::derive_events` now emits `StatusChanged` from these records instead of diffing the
+pre- and post-snapshots. The event previously carried `previous`/`current` snapshots; it now
+carries the transition itself, which is strictly more information — a diff cannot represent a
+status applied and expired inside one turn (it appears in neither snapshot), nor three charges
+consumed from one status by a single multi-strike ability (the diff shows one net change).
+
+### The reconciliation check
+
+Replacing a diff with records risks the opposite failure: a future producer mutates `statuses`
+without recording, and the client is told nothing happened. So `derive_events` keeps computing the
+diff and uses it as a cross-check. Any status kind the two snapshots disagree about that no record
+explains returns `SessionFault::ContractInvariant`.
+
+The converse is deliberately not checked: a status applied and expired within one call leaves no
+snapshot difference at all, and recording that is the entire point of the contract.
+
+This was verified by mutation, not assumed. Making `tick_statuses` record nothing while still
+mutating state causes `session.apply` to fail with `ContractInvariant` rather than silently
+emitting an empty event stream.
+
+### Evidence
+
+Sixteen new tests; 480 passing, up from 464.
+
+- `resolve::status` — `Applied`; `Refreshed` carrying the replaced values; the tick separating
+  survivors from expiries; per-player independence; and the headline case: a duration-one status
+  applied and expired in one call, asserting first that the pre- and post-status lists are
+  **identical** (so the fixture genuinely reproduces the invisible-transition gap) and then that
+  both `Applied` and `Expired` were nonetheless recorded, in that order.
+- `resolve::attack_mods` — three charges consumed inside one action producing
+  `ChargeConsumed { remaining: 2 }`, `ChargeConsumed { remaining: 1 }`, `Exhausted`, where a diff
+  would show a single disappearance; plus refresh-not-sum, and that an unmarked target records
+  nothing.
+- `match_host` — expiries reach `status_changes()`; the record is cleared per call; an ability
+  outcome carries byte-identical transitions to the host's own record.
+- `match_session` — a `Pass` surfaces the expiry it caused despite producing no outcome; a
+  surviving status reports its decrement; a turn with no statuses emits no events; and a second
+  command does not repeat the first command's transitions.
+
+### Content gap found while wiring this
+
+Only two effects in the entire launch roster attach a status — Numa's Pin (`Lockdown`) and Karl's
+Feeding Frenzy (`GuaranteeCrit`) — and both are specials gated behind a full gauge.
+`resolve::status::resolve_chill` and `resolve_embers` are fully implemented and tested, but **no
+ability references `EffectKind::Chill` or `EffectKind::Embers`**, so neither can occur in a real
+match today. A content gap rather than a wiring bug: the fifteen undesigned characters are
+expected to use them. It is nonetheless why the session-level tests seed a status directly rather
+than casting an ability to produce one, and it means status behaviour is far less exercised in
+real play than the test count alone suggests.
+
+`resolve::status::tick_statuses` also carried a stale doc comment claiming "nothing calls this
+yet". `scheduler::advance_phase` has called it since the scheduler landed; the comment was
+corrected rather than left to imply dead code.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 480 pass, 0 fail (was 464) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `git diff --check` | clean |
+
+Golden vectors and fixture hashes are unchanged, and `SIMULATION_VERSION` stays at 5: this records
+what the simulation already did and changes no authoritative state, no RNG consumption, and no
+state hash. The host's record is deliberately not part of `SimulationState`, so it is neither
+hashed nor replicated.
+
+Clippy's `large_enum_variant` fired on `match_session::AppliedCommand` once `CommandOutcome` grew
+its second provenance vector; the accepted variant is now boxed, so a rejection no longer pays the
+outcome's size.
+
+### Still open in step 1
+
+Object removal and change causes. `CommandOutcome` has no `objects_removed` counterpart to
+`objects_created`, and nothing records why a turret, knife, or gas cloud left the board. C1 is not
+complete; steps 3 through 8 are untouched.
+
+---
+
+## C1 — object lifecycle provenance, and finishing an interrupted refactor
+
+Resumed a working tree left mid-refactor by a previous agent: `types.rs`, `command.rs`,
+`match_session.rs`, `victory.rs`, and six `resolve/` modules were edited, but `scheduler.rs` and
+`match_host.rs` were untouched and the crate did not compile (10 errors). Nothing was reverted.
+
+### What the previous agent had established
+
+- `PersistentObjectChange` / `PersistentObjectTransition::{Spawned, Removed { cause }}` with a
+  six-variant `PersistentObjectRemovalCause`, replacing `CommandOutcome::objects_created` with an
+  ordered `object_changes` stream. One stream rather than separate create/remove vectors because a
+  turret replacement removes-then-spawns, a cap eviction spawns-then-removes, and a knife chain can
+  do both inside one command.
+- `StrikeDelivery::Effect { kind }` for strikes delivered by an effect rather than the primary
+  attack, and `CritRoll::Forced` for a guaranteed crit — critical, but consuming **no** RNG draw,
+  so `consumed_draw()` is correctly false for it.
+- `tick_statuses(state, player_id)`, scoped to one player, with `GuaranteeCrit` excluded from turn
+  decay because its magnitude is a charge count, not a clock.
+- Seven producers writing `object_changes`, and `victory::eliminate` recording `OwnerEliminated`.
+
+### What was finished here
+
+**Threading.** `scheduler::advance_phase` now carries both accumulators; `leave_victory_check` and
+`force_draw` pass the object accumulator into `victory::eliminate`. `MatchHost` gained an
+`object_changes` record cleared at every public entry point and folded onto the outcome, mirroring
+`status_changes` exactly. The `StatusResolution` arm ticks `state.active_player_id`.
+
+**The consumer, which did not exist.** `object_changes` was fully produced and read by nothing.
+`derive_events` still built object events by diffing snapshots, and every `ObjectRemoved` carried
+`ChangeProvenance::AuthoritativeResolution` — a constant true of every removal, and therefore
+information-free. Spawns and removals now come from the records, `ObjectRemoved` carries the real
+`PersistentObjectRemovalCause`, and the same reconciliation guard used for statuses applies: an
+object appearing or disappearing between snapshots with no record is a
+`SessionFault::ContractInvariant`. `ObjectChanged` stays snapshot-derived, since an object that
+survived is fully visible in both snapshots and no producer records in-place mutation.
+
+Left unwired, this would have been the sixth occurrence of the repository's
+correct-tested-unreachable failure mode.
+
+### A pre-existing test that had to change
+
+`a_two_turn_lockdown_survives_exactly_two_full_turn_cycles` predates this work and passed under
+all-player ticking. Per-player ticking breaks it, and the test — not the implementation — was the
+stale artifact: ticking every player on every command means a two-turn status expires after two
+commands *by anyone*, which in a four-player match is half a round, and makes the same status mean
+something different at every table size.
+
+Replaced with `a_two_turn_status_lasts_two_of_the_affected_players_own_turns`, which asserts across
+four laps that another player's turn does **not** erode it and the victim's own turn does. Timing
+was confirmed empirically first: the status ticks on laps 2 and 4, the target's own turns.
+
+**This is a balance change, not just a provenance change.** A status now lasts N of the victim's
+turns rather than N commands, so in a duel it is roughly twice as long as before and in a
+four-player match roughly four times. Numa's Pin and any future Chill are affected. Flagged for
+owner review.
+
+Added `a_count_based_guarantee_crit_is_not_eroded_by_the_turn_tick`, which runs four laps and
+asserts the charge count and the never-expires sentinel both survive.
+
+### Evidence
+
+486 passing, up from 480. Six new tests.
+
+The object tests use Aleph's throwing knife — the only object producer reachable from a
+non-special ability — with parameters found by brute-force search rather than guessed. The headline
+test captures the case the contract exists for, verified empirically before it was written:
+
+```
+cmd2  SPAWN  seq=1
+cmd2  REMOVE seq=0 cause=detonated
+cmd2  REMOVE seq=1 cause=detonated
+```
+
+Knife 1 is spawned and destroyed inside one command. The test asserts first that it appears in
+**neither** the pre- nor the post-snapshot — so the fixture genuinely reproduces the gap — and then
+that all three transitions are reported with real causes. A diff could only ever have reported
+knife 0 vanishing, with no cause and no hint knife 1 existed.
+
+Mutation-checked: suppressing record-driven emission makes all three object tests fail with
+`ContractInvariant` rather than silently emitting an empty stream.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 486 pass, 0 fail (was 480) |
+| `cargo test --release -p db-sim-ffi` | 7 pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok |
+| `git diff --check` | clean |
+
+Golden vectors are unchanged. The status-timing change does not reach them because no launch-roster
+basic attack applies a status — the same content gap recorded in the previous entry.
+
+`derive_events` exceeded clippy's argument limit once the object records joined it; the provenance
+inputs are now grouped in an `AppliedRecords` struct rather than the lint being suppressed. A caller
+cannot supply one record stream without the others and leave the event stream half-explained.
+
+### Still open
+
+`PersistentObjectRemovalCause::Expired` and `Destroyed` are defined but never produced: no
+scheduler-owned object-lifetime tick and no object targeting or damage exist yet. Both are marked
+reserved in their doc comments. C1 steps 3 through 8 remain untouched.

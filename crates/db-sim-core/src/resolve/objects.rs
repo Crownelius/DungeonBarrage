@@ -2,16 +2,17 @@
 //!
 //! This family owns the persistent-object lifecycle: Emi's Cube Turret, and Aleph's
 //! embedded throwing knives together with the dagger chain that detonates them
-//! (`CHARACTERS.md` §3.2, §3.6). Owned exclusively by this file
-//! (`docs/MODULE_OWNERSHIP.md`) — nothing outside `resolve/objects.rs` mutates a
-//! [`PersistentObject`], and this file never reaches into a sibling resolver.
+//! (`CHARACTERS.md` §3.2, §3.6). Gas-cloud creation belongs to `relocation.rs`, while
+//! eliminated-owner cleanup belongs to `victory.rs`; every producer writes the shared ordered
+//! lifecycle record rather than pretending this module owns objects alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{SimError, SimResult};
 use crate::fixed::{self, FixedPoint};
 use crate::types::{
-    BASE_ATTACK, EffectKind, MaterialMask, PersistentObject, PersistentObjectKind, SpecialEffect,
+    BASE_ATTACK, EffectKind, MaterialMask, PersistentObject, PersistentObjectChange,
+    PersistentObjectKind, PersistentObjectRemovalCause, PersistentObjectTransition, SpecialEffect,
     TerrainOperation, TerrainShape,
 };
 
@@ -73,9 +74,24 @@ pub fn resolve(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResul
 fn spawn_turret(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResult<()> {
     let actor_id = ctx.actor_id.to_owned();
 
+    let replaced: Vec<PersistentObject> = ctx
+        .state
+        .objects
+        .iter()
+        .filter(|object| object.kind == PersistentObjectKind::Turret && object.owner_id == actor_id)
+        .cloned()
+        .collect();
     ctx.state.objects.retain(|object| {
         !(object.kind == PersistentObjectKind::Turret && object.owner_id == actor_id)
     });
+    for object in replaced {
+        ctx.object_changes.push(PersistentObjectChange {
+            object,
+            transition: PersistentObjectTransition::Removed {
+                cause: PersistentObjectRemovalCause::Replaced,
+            },
+        });
+    }
 
     let sequence = ctx.next_object_sequence();
     let turret = PersistentObject {
@@ -91,7 +107,10 @@ fn spawn_turret(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResu
     // to preserve that because `next_object_sequence` is strictly increasing and the
     // `retain` above only removes elements, never reorders the survivors.
     ctx.state.objects.push(turret.clone());
-    ctx.objects_created.push(turret);
+    ctx.object_changes.push(PersistentObjectChange {
+        object: turret,
+        transition: PersistentObjectTransition::Spawned,
+    });
     Ok(())
 }
 
@@ -123,7 +142,10 @@ fn embed_projectile(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> Sim
     };
 
     ctx.state.objects.push(knife.clone());
-    ctx.objects_created.push(knife);
+    ctx.object_changes.push(PersistentObjectChange {
+        object: knife,
+        transition: PersistentObjectTransition::Spawned,
+    });
 
     // Evict the oldest of this owner's knives beyond the cap (`CHARACTERS.md` §3.6: "the
     // oldest is removed when a ninth lands"). At most one knife is inserted per call, so
@@ -148,11 +170,29 @@ fn embed_projectile(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> Sim
             .map(|object| object.sequence)
             .min();
         if let Some(oldest_sequence) = oldest_sequence {
+            let evicted = ctx
+                .state
+                .objects
+                .iter()
+                .find(|object| {
+                    object.kind == PersistentObjectKind::EmbeddedKnife
+                        && object.owner_id == actor_id
+                        && object.sequence == oldest_sequence
+                })
+                .cloned();
             ctx.state.objects.retain(|object| {
                 !(object.kind == PersistentObjectKind::EmbeddedKnife
                     && object.owner_id == actor_id
                     && object.sequence == oldest_sequence)
             });
+            if let Some(object) = evicted {
+                ctx.object_changes.push(PersistentObjectChange {
+                    object,
+                    transition: PersistentObjectTransition::Removed {
+                        cause: PersistentObjectRemovalCause::CapacityEvicted,
+                    },
+                });
+            }
         }
     }
 
@@ -305,10 +345,28 @@ fn chain_detonate(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimRe
 
     // Detonated knives leave play; every other object (turrets, undetonated knives of
     // this or another owner) is untouched.
+    let removed: Vec<PersistentObject> = ctx
+        .state
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == PersistentObjectKind::EmbeddedKnife
+                && detonated.contains(&object.sequence)
+        })
+        .cloned()
+        .collect();
     ctx.state.objects.retain(|object| {
         !(object.kind == PersistentObjectKind::EmbeddedKnife
             && detonated.contains(&object.sequence))
     });
+    for object in removed {
+        ctx.object_changes.push(PersistentObjectChange {
+            object,
+            transition: PersistentObjectTransition::Removed {
+                cause: PersistentObjectRemovalCause::Detonated,
+            },
+        });
+    }
 
     Ok(())
 }
@@ -365,6 +423,7 @@ mod tests {
     use super::*;
     use crate::rng::Rng;
     use crate::terrain;
+    use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PlayerState, SimulationState,
@@ -463,7 +522,8 @@ mod tests {
         damage: BTreeMap<String, DamageEvent>,
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
-        objects_created: Vec<PersistentObject>,
+        object_changes: Vec<PersistentObjectChange>,
+        status_changes: Vec<StatusChange>,
     }
 
     impl Fixture {
@@ -474,7 +534,8 @@ mod tests {
                 damage: BTreeMap::new(),
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
-                objects_created: Vec::new(),
+                object_changes: Vec::new(),
+                status_changes: Vec::new(),
             }
         }
 
@@ -494,7 +555,8 @@ mod tests {
                 damage: &mut self.damage,
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
-                objects_created: &mut self.objects_created,
+                object_changes: &mut self.object_changes,
+                status_changes: &mut self.status_changes,
             };
             resolve(&mut ctx, effect)
         }
@@ -527,7 +589,7 @@ mod tests {
         );
         assert_eq!(turret.position, impact);
         assert_eq!(turret.owner_id, "emi");
-        assert_eq!(fixture.objects_created.len(), 1);
+        assert_eq!(fixture.object_changes.len(), 1);
     }
 
     #[test]

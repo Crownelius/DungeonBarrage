@@ -1,0 +1,62 @@
+{
+  "fixtureSchemaVersion": 1,
+  "id": "horizontal-test-duel-v1",
+  "purpose": "Real map and roster: nonzero movement, one projectile, and authoritative turn handoff.",
+  "versions": {
+    "abiVersion": 1,
+    "clientContractVersion": 1,
+    "simulationVersion": 5,
+    "contentVersion": 1
+  },
+  "createRequestFile": "create-request.json",
+  "initial": {
+    "snapshotGeneration": 0,
+    "turnNumber": 1,
+    "phase": "movement",
+    "activePlayerId": "a-local-player",
+    "playerCount": 2,
+    "blockCount": 8,
+    "stateHash": "65ac3e53023ca6b0"
+  },
+  "steps": [
+    {
+      "requestFile": "commands/001-move.json",
+      "expect": {
+        "disposition": "accepted",
+        "preGeneration": 0,
+        "postGeneration": 1,
+        "postTurnNumber": 1,
+        "postActivePlayerId": "a-local-player",
+        "postStateHash": "9d92d3b5d5dad7d0",
+        "minimumActorDistanceMoved": 1,
+        "minimumProjectileTraces": 0,
+        "minimumProjectileSamples": 0,
+        "minimumDamageEvents": 0,
+        "minimumTerrainCellsRemoved": 0
+      }
+    },
+    {
+      "requestFile": "commands/002-ability.json",
+      "expect": {
+        "disposition": "accepted",
+        "preGeneration": 1,
+        "postGeneration": 2,
+        "postTurnNumber": 2,
+        "postActivePlayerId": "b-local-bot",
+        "postStateHash": "af724375e588d90b",
+        "minimumActorDistanceMoved": 0,
+        "minimumProjectileTraces": 1,
+        "minimumProjectileSamples": 2,
+        "minimumDamageEvents": 0,
+        "minimumTerrainCellsRemoved": 0
+      }
+    }
+  ],
+  "final": {
+    "snapshotGeneration": 2,
+    "turnNumber": 2,
+    "activePlayerId": "b-local-bot",
+    "stateHash": "af724375e588d90b",
+    "stateChangedFromInitial": true
+  }
+}

@@ -36,5 +36,8 @@ arithmetic_side_effects = "warn"
 opt-level = "z"
 lto = true
 codegen-units = 1
-panic = "abort"
+# The native C ABI promises to contain unexpected Rust panics at its boundary. `abort`
+# makes `catch_unwind` unable to honor that contract and would terminate the whole client
+# (or a multi-match host). Keep unwinding enabled; release tests exercise the exact profile.
+panic = "unwind"
 strip = true

@@ -1,8 +1,12 @@
 //! # Dungeon Barrage authoritative simulation core
 //!
-//! This crate is the single implementation of the game rules. It is compiled to
-//! `wasm32-unknown-unknown` for the browser client and natively for the match server, so
-//! there is never a second copy of the logic to drift (ADR 0001).
+//! This crate is the single, engine-independent implementation of the game rules. It imports
+//! no renderer, game engine, network transport, database, or platform SDK types. The native
+//! presentation client reaches it through the separate `db-sim-ffi` crate, while the future
+//! Rust-native match server will depend on it directly (ADR 0006). The `db-sim-wasm` boundary
+//! is dormant and preserves a web-revisit path; there is no active browser client. Every
+//! target-specific artifact is built from this same deterministic source rather than a second
+//! implementation that can drift.
 //!
 //! ## Invariants
 //!
@@ -36,12 +40,15 @@ pub mod block_ops;
 pub mod blocks;
 pub mod canonical;
 pub mod character;
+pub mod client_contract;
 pub mod command;
 pub mod error;
 pub mod fixed;
 pub mod hash;
 pub mod map;
 pub mod match_host;
+pub mod match_session;
+pub mod match_setup;
 pub mod movement;
 pub mod resolve;
 pub mod rng;
@@ -58,7 +65,11 @@ pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSIT
 /// Incremented whenever a change could alter the outcome of a replayed match — including
 /// a change to the canonical encoding. Every match records the version it ran under so
 /// old replays stay interpretable (`PLATFORM_STRATEGY.md` §6).
-pub const SIMULATION_VERSION: u32 = 4;
+///
+/// Version 5 commits the final action's pending turn-end reason when victory completes a
+/// match without rotating to another player. Version 4 could expose the preceding turn's
+/// reason after a terminal attack, timeout, pass, or movement fall.
+pub const SIMULATION_VERSION: u32 = 5;
 
 /// Version of the gameplay content tables (weapons, maps, modes).
 pub const CONTENT_VERSION: u32 = 1;

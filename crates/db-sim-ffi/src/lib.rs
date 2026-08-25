@@ -1,9 +1,9 @@
 //! C ABI boundary for the Dungeon Barrage simulation core.
 //!
-//! Both the C# client and the C# match server P/Invoke into this library, so there remains
-//! exactly one implementation of the game rules (ADR 0004). This crate contains **no
-//! gameplay logic** — only marshalling. Anything here that decides damage, ammunition,
-//! terrain, or turn order is a bug.
+//! The Godot/C# presentation client P/Invokes into this library for local simulation. The
+//! future Rust-native match server depends on `db-sim-core` directly and does **not** use this
+//! ABI (ADR 0006). This crate contains no gameplay logic — only marshalling. Anything here
+//! that decides damage, collision, terrain, or turn order is a bug.
 //!
 //! # Why this crate exists separately
 //!
@@ -19,9 +19,11 @@
 //!   [`db_sim_destroy`]. Passing anything else is undefined behaviour on the caller's side.
 //! - A null handle is **tolerated**, not undefined: every function checks and returns an
 //!   error status. Callers get a status code, not a crash.
-//! - Every function is `catch_unwind`-wrapped. A panic must never unwind across the FFI
-//!   boundary — that is undefined behaviour — and must never take down a server process
-//!   holding other players' matches.
+//! - Fallible exports that execute Rust logic are `catch_unwind`-guarded, and the shipped FFI
+//!   release profile uses `panic = "unwind"`. An unwinding panic is converted to
+//!   [`status::INTERNAL_PANIC`] rather than crossing the C boundary. This does not catch an
+//!   abort, allocation failure, or external process termination; after a caught panic the
+//!   client abandons that match.
 //! - No function takes or returns a floating-point value. Every gameplay scalar crossing
 //!   this boundary is a quantized integer (ADR 0001 §4).
 //! - Strings out are UTF-8, NUL-terminated, owned by this library, and freed with
@@ -68,7 +70,8 @@ pub struct SimHandle {
 /// Runs `body`, converting any panic into [`status::INTERNAL_PANIC`].
 ///
 /// Unwinding across an FFI boundary is undefined behaviour, so this wrapper is mandatory on
-/// every exported function — not a convenience.
+/// every fallible export that executes Rust logic — not a convenience. Infallible version
+/// constants and destroy/free functions use contracts appropriate to those operations.
 fn guard<F: FnOnce() -> c_int>(body: F) -> c_int {
     match catch_unwind(AssertUnwindSafe(body)) {
         Ok(code) => code,
@@ -78,17 +81,11 @@ fn guard<F: FnOnce() -> c_int>(body: F) -> c_int {
 
 /// Returns the simulation rules version this library was built against.
 ///
-/// The C# client compares this with the server's advertised version and refuses to connect
-/// on a mismatch rather than desynchronizing mid-match.
+/// The C# client checks this before creating a local match. Online compatibility belongs to
+/// the future server handshake and does not depend on this local native library.
 #[unsafe(no_mangle)]
 pub extern "C" fn db_sim_simulation_version() -> u32 {
     db_sim_core::SIMULATION_VERSION
-}
-
-/// Returns the wire protocol version this library speaks.
-#[unsafe(no_mangle)]
-pub extern "C" fn db_sim_protocol_version() -> u32 {
-    db_sim_core::PROTOCOL_VERSION
 }
 
 /// Returns the content tables version.
@@ -99,8 +96,9 @@ pub extern "C" fn db_sim_content_version() -> u32 {
 
 /// Creates a new simulation and returns an opaque handle.
 ///
-/// Returns null on allocation failure or if the core rejects the seed. The caller must pass
-/// the returned handle to [`db_sim_destroy`] exactly once.
+/// Returns null if an unwinding panic occurs inside this scaffold constructor. The caller must
+/// pass a non-null returned handle to [`db_sim_destroy`] exactly once. Rust's default allocator
+/// may abort on process-wide allocation failure; this API does not claim to recover from OOM.
 #[unsafe(no_mangle)]
 pub extern "C" fn db_sim_create(seed: u64) -> *mut SimHandle {
     let created = catch_unwind(AssertUnwindSafe(|| {
@@ -191,8 +189,13 @@ mod tests {
     #[test]
     fn versions_are_reexported_from_the_core() {
         assert_eq!(db_sim_simulation_version(), db_sim_core::SIMULATION_VERSION);
-        assert_eq!(db_sim_protocol_version(), db_sim_core::PROTOCOL_VERSION);
         assert_eq!(db_sim_content_version(), db_sim_core::CONTENT_VERSION);
+    }
+
+    #[test]
+    fn guard_contains_a_controlled_panic() {
+        let code = guard(|| panic!("controlled FFI containment test"));
+        assert_eq!(code, status::INTERNAL_PANIC);
     }
 
     #[test]

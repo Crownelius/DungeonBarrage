@@ -640,6 +640,22 @@ pub struct BallisticResult {
     pub impact: BallisticImpact,
 }
 
+/// One independently playable projectile trajectory produced by a command.
+///
+/// A multi-strike ability must not concatenate several paths into one ambiguous stream or
+/// discard all but its final impact. `sequence` is zero-based within the command and gives
+/// the presentation layer a stable identity without making that identity authoritative
+/// match state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectileTrace {
+    /// Zero-based launch order within the command.
+    pub sequence: u32,
+    /// Authoritative sampled path for this projectile only.
+    pub samples: Vec<BallisticSample>,
+    /// This projectile's terminal event.
+    pub impact: BallisticImpact,
+}
+
 // ---------------------------------------------------------------------------
 // Players and match state
 // ---------------------------------------------------------------------------
@@ -699,6 +715,72 @@ pub enum PersistentObjectKind {
     EmbeddedKnife,
     /// Aleph's gas cloud. Blocks line of sight.
     GasCloud,
+}
+
+/// Why a persistent object left authoritative state.
+///
+/// The cause is recorded by the producer that performs the removal. A consumer must never
+/// infer one from a missing post-snapshot: a replaced turret, a capacity eviction, and a
+/// detonated knife all have the same net shape but different gameplay meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentObjectRemovalCause {
+    /// A newly spawned singleton object displaced the owner's previous instance.
+    Replaced,
+    /// A per-owner object limit evicted the oldest instance.
+    CapacityEvicted,
+    /// An embedded projectile participated in a chain detonation.
+    Detonated,
+    /// A finite object lifetime reached zero.
+    ///
+    /// Reserved until the scheduler owns an explicit object-lifetime tick.
+    Expired,
+    /// Object health reached zero through an authoritative damage producer.
+    ///
+    /// Reserved until object targeting and damage exist.
+    Destroyed,
+    /// The owning player was eliminated, so their objects can no longer act.
+    OwnerEliminated,
+}
+
+impl PersistentObjectRemovalCause {
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Replaced => "replaced",
+            Self::CapacityEvicted => "capacityEvicted",
+            Self::Detonated => "detonated",
+            Self::Expired => "expired",
+            Self::Destroyed => "destroyed",
+            Self::OwnerEliminated => "ownerEliminated",
+        }
+    }
+}
+
+/// One producer-owned persistent-object lifecycle transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistentObjectTransition {
+    /// The complete object entered authoritative state.
+    Spawned,
+    /// The complete last authoritative object left state for this exact reason.
+    Removed {
+        /// Source-owned reason for removal.
+        cause: PersistentObjectRemovalCause,
+    },
+}
+
+/// One ordered persistent-object lifecycle record.
+///
+/// This is deliberately one stream rather than separate creation/removal vectors. Emi's
+/// turret replacement removes then spawns, knife-cap eviction spawns then removes, and a
+/// chain can spawn and remove the landing knife inside one synchronous command. Only one
+/// ordered stream preserves all three without reconstructing causality from final state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentObjectChange {
+    /// Complete object at the moment it entered or immediately before it left state.
+    pub object: PersistentObject,
+    /// What happened to it.
+    pub transition: PersistentObjectTransition,
 }
 
 /// One character's authoritative state.
@@ -1041,6 +1123,181 @@ pub struct DamageEvent {
     pub eliminated: bool,
 }
 
+/// Why a strike consumed — or did not consume — a crit roll from the seeded generator.
+///
+/// Recorded per strike rather than inferred, because RNG consumption is part of the
+/// authoritative state transition: an observer that guesses wrong about whether a roll
+/// happened will desynchronise on the very next draw. `roll_crit` skips the draw entirely
+/// when an ability cannot crit, so "did not crit" and "never rolled" are different facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CritRoll {
+    /// The ability has `crit_chance_basis_points == 0`. No draw was taken.
+    NotEligible,
+    /// A draw was taken and lost.
+    Missed,
+    /// A draw was taken and won.
+    Landed,
+    /// An authoritative guarantee forced the critical hit without consuming an RNG draw.
+    Forced,
+}
+
+impl CritRoll {
+    /// Whether this strike actually consumed a value from the match generator.
+    #[must_use]
+    pub const fn consumed_draw(self) -> bool {
+        matches!(self, Self::Missed | Self::Landed)
+    }
+
+    /// Whether this strike resolved as a critical hit.
+    #[must_use]
+    pub const fn is_critical(self) -> bool {
+        matches!(self, Self::Landed | Self::Forced)
+    }
+
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::NotEligible => "notEligible",
+            Self::Missed => "missed",
+            Self::Landed => "landed",
+            Self::Forced => "forced",
+        }
+    }
+}
+
+/// How an individual strike reached its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrikeDelivery {
+    /// Delivered by a projectile, identified by its [`ProjectileTrace::sequence`].
+    Projectile {
+        /// The launch-order sequence of the trace that delivered this strike.
+        trace_sequence: u32,
+    },
+    /// Delivered by a close-range strike with no projectile.
+    Melee,
+    /// Delivered by an authoritative effect rather than the ability's primary attack.
+    Effect {
+        /// The exact effect producer.
+        kind: EffectKind,
+    },
+}
+
+/// One authoritative strike resolution, recorded where it happened.
+///
+/// `CommandOutcome::damage` aggregates every hit on a player into one itemized total, which
+/// is what a result panel wants but destroys per-strike facts a client needs to animate:
+/// Karl's basic resolves three times with three independent crit rolls, and an aggregate
+/// `was_critical` cannot say which of them landed. These records are emitted by the resolver
+/// at the moment of resolution and are never reconstructed from final state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrikeResolution {
+    /// Zero-based index within this command's strike sequence, in resolution order.
+    pub strike_index: u16,
+    /// Opaque id of the player this strike hit.
+    pub target_player_id: String,
+    /// Where the strike resolved, in fixed-point simulation units.
+    pub impact_point: FixedPoint,
+    /// How the strike was delivered.
+    pub delivery: StrikeDelivery,
+    /// The crit draw, including whether one was taken at all.
+    pub crit: CritRoll,
+    /// Damage this strike actually applied after clamping to remaining health.
+    ///
+    /// The *applied* figure, not the nominal one: a 60-damage strike against a target on
+    /// 10 health applies 10, and a client showing 60 would be lying about a kill.
+    pub damage_applied: u16,
+    /// Whether this specific strike reduced the target to zero health.
+    pub eliminated_target: bool,
+}
+
+/// What happened to one status on one player, recorded where it happened.
+///
+/// A status can be applied and expire inside the same synchronous host call — a
+/// `duration_turns: 1` status applied during resolution is removed by the status tick at the
+/// end of that same turn — so a client diffing the pre-state against the post-state sees no
+/// trace of it ever having existed. Charge-based statuses are worse: `GuaranteeCrit` can be
+/// decremented three times by a single multi-strike ability, and a diff sees one net change.
+/// These records exist so none of that is inferred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusTransition {
+    /// Newly attached. The player carried no status of this kind.
+    Applied {
+        /// Effect magnitude as applied.
+        magnitude: i32,
+        /// Turns the status will last.
+        turns_remaining: u8,
+    },
+    /// Replaced an existing status of the same kind.
+    ///
+    /// Statuses refresh rather than stack (`ARSENAL.md` guardrail 4), so the previous values
+    /// are reported alongside the new ones: the old status is genuinely gone, and a client
+    /// animating a refresh needs to know what it replaced.
+    Refreshed {
+        /// Effect magnitude as applied.
+        magnitude: i32,
+        /// Turns the refreshed status will last.
+        turns_remaining: u8,
+        /// Magnitude of the status this replaced.
+        replaced_magnitude: i32,
+        /// Turns that were left on the status this replaced.
+        replaced_turns_remaining: u8,
+    },
+    /// One charge was consumed from a count-based status, which survived.
+    ChargeConsumed {
+        /// Charges left after this consumption. Always positive; a status reaching zero
+        /// reports [`StatusTransition::Exhausted`] instead.
+        remaining: i32,
+    },
+    /// Survived the end-of-turn tick with one fewer turn remaining.
+    ///
+    /// Recorded even though a snapshot diff can see it, so that the transition stream fully
+    /// accounts for every observable change to a player's statuses. A stream that explained
+    /// only some of them would leave a consumer unable to tell a missing record from a
+    /// change that legitimately had none.
+    Ticked {
+        /// Turns left after the decrement. Always positive; reaching zero reports
+        /// [`StatusTransition::Expired`] instead.
+        turns_remaining: u8,
+    },
+    /// Removed because its charges ran out, not because its turns did.
+    Exhausted,
+    /// Removed because `turns_remaining` reached zero during the end-of-turn status tick.
+    Expired,
+}
+
+impl StatusTransition {
+    /// Whether this transition removed the status from the player.
+    #[must_use]
+    pub const fn removes_status(&self) -> bool {
+        matches!(self, Self::Exhausted | Self::Expired)
+    }
+
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Applied { .. } => "applied",
+            Self::Refreshed { .. } => "refreshed",
+            Self::ChargeConsumed { .. } => "chargeConsumed",
+            Self::Ticked { .. } => "ticked",
+            Self::Exhausted => "exhausted",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// One status lifecycle transition, attributed to the player it happened to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusChange {
+    /// Opaque id of the player carrying the status.
+    pub player_id: String,
+    /// Which status.
+    pub kind: EffectKind,
+    /// What happened to it.
+    pub transition: StatusTransition,
+}
+
 /// The authoritative outcome of an accepted command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
@@ -1050,16 +1307,30 @@ pub struct CommandOutcome {
     pub turn_number_before: u32,
     /// Turn number after application.
     pub turn_number_after: u32,
-    /// Sampled projectile path, empty for strikes.
-    pub samples: Vec<BallisticSample>,
-    /// Terminal projectile event, absent for strikes.
-    pub impact: Option<BallisticImpact>,
+    /// Independently identifiable projectile paths in launch order; empty for strikes.
+    pub projectile_traces: Vec<ProjectileTrace>,
     /// Terrain mutations, in sequence order.
     pub terrain_ops: Vec<TerrainOperation>,
     /// Damage and healing applied, sorted by `player_id`.
     pub damage: Vec<DamageEvent>,
-    /// Persistent objects created by this action.
-    pub objects_created: Vec<PersistentObject>,
+    /// Every persistent-object lifecycle transition, in exact producer order.
+    ///
+    /// Includes objects that enter and leave state inside this one command and therefore
+    /// appear in neither the pre- nor post-snapshot.
+    pub object_changes: Vec<PersistentObjectChange>,
+    /// Every individual strike resolution, in the order the resolver produced them.
+    ///
+    /// Emitted at the point of resolution. A consumer must never reconstruct these from
+    /// `damage` or from final state — the aggregate deliberately cannot express which of
+    /// several strikes crit, and guessing would put a presentation layer's animation out of
+    /// step with the authoritative RNG stream.
+    pub strikes: Vec<StrikeResolution>,
+    /// Every status lifecycle transition this command caused, in the order it caused them.
+    ///
+    /// Includes transitions that both begin and end within this one command, which a
+    /// pre/post state diff cannot observe at all. End-of-turn expiries appear last, appended
+    /// by the host after it drives the scheduler's status tick.
+    pub status_changes: Vec<StatusChange>,
     /// Gauge charge gained by the actor, in hundredths.
     pub gauge_gained: u16,
     /// Terrain cells removed, for telemetry and the Excavator XP bonus.
