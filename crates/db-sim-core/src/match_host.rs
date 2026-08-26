@@ -408,7 +408,10 @@ mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
     use crate::map;
-    use crate::types::{AbilitySlot, Appearance, PlayerState};
+    use crate::types::{
+        AbilitySlot, Appearance, PersistentObject, PersistentObjectKind,
+        PersistentObjectRemovalCause, PersistentObjectTransition, PlayerState,
+    };
 
     fn player(id: &str, team: u8, character_id: &str, position: FixedPoint) -> PlayerState {
         PlayerState {
@@ -562,6 +565,16 @@ mod tests {
             panic!("fixture map height must fit in i32");
         };
         let below_map = map_height_cells.saturating_mul(crate::fixed::POSITION_SCALE);
+        let owned_object = PersistentObject {
+            sequence: 0,
+            owner_id: actor.clone(),
+            kind: PersistentObjectKind::GasCloud,
+            position: FixedPoint::ZERO,
+            health: 1,
+            turns_remaining: 2,
+        };
+        host.state.objects.push(owned_object.clone());
+        host.state.next_object_sequence = 1;
         let Some(player) = host.state.player_mut(&actor) else {
             panic!("the active player must exist");
         };
@@ -581,6 +594,17 @@ mod tests {
         );
         assert_eq!(host.outcome(), MatchOutcome::Victory { team: 1 });
         assert_eq!(host.state.last_turn_end_reason, TurnEndReason::Eliminated,);
+        assert!(host.state.objects.is_empty());
+        assert_eq!(
+            host.object_changes(),
+            &[PersistentObjectChange {
+                object: owned_object,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::OwnerEliminated,
+                },
+            }],
+            "fall elimination must surface the exact owner cleanup record",
+        );
     }
 
     #[test]

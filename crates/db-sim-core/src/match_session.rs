@@ -2326,6 +2326,78 @@ fn apply_status_change(
     Ok(())
 }
 
+type SnapshotObjectMap = BTreeMap<u32, PersistentObjectSnapshot>;
+
+/// Replays the ordered producer-owned object lifecycle against the pre-snapshot.
+///
+/// Snapshot diffs cannot see an object that was spawned and removed in one action, and a
+/// sequence-only presence check accepts duplicate, unknown, or stale records. This replay
+/// validates the complete object at each lifecycle boundary while still allowing a surviving
+/// pre-existing object to change in place (reported separately as `ObjectChanged`).
+fn reconcile_object_changes(
+    pre_objects: &[PersistentObjectSnapshot],
+    post_objects: &[PersistentObjectSnapshot],
+    object_changes: &[PersistentObjectChange],
+) -> Result<(), SessionFault> {
+    let mut shadow = snapshot_object_map(pre_objects)?;
+    let expected = snapshot_object_map(post_objects)?;
+    let pre_sequences: BTreeSet<u32> = shadow.keys().copied().collect();
+    let mut allocated_sequences = pre_sequences.clone();
+
+    for change in object_changes {
+        let projected = crate::client_contract::snapshot_object(&change.object);
+        match change.transition {
+            PersistentObjectTransition::Spawned => {
+                // Object sequences are monotonic match identities and may never be reused,
+                // even if an earlier object with the same sequence was removed in this call.
+                if !allocated_sequences.insert(projected.sequence)
+                    || shadow.insert(projected.sequence, projected).is_some()
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+            }
+            PersistentObjectTransition::Removed { .. } => {
+                let Some(previous) = shadow.remove(&projected.sequence) else {
+                    return Err(SessionFault::ContractInvariant);
+                };
+                if previous != projected {
+                    return Err(SessionFault::ContractInvariant);
+                }
+            }
+        }
+    }
+
+    if shadow.keys().ne(expected.keys()) {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    // A newly spawned survivor must match its producer record byte for byte. Existing
+    // survivors may legitimately mutate in place; their exact pre/post values are retained
+    // by `ObjectChanged` until such mutation gains its own producer-owned transition.
+    for (sequence, current) in &shadow {
+        if !pre_sequences.contains(sequence) && expected.get(sequence) != Some(current) {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+
+    Ok(())
+}
+
+fn snapshot_object_map(
+    objects: &[PersistentObjectSnapshot],
+) -> Result<SnapshotObjectMap, SessionFault> {
+    let mut by_sequence = BTreeMap::new();
+    for object in objects {
+        if by_sequence
+            .insert(object.sequence, object.clone())
+            .is_some()
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(by_sequence)
+}
+
 /// Everything the authoritative layer recorded while applying one command.
 ///
 /// Grouped rather than passed as loose parameters because they are one concept — the
@@ -2605,13 +2677,17 @@ fn derive_events(
         }
     }
 
+    reconcile_object_changes(
+        &pre_snapshot.persistent_objects,
+        &post_snapshot.persistent_objects,
+        object_changes,
+    )?;
+
     // Spawns and removals come from the producers that caused them, in the order they
     // happened. A replacement removes then spawns and an eviction spawns then removes; only
     // an ordered stream keeps those distinguishable, and only a record can describe an
     // object that spawned and was removed inside this one command.
-    let mut recorded_sequences: BTreeSet<u32> = BTreeSet::new();
     for change in object_changes {
-        recorded_sequences.insert(change.object.sequence);
         let projection = crate::client_contract::snapshot_object(&change.object);
         let kind = match change.transition {
             PersistentObjectTransition::Spawned => {
@@ -2623,19 +2699,6 @@ fn derive_events(
             },
         };
         push_pending(&mut pending, resolution_tick, 16, kind)?;
-    }
-
-    // The other half of the same check: anything that left authoritative state must have
-    // said why. The converse is deliberately unchecked — an object spawned and removed
-    // within this command is in neither snapshot, and recording it is the entire point.
-    for previous in &pre_snapshot.persistent_objects {
-        let survived = post_snapshot
-            .persistent_objects
-            .iter()
-            .any(|current| current.sequence == previous.sequence);
-        if !survived && !recorded_sequences.contains(&previous.sequence) {
-            return Err(SessionFault::ContractInvariant);
-        }
     }
 
     // `ObjectChanged` stays snapshot-derived: an object that survived the command is fully
@@ -2656,12 +2719,7 @@ fn derive_events(
                 },
             )?,
             Some(_) => {}
-            // Appearing in the post-snapshot without a record means a producer added an
-            // object without reporting it. Fail closed rather than emit a stream that
-            // disagrees with the snapshot it accompanies.
-            None if !recorded_sequences.contains(&current.sequence) => {
-                return Err(SessionFault::ContractInvariant);
-            }
+            // A new object already passed the producer-record replay above.
             None => {}
         }
     }
@@ -3869,6 +3927,24 @@ mod status_lifecycle_tests {
             .collect()
     }
 
+    fn status_mut<'a>(
+        snapshot: &'a mut MatchSnapshot,
+        player_id: &str,
+        kind: ClientStatusKind,
+    ) -> &'a mut StatusSnapshot {
+        snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_id)
+            .and_then(|player| {
+                player
+                    .statuses
+                    .iter_mut()
+                    .find(|status| status.kind == kind)
+            })
+            .expect("fixture status must exist")
+    }
+
     #[test]
     fn a_pass_surfaces_the_expiry_it_caused_despite_producing_no_outcome() {
         let mut session = session_with_status(
@@ -3952,6 +4028,152 @@ mod status_lifecycle_tests {
             "a later command must not repeat an earlier command's transitions",
         );
     }
+
+    #[test]
+    fn exact_status_replay_rejects_missing_duplicate_and_stale_ticks() {
+        let session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::Lockdown,
+                magnitude: 2,
+                turns_remaining: 2,
+            },
+        );
+        let pre = session.snapshot();
+        let mut post = pre.clone();
+        status_mut(&mut post, "a-local-player", ClientStatusKind::Lockdown).turns_remaining = 1;
+        let tick = StatusChange {
+            player_id: "a-local-player".to_owned(),
+            kind: EffectKind::Lockdown,
+            transition: StatusTransition::Ticked { turns_remaining: 1 },
+        };
+
+        assert_eq!(
+            reconcile_status_changes(&pre, &post, core::slice::from_ref(&tick)),
+            Ok(()),
+        );
+        assert_eq!(
+            reconcile_status_changes(&pre, &post, &[]),
+            Err(SessionFault::ContractInvariant),
+        );
+        assert_eq!(
+            reconcile_status_changes(&pre, &post, &[tick.clone(), tick]),
+            Err(SessionFault::ContractInvariant),
+        );
+        assert_eq!(
+            reconcile_status_changes(
+                &pre,
+                &post,
+                &[StatusChange {
+                    player_id: "a-local-player".to_owned(),
+                    kind: EffectKind::Lockdown,
+                    transition: StatusTransition::Ticked { turns_remaining: 2 },
+                }],
+            ),
+            Err(SessionFault::ContractInvariant),
+        );
+    }
+
+    #[test]
+    fn exact_status_replay_validates_refresh_and_charge_cardinality() {
+        let session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::GuaranteeCrit,
+                magnitude: 2,
+                turns_remaining: u8::MAX,
+            },
+        );
+        let pre = session.snapshot();
+        let mut refreshed = pre.clone();
+        let refreshed_status = status_mut(
+            &mut refreshed,
+            "a-local-player",
+            ClientStatusKind::GuaranteeCrit,
+        );
+        refreshed_status.magnitude = 3;
+        let correct_refresh = StatusChange {
+            player_id: "a-local-player".to_owned(),
+            kind: EffectKind::GuaranteeCrit,
+            transition: StatusTransition::Refreshed {
+                magnitude: 3,
+                turns_remaining: u8::MAX,
+                replaced_magnitude: 2,
+                replaced_turns_remaining: u8::MAX,
+            },
+        };
+        assert_eq!(
+            reconcile_status_changes(&pre, &refreshed, core::slice::from_ref(&correct_refresh),),
+            Ok(()),
+        );
+        let mut stale_refresh = correct_refresh;
+        if let StatusTransition::Refreshed {
+            replaced_magnitude, ..
+        } = &mut stale_refresh.transition
+        {
+            *replaced_magnitude = 1;
+        }
+        assert_eq!(
+            reconcile_status_changes(&pre, &refreshed, &[stale_refresh]),
+            Err(SessionFault::ContractInvariant),
+        );
+
+        let mut exhausted = pre.clone();
+        exhausted
+            .players
+            .iter_mut()
+            .find(|player| player.id == "a-local-player")
+            .expect("fixture player must exist")
+            .statuses
+            .clear();
+        let exact = vec![
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::GuaranteeCrit,
+                transition: StatusTransition::ChargeConsumed { remaining: 1 },
+            },
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::GuaranteeCrit,
+                transition: StatusTransition::Exhausted,
+            },
+        ];
+        assert_eq!(reconcile_status_changes(&pre, &exhausted, &exact), Ok(()));
+        assert_eq!(
+            reconcile_status_changes(&pre, &exhausted, &exact[1..]),
+            Err(SessionFault::ContractInvariant),
+            "one missing charge transition must fail closed",
+        );
+    }
+
+    #[test]
+    fn exact_status_replay_accepts_an_invisible_lifecycle_and_rejects_unknown_players() {
+        let session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let pre = session.snapshot();
+        let changes = vec![
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::Lockdown,
+                transition: StatusTransition::Applied {
+                    magnitude: 1,
+                    turns_remaining: 1,
+                },
+            },
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::Lockdown,
+                transition: StatusTransition::Expired,
+            },
+        ];
+        assert_eq!(reconcile_status_changes(&pre, &pre, &changes), Ok(()));
+
+        let mut unknown = changes;
+        unknown[0].player_id = "missing-player".to_owned();
+        assert_eq!(
+            reconcile_status_changes(&pre, &pre, &unknown),
+            Err(SessionFault::ContractInvariant),
+        );
+    }
 }
 
 /// Persistent-object lifecycle reaching the client event stream.
@@ -3964,8 +4186,10 @@ mod status_lifecycle_tests {
 #[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod object_lifecycle_tests {
     use super::*;
-    use crate::match_setup::{MatchMode, MatchPlayerConfig};
-    use crate::types::Appearance;
+    use crate::fixed::FixedPoint;
+    use crate::match_host::MatchHost;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::{Appearance, PersistentObject, PersistentObjectKind};
 
     const ALEPH: &str = "a-local-player";
 
@@ -4041,6 +4265,21 @@ mod object_lifecycle_tests {
             .collect()
     }
 
+    fn lifecycle_object(sequence: u32) -> PersistentObject {
+        PersistentObject {
+            sequence,
+            owner_id: ALEPH.to_owned(),
+            kind: PersistentObjectKind::EmbeddedKnife,
+            position: FixedPoint::new(4_096, 2_048),
+            health: 1,
+            turns_remaining: u8::MAX,
+        }
+    }
+
+    fn projected(object: &PersistentObject) -> PersistentObjectSnapshot {
+        crate::client_contract::snapshot_object(object)
+    }
+
     #[test]
     fn embedding_a_knife_reports_the_spawn() {
         let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
@@ -4104,6 +4343,24 @@ mod object_lifecycle_tests {
             ],
             "both detonations are reported, each naming why it happened",
         );
+        let ordered_lifecycle: Vec<(&str, u32)> = transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::ObjectSpawned { object } => {
+                    Some(("spawned", object.sequence))
+                }
+                PresentationEventKind::ObjectRemoved { previous, .. } => {
+                    Some(("removed", previous.sequence))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ordered_lifecycle,
+            vec![("spawned", 1), ("removed", 0), ("removed", 1)],
+            "session events must retain the producer's causal order",
+        );
     }
 
     #[test]
@@ -4134,6 +4391,135 @@ mod object_lifecycle_tests {
             );
             assert_eq!(cause.wire_name(), "detonated");
         }
+    }
+
+    #[test]
+    fn exact_replay_accepts_a_transient_spawn_then_removal() {
+        let object = lifecycle_object(7);
+        let changes = vec![
+            PersistentObjectChange {
+                object: object.clone(),
+                transition: PersistentObjectTransition::Spawned,
+            },
+            PersistentObjectChange {
+                object,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::Detonated,
+                },
+            },
+        ];
+
+        assert_eq!(reconcile_object_changes(&[], &[], &changes), Ok(()));
+    }
+
+    #[test]
+    fn exact_replay_rejects_missing_unknown_duplicate_and_stale_records() {
+        let object = lifecycle_object(7);
+        let pre = vec![projected(&object)];
+        let removal = PersistentObjectChange {
+            object: object.clone(),
+            transition: PersistentObjectTransition::Removed {
+                cause: PersistentObjectRemovalCause::Detonated,
+            },
+        };
+
+        assert_eq!(
+            reconcile_object_changes(&pre, &[], &[]),
+            Err(SessionFault::ContractInvariant),
+            "a real disappearance requires a producer record",
+        );
+        assert_eq!(
+            reconcile_object_changes(&[], &[], core::slice::from_ref(&removal)),
+            Err(SessionFault::ContractInvariant),
+            "an unknown removal cannot be invented",
+        );
+        assert_eq!(
+            reconcile_object_changes(&pre, &[], &[removal.clone(), removal.clone()]),
+            Err(SessionFault::ContractInvariant),
+            "the same object cannot be removed twice",
+        );
+
+        let mut stale = removal;
+        stale.object.health = 0;
+        assert_eq!(
+            reconcile_object_changes(&pre, &[], &[stale]),
+            Err(SessionFault::ContractInvariant),
+            "the complete last object snapshot must match",
+        );
+    }
+
+    #[test]
+    fn exact_replay_rejects_unrecorded_or_reused_spawns() {
+        let object = lifecycle_object(7);
+        let post = vec![projected(&object)];
+        let spawn = PersistentObjectChange {
+            object: object.clone(),
+            transition: PersistentObjectTransition::Spawned,
+        };
+
+        assert_eq!(
+            reconcile_object_changes(&[], &post, &[]),
+            Err(SessionFault::ContractInvariant),
+            "an object cannot appear without its spawn record",
+        );
+        assert_eq!(
+            reconcile_object_changes(&post, &post, core::slice::from_ref(&spawn),),
+            Err(SessionFault::ContractInvariant),
+            "an allocated sequence cannot be spawned again",
+        );
+        assert_eq!(
+            reconcile_object_changes(&[], &post, &[spawn.clone(), spawn]),
+            Err(SessionFault::ContractInvariant),
+            "duplicate spawn records must fail closed",
+        );
+    }
+
+    #[test]
+    fn exact_replay_rejects_a_removal_when_the_object_survives() {
+        let object = lifecycle_object(7);
+        let snapshot = vec![projected(&object)];
+        let removal = PersistentObjectChange {
+            object,
+            transition: PersistentObjectTransition::Removed {
+                cause: PersistentObjectRemovalCause::Detonated,
+            },
+        };
+
+        assert_eq!(
+            reconcile_object_changes(&snapshot, &snapshot, &[removal]),
+            Err(SessionFault::ContractInvariant),
+        );
+    }
+
+    #[test]
+    fn owner_cleanup_reaches_the_session_with_its_exact_cause() {
+        let mut state = build_initial_state(&knife_duel()).expect("fixture state must build");
+        let position = state
+            .player(ALEPH)
+            .map(|player| player.position)
+            .expect("Aleph must exist");
+        state.player_mut(ALEPH).expect("Aleph must exist").health = 0;
+        let owned = PersistentObject {
+            sequence: 0,
+            owner_id: ALEPH.to_owned(),
+            kind: PersistentObjectKind::EmbeddedKnife,
+            position,
+            health: 1,
+            turns_remaining: u8::MAX,
+        };
+        state.objects.push(owned);
+        state.next_object_sequence = 1;
+        let host = MatchHost::start(state).expect("the surviving player must open the match");
+        let mut session = MatchSessionHost::from_new_host(host);
+
+        let pass = command_for(&session, "cleanup-pass", MatchCommandKind::Pass);
+        let transition = session.apply(pass).expect("pass must reconcile cleanup");
+
+        assert_eq!(
+            removals(&transition),
+            vec![(0, PersistentObjectRemovalCause::OwnerEliminated)],
+        );
+        assert!(session.snapshot().persistent_objects.is_empty());
     }
 }
 

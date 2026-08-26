@@ -232,11 +232,11 @@ fn assert_vector(name: &str, actual: &str, expected: &str) {
 // ---------------------------------------------------------------------------
 // The corpus.
 //
-// REGENERATED 2026-08-24 at SIMULATION_VERSION 5. A terminal action now commits
-// `pending_turn_end_reason` into `last_turn_end_reason` even though victory deliberately skips
-// `end_turn`; previously a final attack, timeout, pass, or movement fall could expose the
-// preceding turn's reason. The version bump moves every hash, while terminal scripts may also
-// reflect the corrected state. Previous values are recorded per-vector below.
+// REGENERATED 2026-08-25 at SIMULATION_VERSION 6. Status durations now count the affected
+// player's own turns, Feeding Frenzy forces and consumes its three live Carrion Call crits, and
+// ordinary health-zero/fall elimination removes the defeated owner's persistent objects. The
+// version bump moves every hash even where a script does not exercise those mechanics. Previous
+// values are recorded per-vector below.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -245,9 +245,10 @@ fn golden_all_passes_terminates_identically() {
     // and the forced draw. This is the one that catches a change to match termination.
     let script = vec![Step::Pass; 64];
     let actual = run(duel(1, "arzum", "emi", 300, 5), &script);
-    // Was "876de8693b5b75a8" at SIMULATION_VERSION 4 and
+    // Was "b75ec70f007a7a7b" at SIMULATION_VERSION 5,
+    // "876de8693b5b75a8" at SIMULATION_VERSION 4, and
     // "e828d490e955f3d7" at SIMULATION_VERSION 3.
-    assert_vector("all_passes", &actual, "b75ec70f007a7a7b");
+    assert_vector("all_passes", &actual, "ecff79397aa402de");
 }
 
 #[test]
@@ -262,9 +263,10 @@ fn golden_walking_duel() {
         Step::Pass,
     ];
     let actual = run(duel(7, "arzum", "natomica", 300, 5), &script);
-    // Was "b28768a38619df88" at SIMULATION_VERSION 4 and
+    // Was "0038e5ddfabfec81" at SIMULATION_VERSION 5,
+    // "b28768a38619df88" at SIMULATION_VERSION 4, and
     // "35636b623102bbed" at SIMULATION_VERSION 3.
-    assert_vector("walking_duel", &actual, "0038e5ddfabfec81");
+    assert_vector("walking_duel", &actual, "af6978b06c1f9772");
 }
 
 #[test]
@@ -292,9 +294,10 @@ fn golden_firing_duel() {
         outcome.total_health_lost > 0,
         "a firing vector must actually deal damage, or it covers nothing: {outcome:?}",
     );
-    // Was "2fbdca99f94c944c" at SIMULATION_VERSION 4 and
+    // Was "9c53418575ea824d" at SIMULATION_VERSION 5,
+    // "2fbdca99f94c944c" at SIMULATION_VERSION 4, and
     // "7b49a0275beafc1f" at SIMULATION_VERSION 3.
-    assert_vector("firing_duel", &actual, "9c53418575ea824d");
+    assert_vector("firing_duel", &actual, "a009c290a796d1ba");
 }
 
 #[test]
@@ -320,9 +323,10 @@ fn golden_mixed_actions() {
         outcome.turns_elapsed > 1,
         "a mixed script must advance several turns: {outcome:?}",
     );
-    // Was "765e76572c02b6b9" at SIMULATION_VERSION 4 and
+    // Was "ea50d7336feb3a94" at SIMULATION_VERSION 5,
+    // "765e76572c02b6b9" at SIMULATION_VERSION 4, and
     // "112717b8831056f8" at SIMULATION_VERSION 3.
-    assert_vector("mixed_actions", &actual, "ea50d7336feb3a94");
+    assert_vector("mixed_actions", &actual, "c29e2d75ceba7f33");
 }
 
 #[test]
@@ -342,9 +346,10 @@ fn golden_low_health_duel_reaches_a_decision() {
         outcome.total_health_lost > 0,
         "the decision vector must actually damage somebody: {outcome:?}",
     );
-    // Was "06db50b907568060" at SIMULATION_VERSION 4 and
+    // Was "323672057a1d53af" at SIMULATION_VERSION 5,
+    // "06db50b907568060" at SIMULATION_VERSION 4, and
     // "b88af74446995c79" at SIMULATION_VERSION 3.
-    assert_vector("low_health_duel", &actual, "323672057a1d53af");
+    assert_vector("low_health_duel", &actual, "0c908bfce4b927d6");
 }
 
 #[test]

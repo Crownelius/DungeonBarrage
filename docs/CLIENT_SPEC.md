@@ -118,12 +118,12 @@ that platform, completes the smoke scenario in §20.5.
 
 ## 3. Truthful current state
 
-The committed baseline from which this v2 work began was `fa7f0af`. The first C1 prerequisite slice
-has now landed in the working tree, but a capability remains incomplete until its gate in §20 passes:
+The committed baseline from which this v2 work began was `fa7f0af`. C1 now continues on the
+`feat/c1-outcome-provenance` branch; a capability remains incomplete until its gate in §20 passes:
 
 - `db-sim-core` has real match orchestration, maps, movement, ability resolution, terrain blocks,
   passive interruption, status ticking, victory, and frozen versioned golden vectors in the
-  current working tree.
+  committed repository.
 - `MatchHost` currently resolves most of a turn synchronously before `submit_ability` returns.
   Transient phases are therefore not observable client animation states.
 - A validated, transport-free `MatchConfig`/`create_match` path now constructs a real host from the
@@ -134,29 +134,33 @@ has now landed in the working tree, but a capability remains incomplete until it
 - A read-only, engine-neutral core snapshot projection covers every authoritative state field a
   client must render, including deterministic turn order, elimination, terrain generation, sorted
   entities, and the exact host hash.
-- The working tree now contains a transport-free `MatchSessionHost`: one normalized typed
+- The committed feature checkpoint contains a transport-free `MatchSessionHost`: one normalized typed
   `MatchCommand` union, canonical semantic digests, generation ownership, cloned-host application,
   retained accepted/rejected first results, exact duplicate replay, changed-command-ID security
   rejection, exact 16,384-entry/64 MiB canonical-byte resource bounds, and atomic
   `MatchTransition` plus post-snapshot/hash.
   Accepted operations increment generation exactly once only when authoritative state actually
   changes; a legal zero/blocked move remains accepted without inventing a generation.
-- Its first event builder preserves independent projectile traces/impacts; derives deterministic
-  net movement, health, gauge, status, object, passive, elimination, turn, and outcome events; and
+- Its event builder preserves independent projectile traces/impacts; emits exact per-strike crit,
+  damage, delivery, status-lifecycle, and ordered object-lifecycle records; derives deterministic
+  net movement, health, gauge, passive, elimination, turn, and outcome events; and
   produces exact changed-cell row-runs for terrain. All current net movement is conservatively
   labelled authoritative resolution: without the post-walk/pre-settle path, even an unchanged final
   height cannot prove that no climb-and-settle occurred. `requestedMove` remains reserved for a
-  richer movement outcome. The builder does not fabricate missing combat provenance. Exact
-  per-strike damage timing, public RNG outcomes, non-projectile strike impact points, ephemeral
-  status lifecycles, and some removal causes still require richer authoritative outcomes before the
-  complete §20.1 vocabulary gate can pass.
+  richer movement outcome. Status and object records are replayed exactly against pre/post snapshots;
+  missing, duplicate, unknown, stale, or mismatched lifecycle records fail closed. The builder does
+  not fabricate missing provenance. Public non-strike RNG outcomes (including teleport destination
+  draws), richer movement subpaths, and some non-strike health/elimination attribution remain open.
 - Movement settling now ends an eliminated active player's turn and drives victory/rotation. The
   former path could leave a dead active player stranded in `Movement`. Terminal victory now also
-  commits the final pending turn reason instead of exposing the prior turn's reason; this
-  replay-visible correction is `SIMULATION_VERSION = 5` and regenerated every golden vector under
-  the documented procedure.
-- The session/ABI composite envelope, authority-timeout transition, read-only preview, and
-  production serialization remain incomplete. The first shared raw JSON fixture now passes direct
+  commits the final pending turn reason instead of exposing the prior turn's reason. Version 6 also
+  makes status duration mean affected-player turns, makes Feeding Frenzy force/consume the next three
+  live Carrion Call crits without RNG draws, and removes a defeated owner's persistent objects for
+  ordinary damage/fall elimination. Every golden vector and shared hash was regenerated under the
+  documented compatibility procedure.
+- Authority-owned timeout is now a separate non-client session entry point with the same bounded,
+  idempotent ledger. The session/ABI composite envelope, read-only preview, and production
+  serialization remain incomplete. The first shared raw JSON fixture now passes direct
   Rust with frozen hashes, nonzero movement, an independent projectile/sample minimum, generation
   changes, turn handoff, and live-host hash equality. Full byte-for-byte response fixtures belong
   to C2's production serializer rather than a test-only imitation.
@@ -353,7 +357,7 @@ explicit length, not NUL-terminated strings.
 {
   "schemaVersion": 1,
   "matchId": "local-opaque-id",
-  "simulationVersion": 5,
+  "simulationVersion": 6,
   "contentVersion": 1,
   "match": {
     "seed": 12345,
@@ -557,17 +561,17 @@ Initial closed event kinds:
 |---|---|
 | `projectileTrace` | trace ID, owner, ability, sampled fixed-point positions with ticks, terminal impact |
 | `impact` | trace ID, position, cause, material/entity target where known |
-| `strikeResolved` | owner and ability; exact strike point once the authoritative outcome retains it |
+| `strikeResolved` | owner, ability, dense strike index, target, exact point, melee/projectile/effect delivery, cited trace where applicable, `notEligible`/`missed`/`landed`/`forced` crit provenance, applied damage, elimination flag |
 | `terrainChanged` | terrain generation and authoritative dirty rectangles |
 | `blockChanged` | block ID, previous/new health and surviving bounds |
 | `healthChanged` | player ID and itemized direct/splash/Backlash/hazard/wall/heal values |
 | `gaugeChanged` | player ID, previous/new gauge, actual delta |
 | `randomOutcome` | roll purpose, bounded public result, and affected action/entity IDs |
-| `statusChanged` | player ID, status kind, previous/new magnitude and duration |
+| `statusChanged` | player ID, status kind, exact `Applied`, `Refreshed`, `ChargeConsumed`, `Ticked`, `Exhausted`, or `Expired` transition |
 | `entityMoved` | player/object ID, cause, sampled or start/end positions |
 | `objectSpawned` | complete persistent-object snapshot |
-| `objectChanged` | object ID and authoritative new state |
-| `objectRemoved` | object ID and cause |
+| `objectChanged` | complete previous/current object snapshots |
+| `objectRemoved` | complete last object snapshot and exact closed producer cause (`replaced`, `capacityEvicted`, `detonated`, `ownerEliminated`; `expired`/`destroyed` remain reserved until those mechanics exist) |
 | `playerEliminated` | player ID and identifiable cause |
 | `passiveChoiceRequired` | player ID and three allowed passive IDs |
 | `passiveChosen` | player ID and accepted passive ID |
@@ -583,11 +587,10 @@ If a mechanic cannot be represented by this vocabulary, extend and version the e
 Rust before implementing bespoke C# inference.
 
 The current C1 implementation is deliberately truthful where authoritative provenance is not yet
-retained: a net health change may carry no itemized breakdown, and object/elimination changes may be
-labelled `authoritativeResolution`; it does not synthesize a target, strike point, RNG roll, or
-per-strike timestamp from the final state. Those labels are implementation-state evidence, not a
-weakening of the required payloads above. C1 remains open until the outcome/resolver records enough
-information for every §20.1 scenario.
+retained: a net health or movement change may still carry only `authoritativeResolution`, and
+Arzum/Aleph destination draws do not yet have a public `randomOutcome`. It does not synthesize those
+facts from final state. Strike crit provenance, ephemeral status lifecycles, and object spawn/removal
+causes are now producer-owned and fail-closed. C1 remains open until every §20.1 scenario is covered.
 
 ### 7.6 Presentation manifest and previews
 
@@ -1224,6 +1227,14 @@ changes authoritative simulation or tactical readability.
   object lifecycle, terrain/block change, elimination, pass, timeout, and victory each produce a
   representable ordered transition.
 - Every projectile retains its own samples and impact.
+- Feeding Frenzy followed by Carrion Call produces three `forced` crit records, consumes no crit RNG
+  draws, and records two charge consumptions plus exhaustion; ordinary crits retain independent draws.
+- Status transitions and ordered object lifecycles replay exactly from the pre-snapshot to the
+  post-snapshot. Missing, duplicate, unknown, stale, or mismatched records fault before publication;
+  a spawn-and-remove lifecycle invisible to snapshot diff remains representable.
+- Status durations tick only on the affected player's own completed turns. Count-based
+  `GuaranteeCrit` is consumed by strikes rather than the duration clock.
+- Ordinary health-zero/fall elimination removes all owned objects once with `ownerEliminated`.
 - An actor eliminated during settling cannot enter `PassiveSelection`; pass and timeout cannot bypass
   an owed passive choice.
 - Rejection and duplicate replay have exact non-mutation/idempotency assertions.
@@ -1322,15 +1333,17 @@ Delivered so far: transport-free `MatchConfig`, engine-neutral snapshots, multi-
 post-host turn/hash semantics, correct gauge deltas, the normalized command union, canonical command
 identity, generation-owning/idempotent `MatchSessionHost`, accepted/rejected duplicate replay,
 atomic post-snapshot/hash transitions, deterministic net-diff events, exact terrain dirty row-runs,
-bounded canonical ledger-byte accounting, movement-fall elimination progression, terminal-turn
-reason correctness at `SIMULATION_VERSION = 5`, plus a strict shared raw-request fixture bundle
-whose direct Rust replay freezes meaningful semantic expectations and exact hashes.
+bounded canonical ledger-byte accounting, authority-only timeout, exact strike/crit and status
+provenance, ordered persistent-object lifecycle causes with exact replay reconciliation,
+movement-fall elimination progression, and the version-6 lifecycle corrections, plus a strict
+shared raw-request fixture bundle whose direct Rust replay freezes meaningful semantic expectations
+and exact hashes.
 
-Still required before the gate closes: complete per-strike/strike-impact/RNG/status/object
-provenance, authority-timeout transition, read-only preview, the session/ABI composite snapshot
-envelope, and the remaining §20.1 direct transition scenarios including real multi-strike, passive
-choice, object lifecycle, terrain/block change, timeout, and victory transitions. Full serialized
-response bytes remain a C2 production-serializer gate.
+Still required before the gate closes: public non-strike RNG provenance, read-only preview, the
+session/ABI composite snapshot envelope, and the remaining §20.1 direct transition scenarios,
+especially passive choice, terrain/block change, and full victory attribution. Persistent-object
+expiry and destruction need real authoritative mechanics before their reserved causes can be
+emitted. Full serialized response bytes remain a C2 production-serializer gate.
 
 **Gate:** §20.1 passes, including a real multi-strike and
 `transition.postStateHash == hash_state(host.state())`.
@@ -1408,6 +1421,9 @@ These do not block C1–C3 unless stated:
    free-look policy is a UX decision.
 4. **Launch architecture breadth:** Windows x64 is first; the date at which macOS/Linux become
    release-blocking depends on distribution planning, but no untested platform may be advertised.
+5. **Numa Pin balance after corrected duration semantics:** the engine now interprets two turns as
+   two turns of the affected player, independent of player count. Confirm whether the numeric value
+   remains two during balance playtesting; do not restore global-action ticking.
 
 Settled here and no longer open: Godot/C# versus an all-Rust client, bot location (Rust), local versus
 server timer ownership, initial online prediction (none), and future server language (Rust).

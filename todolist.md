@@ -328,11 +328,12 @@ fills, not the first time the player attacks afterwards.
 ## 🟠 P13 — The native client path stops at a partial Rust session contract
 
 **The problem.** ADR 0006 settled Godot/C# for presentation, Rust for authoritative rules,
-and a client-only C ABI. The working tree now has validated match creation, atomic snapshots,
-normalized commands, a generation/idempotency-owning `MatchSessionHost`, ordered net-diff
-transitions, exact terrain dirty row-runs, and the first shared machine-readable match fixture.
-It still has no preview contract, authority-timeout transition, complete per-strike/RNG/status
-provenance, real FFI match handle, C# session, or Godot project.
+and a client-only C ABI. The committed C1 feature branch now has validated match creation, atomic
+snapshots, normalized commands, a generation/idempotency-owning `MatchSessionHost`, exact
+strike/crit and status lifecycle records, ordered persistent-object lifecycle causes, an
+authority-only timeout, exact terrain dirty row-runs, and the first shared machine-readable match
+fixture. It still has no public non-strike RNG record, preview contract, safe session-plus-ledger
+restore, real FFI match handle, C# session, or Godot project.
 The game is therefore not playable despite the simulation being substantial.
 
 **Why it matters.** Starting scenes now would force C# to infer missing authoritative events or
@@ -342,7 +343,7 @@ nothing about the real Rust host.
 **Solutions.**
 
 1. **Continue the ordered C1 → C2 → C3 → C4 gates in `CLIENT_SPEC.md`.** *(Recommended.)*
-   Finish truthful Rust provenance/preview and the remaining direct transition scenarios; then
+   Finish non-strike RNG provenance/preview/restore and the remaining direct transition scenarios; then
    make the same raw fixture pass through the C ABI and headless C# before creating Godot scenes.
    This is slower to first pixels but every layer proves the one below it.
 2. **Build a Godot vertical prototype against hand-authored C# DTOs now.** Faster visual feedback,
@@ -373,7 +374,9 @@ exact commands, and ownership warnings live in `docs/HANDOFF.md`.
    context. Scope the replacement to this repository alone rather than all 28.
 2. **Confirm four character rules** (`docs/CHARACTERS.md` §7): Karl's 24%/74% vs the brief's
    33%; Numa's harpoon threshold; Zeke's 22 HP heal reading; Arzum's 50–200% roll in rated play.
-   Karl's crit *chance* is additionally an unsourced 20% placeholder.
+   Karl's crit *chance* is additionally an unsourced 20% placeholder. Also confirm whether Numa's
+   two-turn Pin remains numerically balanced now that turns correctly mean the affected player's
+   turns rather than global submitted actions.
 3. **Level-up reward balance** — the character option dominates the credit option 46×
    (`docs/PROGRESSION.md` §4). Recommended fix is a one-line data change.
 

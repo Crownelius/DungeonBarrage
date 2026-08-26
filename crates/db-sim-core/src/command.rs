@@ -1486,6 +1486,105 @@ mod tests {
     }
 
     #[test]
+    fn feeding_frenzy_forces_and_consumes_all_three_live_carrion_call_crits() {
+        let mut attacker = player("attacker", "karl", FixedPoint::new(0, 0));
+        attacker.special_gauge = GAUGE_FULL;
+        let defender = player("defender", "huck", FixedPoint::new(1024, 0));
+        let mut state = state_with_players("attacker", vec![attacker, defender]);
+        let special = AbilityCommand {
+            command_id: "feeding-frenzy".to_owned(),
+            player_id: "attacker".to_owned(),
+            expected_turn_number: 1,
+            slot: AbilitySlot::Special,
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("defender".to_owned()),
+            secondary_target_player_id: None,
+        };
+
+        let CommandResult::Accepted(marked) = apply_ability(&mut state, &special) else {
+            panic!("Feeding Frenzy must resolve")
+        };
+        assert_eq!(
+            marked.status_changes,
+            vec![StatusChange {
+                player_id: "defender".to_owned(),
+                kind: EffectKind::GuaranteeCrit,
+                transition: StatusTransition::Applied {
+                    magnitude: 3,
+                    turns_remaining: u8::MAX,
+                },
+            }],
+        );
+        assert!(
+            marked
+                .strikes
+                .iter()
+                .all(|strike| strike.crit == CritRoll::NotEligible),
+            "the zero-damage marking action must not consume its own mark",
+        );
+
+        // Model Karl's next action. The host normally performs this turn reset; this unit
+        // test stays at the command boundary so it can compare the RNG state exactly.
+        state.phase = MatchPhase::AimingAndSelection;
+        state.has_attacked_this_turn = false;
+        state.turn_number = 2;
+        let rng_before = state.rng_state;
+        let basic = AbilityCommand {
+            command_id: "carrion-call".to_owned(),
+            player_id: "attacker".to_owned(),
+            expected_turn_number: 2,
+            slot: AbilitySlot::Basic,
+            angle_millidegrees: 0,
+            power_basis_points: 5_000,
+            target_player_id: Some("defender".to_owned()),
+            secondary_target_player_id: None,
+        };
+
+        let CommandResult::Accepted(volley) = apply_ability(&mut state, &basic) else {
+            panic!("Carrion Call must resolve")
+        };
+        assert_eq!(volley.strikes.len(), 3);
+        assert!(
+            volley
+                .strikes
+                .iter()
+                .all(|strike| strike.crit == CritRoll::Forced && !strike.crit.consumed_draw()),
+            "all three live projectile strikes must report forced, draw-free crits",
+        );
+        assert_eq!(
+            volley.status_changes,
+            vec![
+                StatusChange {
+                    player_id: "defender".to_owned(),
+                    kind: EffectKind::GuaranteeCrit,
+                    transition: StatusTransition::ChargeConsumed { remaining: 2 },
+                },
+                StatusChange {
+                    player_id: "defender".to_owned(),
+                    kind: EffectKind::GuaranteeCrit,
+                    transition: StatusTransition::ChargeConsumed { remaining: 1 },
+                },
+                StatusChange {
+                    player_id: "defender".to_owned(),
+                    kind: EffectKind::GuaranteeCrit,
+                    transition: StatusTransition::Exhausted,
+                },
+            ],
+        );
+        assert_eq!(
+            state.rng_state, rng_before,
+            "a guaranteed volley must consume no crit RNG draws",
+        );
+        assert!(
+            state
+                .player("defender")
+                .is_some_and(|player| player.statuses.is_empty()),
+            "the third forced crit must exhaust the mark",
+        );
+    }
+
+    #[test]
     fn gauge_gained_is_the_capped_action_delta_not_the_resulting_total() {
         let mut state = base_state();
         let Some(actor) = state.player_mut("attacker") else {

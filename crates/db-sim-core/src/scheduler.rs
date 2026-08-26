@@ -19,9 +19,9 @@
 //! lap from `TurnStart` back to `TurnStart` is exactly eight calls. Two steps in that lap do
 //! real work rather than just relabelling the phase:
 //!
-//! - Leaving `StatusResolution` ticks every status exactly once
-//!   ([`resolve::status::tick_statuses`]) — never from anywhere else in this file, so a lap
-//!   around the cycle can never tick a status twice and silently halve every duration.
+//! - Leaving `StatusResolution` ticks the active player's duration statuses exactly once
+//!   ([`resolve::status::tick_statuses`]) — never from anywhere else in this file, so a
+//!   status counts affected-player turns and cannot be eroded by intervening players.
 //! - Leaving `VictoryCheck` calls [`victory::check_and_finalize`]. On a terminal outcome the
 //!   phase is left at [`MatchPhase::MatchComplete`] (set by that function) and the lap stops
 //!   there for good; otherwise this module rotates to the next living player via
@@ -161,7 +161,7 @@ fn leave_victory_check(
     state: &mut SimulationState,
     object_changes: &mut Vec<PersistentObjectChange>,
 ) -> SimResult<MatchPhase> {
-    let mut outcome = victory::check_and_finalize(state)?;
+    let mut outcome = victory::check_and_finalize(state, object_changes)?;
 
     // The real bound on a stalled match is sudden death's hazard actually eliminating
     // someone; absent that hazard (out of this file's scope), this is what keeps "a match
@@ -171,7 +171,7 @@ fn leave_victory_check(
     // "the match is over" for this path to get out of sync with.
     if matches!(outcome, MatchOutcome::InProgress) && state.turn_number >= HARD_TURN_LIMIT {
         force_draw(state, object_changes)?;
-        outcome = victory::check_and_finalize(state)?;
+        outcome = victory::check_and_finalize(state, object_changes)?;
     }
 
     if matches!(outcome, MatchOutcome::InProgress) {

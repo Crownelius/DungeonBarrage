@@ -1483,3 +1483,86 @@ Golden vectors unchanged and `SIMULATION_VERSION` stays at 5: the timeout drives
 
 Steps 4 through 8: the read-only preview DTO, restore semantics requiring host plus a verified
 complete ledger, the composite session/ABI envelope and remaining §20.1 fixtures, then C2 and C3.
+
+---
+
+## 2026-08-25 - C1 provenance audit corrections and simulation version 6
+
+This continuation reviewed the Opus handoff at `5946c63`, including the persistent-object
+lifecycle work in `a6b9cf4` and the authority-only timeout in `5946c63`. The review confirmed the
+new strike, status, object, and timeout surfaces, then closed three correctness gaps before
+landing them:
+
+- object reconciliation had only checked whether a sequence appeared in a producer record, so a
+  stale, duplicate, mismatched, or otherwise impossible lifecycle record could be accepted;
+- a player reduced to zero health by ordinary damage or falling could retain owned persistent
+  objects unless an explicit victory helper happened to eliminate that player; and
+- gameplay-visible status timing, forced-crit, and owner-cleanup changes were still advertised as
+  simulation version 5.
+
+### Corrections
+
+`MatchSessionHost` now replays ordered persistent-object lifecycle records against a shadow map.
+Spawns must introduce a new sequence and match surviving post-state snapshots; removals must name
+an existing object and match its full recorded snapshot. Duplicate sequences, reused sequences,
+unknown or stale removals, removal records for objects still present, and unrecorded spawns are
+faults. Transient spawn-then-remove lifecycles remain valid, and their event order is preserved.
+
+Victory finalization now performs idempotent owner cleanup for every player already at zero health
+before evaluating the winner. This covers ordinary strike damage and movement falls as well as
+explicit elimination paths. The resulting removal records use `OwnerEliminated`, and the host and
+session tests assert the exact snapshot, cause, and event ordering.
+
+The live Feeding Frenzy regression now proves that Carrion Call consumes three charges in order,
+produces three forced critical strikes, and does not advance the critical RNG stream. A
+zero-damage special does not consume its own Feeding Frenzy mark. Status and object mutation tests
+also pin exact replay cardinality, old values, snapshots, causes, and ordering.
+
+### Compatibility surface
+
+`SIMULATION_VERSION` is now 6. The version bump covers affected-player-only duration ticking, live
+Feeding Frenzy forced criticals, and canonical owned-object cleanup for players reduced to zero
+health. Golden vectors and the shared horizontal duel fixture were regenerated deliberately.
+
+| Vector | Version 5 hash | Version 6 hash |
+|---|---|---|
+| all passes | `b75ec70f007a7a7b` | `ecff79397aa402de` |
+| walking | `0038e5ddfabfec81` | `af6978b06c1f9772` |
+| firing | `9c53418575ea824d` | `a009c290a796d1ba` |
+| mixed | `ea50d7336feb3a94` | `c29e2d75ceba7f33` |
+| low health | `323672057a1d53af` | `0c908bfce4b927d6` |
+
+The version 6 shared fixture hashes are:
+
+| Snapshot | Hash |
+|---|---|
+| initial | `f67c5371bcddbdf5` |
+| after move | `378081bb2e830a5d` |
+| after ability / final | `d8686762470c0c36` |
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test -p db-sim-core --lib` | 492 pass, 0 fail |
+| `cargo test -p db-sim-core --test golden_vectors` | 7 pass, 0 fail |
+| `cargo test -p db-sim-core --test shared_match_fixtures` | 1 pass, 0 fail |
+| `cargo test --workspace` | 508 pass, 0 fail: 492 core, 7 golden, 1 shared fixture, 7 FFI, 1 WASM |
+| `cargo test --release -p db-sim-ffi` | 7 pass, 0 fail |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | pass: advisories, bans, licenses, and sources ok; unused allow-list warnings only |
+| `scripts/verify-toolchain.ps1` | pass: .NET 10.0.302, Rust/Cargo 1.94.0, Godot .NET/templates 4.7.1 |
+| `git diff --check` | clean |
+
+This entry is part of the landing commit on `feat/c1-outcome-provenance`; use `git rev-parse HEAD`
+for its final identifier and compare it with `@{upstream}` to verify push state.
+
+### Still open
+
+C1 still needs authoritative non-strike random-outcome records, the read-only preview DTO, verified
+host-plus-ledger restore, and the composite session/ABI envelope with the remaining section 20.1
+fixtures. `PersistentObjectRemovalCause::Expired` and `Destroyed` remain reserved until object
+lifetime and object-targeting mechanics exist. Numa's balance values remain a content decision,
+not a provenance or reconciliation gap.

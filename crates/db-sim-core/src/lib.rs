@@ -66,10 +66,11 @@ pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSIT
 /// a change to the canonical encoding. Every match records the version it ran under so
 /// old replays stay interpretable (`PLATFORM_STRATEGY.md` §6).
 ///
-/// Version 5 commits the final action's pending turn-end reason when victory completes a
-/// match without rotating to another player. Version 4 could expose the preceding turn's
-/// reason after a terminal attack, timeout, pass, or movement fall.
-pub const SIMULATION_VERSION: u32 = 5;
+/// Version 6 corrects three live lifecycle rules: statuses tick on the affected player's
+/// own turns, Feeding Frenzy's count-based mark forces and consumes Carrion Call crits, and
+/// ordinary health-zero/fall elimination removes the defeated owner's persistent objects.
+/// Version 5 remains the terminal-turn-reason compatibility boundary.
+pub const SIMULATION_VERSION: u32 = 6;
 
 /// Version of the gameplay content tables (weapons, maps, modes).
 pub const CONTENT_VERSION: u32 = 1;
