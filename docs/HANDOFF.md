@@ -248,7 +248,7 @@ indirect leaks and also enforces the release panic test and exact export list.
 
 These are outside the completed C1/C2 boundary:
 
-- No C# project, `SafeHandle`, managed DTO layer, `LocalMatchSession`, or Godot project exists. C3 is
+- ~~No C# project, `SafeHandle`, managed DTO layer, or `LocalMatchSession` exists~~ — all added in C3. No Godot project exists; that is C4. The original note read: C3 is
   next; do not begin scenes first.
 - Arzum's documented 50–200% Chain Strike second-hit damage is not implemented. The current special
   performs its first strike, records/selects a target, and teleports. The owner must settle the rated
@@ -269,7 +269,36 @@ Do not silently turn any of these into C# inference. Extend/version the Rust aut
 
 ---
 
-## 7. Exact next engineering sequence: C3
+## 7. C3 is complete — headless .NET interop and session layer
+
+`client/` holds a Godot-free `net10.0` solution: `DungeonBarrage.Client.Contracts` (strict managed
+envelope DTOs), `DungeonBarrage.Client.Interop` (`DbSimNative`, `DbSimBuffer`, `MatchSafeHandle`,
+`NativeLibraryResolver`, `LocalMatchSession`), and `DungeonBarrage.Client.Interop.Tests`.
+
+The gate is met: the frozen request files replay through the **real release** `db_sim_ffi` and match
+the frozen response files **byte for byte**, ending on `d8686762470c0c36`. 25 .NET tests cover
+fixture parity, disposal under normal/failure/cancellation/GC exits, status translation, and DTO
+strictness. All four documented .NET gates pass, plus every Rust gate (530 tests).
+
+See `docs/BUILD_LOG.md` for the design reasoning, the CA5392/CA5393 analyzer conflict and why
+`AssemblyDirectory` is correct here, and the mutation checks.
+
+### Next: C4's Godot shell
+
+Do not reopen C1/C2/C3 unless a gate regresses.
+
+1. Add `DungeonBarrage.Client` — the engine project, `project.godot`, export presets — referencing
+   the interop assembly. Keep every existing test Godot-free; adding an engine reference to the
+   current test projects would make them unrunnable headlessly, which is the property C3 bought.
+2. Model the remaining envelopes in the contracts assembly. Only the creation request and the
+   closed enums exist today; snapshot, transition, and presentation-event DTOs are still described
+   only by the frozen envelopes and the Rust types.
+3. Populate `client/native/` for the other advertised RIDs when those targets are actually built.
+   Three directories are deliberately empty rather than filled with untested binaries.
+
+---
+
+## 7b. Superseded C3 sequence (retained for provenance)
 
 Do not reopen C1/C2 or begin Godot scenes unless a gate regresses.
 

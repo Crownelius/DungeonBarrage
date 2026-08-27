@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The only assembly permitted to declare native imports, mirroring `db-sim-ffi` being the only
+    crate permitted `unsafe` (CLIENT_SPEC 8.5).
+  -->
+  <PropertyGroup>
+    <RootNamespace>DungeonBarrage.Client.Interop</RootNamespace>
+    <AssemblyName>DungeonBarrage.Client.Interop</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DungeonBarrage.Client.Contracts\DungeonBarrage.Client.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

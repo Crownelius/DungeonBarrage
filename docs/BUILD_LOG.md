@@ -1721,3 +1721,117 @@ indirect loss, and the error summary were all zero. CI fails on definite or indi
 This entry is part of the landing commit on `feat/c1-outcome-provenance`; use `git rev-parse HEAD`
 and compare it with `@{upstream}` for the final identifier and push state. The next implementation
 milestone is C3's Godot-free .NET interop/session layer, not a scene.
+
+---
+
+## C3 — headless .NET interop and session layer
+
+Greenfield `client/` solution, Godot-free, targeting `net10.0`. Three projects and no engine
+reference anywhere, so every test runs on an agent that has never seen Godot.
+
+### The gate
+
+`FixtureParityTests` feeds the frozen request files through the **real release** `db_sim_ffi.dll`
+and compares the responses to the frozen response files **byte for byte** — create, snapshot,
+preview, move, ability — ending on `d8686762470c0c36`, read out of the response the managed layer
+actually received rather than inferred from the file matching.
+
+Byte comparison rather than field comparison is the point. A parse-both-sides-and-check-properties
+test would pass even if C# had reordered keys, changed number formatting, or dropped a field the
+DTOs do not model. The claim under test is that the managed layer is a transparent pipe over the
+authoritative core, and only byte equality states that.
+
+### Interop design
+
+- **`DbSimNative`** is the only file declaring imports, all source-generated `LibraryImport` with
+  explicit UTF-8 byte pointers. No implicit string marshalling: the ABI takes bytes and a length,
+  and letting the runtime pick an encoding would corrupt non-ASCII identifiers and depend on the
+  host ANSI code page.
+- **`MatchSafeHandle`** rather than a raw `nint`. The runtime may collect an object while one of
+  its methods is running, so a session going out of scope mid-call can be finalized while native
+  code still holds the handle — a use-after-free that reproduces only under GC pressure. Native
+  methods take the handle itself, so the marshaller keeps it alive for the call.
+- **`LocalMatchSession`** owns exactly one handle, admits one call at a time, and copies every
+  native response into managed memory inside `try/finally` before freeing. `IAsyncDisposable` and
+  `IDisposable`, both idempotent.
+- **`NativeLibraryResolver`** resolves absolute paths anchored to the assembly directory and never
+  the working directory or the OS search order. This library *is* the game rules, so a substituted
+  `db_sim_ffi` is a full authoritative-logic replacement, not a cosmetic hijack. Only the RID
+  matching the running process is tried; an unsupported platform fails at load with a message
+  naming it rather than somewhere deeper.
+
+### Two analyzer findings worth recording
+
+`AnalysisLevel: latest-all` with warnings-as-errors surfaced a genuine conflict. **CA5392**
+demanded a `DefaultDllImportSearchPaths` attribute; adding it then tripped **CA5393**, which treats
+anything but `System32` as unsafe.
+
+CA5393 is written for callers loading *operating system* libraries, where the OS directory is the
+trustworthy one. That premise does not hold here: `db_sim_ffi` is application-owned, ships beside
+the assembly, and will never be in System32 — naming System32 would guarantee a failed load.
+`AssemblyDirectory` is the narrowest correct value and is what CLIENT_SPEC 8.6 requires. In
+practice the search path is never reached, because the resolver supplies an absolute path through
+`SetDllImportResolver` before any probing. Suppressed at assembly scope with that reasoning
+recorded next to the suppression, not in a NoWarn list.
+
+The other suppressions are in tests and are equally deliberate: one abandons a session without
+disposing (that *is* the finalizer test) and one mixes sync and async disposal (that *is* the
+idempotency test).
+
+### Evidence
+
+25 .NET tests across four suites.
+
+- **Fixture parity** — the byte-for-byte replay above, plus a check that a preview leaves the
+  snapshot byte-identical, and that the loaded library's simulation and content versions match the
+  ones the fixture was frozen against.
+- **Disposal** — idempotent sync and async disposal, a disposed session refusing further calls
+  rather than touching a freed handle, two hundred caller-thrown parse failures leaving the session
+  usable, a cancelled call leaving it usable, twenty-five abandoned sessions reclaimed by the
+  finalizer, and thirty-two concurrent readers returning byte-identical responses.
+- **Status translation** — malformed JSON, invalid UTF-8, and an unsupported schema version each
+  producing their own status; a *gameplay* rejection arriving as a successful call carrying a
+  rejection envelope rather than an exception; a malformed command not poisoning a live session.
+- **Contract strictness** — the creation request round-tripping byte-identically, an unknown field
+  refused rather than ignored, quoted numbers refused, and closed enums rejecting both unknown
+  names and integer fallback.
+
+Mutation-checked. A wrong final hash fails. Comparing against the wrong frozen file fails.
+Truncating every native response by one byte in `Copy` fails two suites. One earlier mutation
+passed and was discarded as a bad probe rather than counted.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 530 pass, 0 fail |
+| `dotnet restore client/DungeonBarrage.sln --locked-mode` | pass, lock files committed |
+| `dotnet build client/DungeonBarrage.sln -c Release --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-build` | 25 pass, 0 fail |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes` | pass |
+
+### Notes for whoever picks this up
+
+- The .NET 10 SDK now emits `.slnx` by default. A classic `.sln` was generated instead so the gate
+  commands in CLIENT_SPEC 20 work verbatim and so C4's Godot tooling finds what it expects.
+- The fixture files are newline-terminated on disk. The native responses carry that terminator too,
+  which is why parity compares whole files untrimmed while the DTO round-trip trims it — the
+  newline belongs to the file, not the envelope.
+- `client/native/` holds one directory per advertised RID, but only `win-x64` is populated: it is
+  the only target this machine can build and the only one any gate exercises. The three empty
+  directories are an honest statement that those targets are unbuilt, not a claim they work. The
+  binaries are gitignored as `cargo` output; `client/native/README.md` documents repopulating them.
+- `ClientEnvelope.Options` uses the reflection type resolver. An ahead-of-time build will need a
+  source-generated `JsonSerializerContext`; that is a one-line swap, flagged in the code.
+
+### Still open
+
+C4's Godot shell. `DungeonBarrage.Client` — the engine project, `project.godot`, and export
+presets — is deliberately absent: C3 is the Godot-free milestone, and adding an engine reference
+now would make these tests unrunnable headlessly. The contracts assembly currently models the
+creation request and the closed enums; the snapshot, transition, and presentation-event DTOs are
+still described only by the frozen envelopes and the Rust types.
+
+Arzum's rated second Chain Strike remains an owner decision, unchanged by this milestone.
