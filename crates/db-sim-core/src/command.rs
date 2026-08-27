@@ -317,6 +317,7 @@ fn resolve_ability(
     let mut terrain_cells_removed: u32 = 0;
     let mut damage_by_player: BTreeMap<String, DamageEvent> = BTreeMap::new();
     let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
+    let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
     let mut dealt_to_others: u32 = 0;
     // Where the attack itself landed — the origin `ResolveContext::impact_point` gives
     // every effect below. Defaults to the actor's own position so a targetless area
@@ -527,6 +528,7 @@ fn resolve_ability(
             damage: &mut damage_by_player,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut random_outcomes,
             terrain_cells_removed: &mut terrain_cells_removed,
             status_changes: &mut status_changes,
         };
@@ -596,6 +598,7 @@ fn resolve_ability(
         damage: damage_by_player.into_values().collect(),
         object_changes,
         strikes: strike_records,
+        random_outcomes,
         status_changes,
         gauge_gained: gauge_gained(state, &command.player_id, gauge_before_award),
         terrain_cells_removed,
@@ -960,6 +963,7 @@ fn resolve_passive_choice(
         object_changes: Vec::new(),
         // Choosing a passive resolves no strikes and touches no statuses.
         strikes: Vec::new(),
+        random_outcomes: Vec::new(),
         status_changes: Vec::new(),
         gauge_gained: 0,
         terrain_cells_removed: 0,

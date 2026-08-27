@@ -1566,3 +1566,158 @@ host-plus-ledger restore, and the composite session/ABI envelope with the remain
 fixtures. `PersistentObjectRemovalCause::Expired` and `Destroyed` remain reserved until object
 lifetime and object-targeting mechanics exist. Numa's balance values remain a content decision,
 not a provenance or reconciliation gap.
+
+---
+
+## 2026-08-26 - C1 completion and the real C2 coarse ABI
+
+This continuation completed every item in the prior operational handoff before opening C3. It
+reviewed the whole working change against the normative client specification, retained C# only for
+Godot presentation, retained Rust as the sole gameplay authority and future server language, and
+did not create a Godot scene or a second managed rules implementation.
+
+### C1 completion
+
+The remaining non-strike random effects now record outcomes at their producers. Arzum records the
+eligible-candidate count, chosen index, target ID, and destination when Chain Strike selects its
+teleport target. Aleph records the Veilstep bounded-axis size, accepted X/Y draw results, fallback
+state, raw drawn point, and corrected legal destination. Reconciliation replays the exact bounded
+generator from the immutable pre-state. Arzum specifically reconstructs the state after its already
+reconciled primary strike and before host settling; it does not infer eligibility or position from
+the final snapshot.
+
+Strike publication now validates the producer through a detached replay from the immutable
+pre-state, then applies independent cardinality, trace-citation, melee-target/point, aggregate-damage,
+and elimination checks. This closes two aggregate-preserving holes found in final audit: exchanging
+ordered `(crit, damage)` pairs could previously pass, and a real killing strike could omit its
+`eliminatedTarget` flag. Exact trace replay also prevents an uncited miss trace from disappearing.
+Mutation tests freeze all three cases without touching the live host, generation, or ledger.
+
+The read-only `AbilityPreviewRequest`/`AbilityPreviewResponse` contract is implemented on
+`MatchSessionHost`. Legality runs only on disposable clones; stale generation is a normal
+`legal:false` response; IDs are sorted; and tests prove that live state, RNG, generation, and the
+ledger do not mutate, including for Aleph's random special.
+
+`MatchSessionCheckpoint` is an opaque in-process host-plus-ledger restore unit. A caller cannot ask
+for the host separately and accidentally discard first-receipt replay results. Restore checks
+declared and configured entry/byte limits, exact canonical retained bytes, command/action identity,
+digests, transition structure, generation continuity, processed command IDs, and the current
+snapshot. This is not yet a persistence wire format; a future server adapter must integrity-protect
+the complete container rather than reconstruct a bare host.
+
+Direct scenarios now cover passive interruption and resume, pass, authority timeout, melee plus
+terrain/block mutation, ordered strike failures, movement/elimination, and terminal victory without
+reopening a turn. Elimination provenance distinguishes strike, backlash, splash, wall impact,
+ability effect, hazard, and the conservative fallback.
+
+### C2 implementation
+
+The placeholder `db-sim-ffi` was replaced by a real client-only ABI over `MatchSessionHost`. ABI
+version 1 exports exactly these ten symbols and no scaffold or test-only panic symbol:
+
+```text
+db_sim_abi_version
+db_sim_buffer_free
+db_sim_content_version
+db_sim_match_apply
+db_sim_match_create
+db_sim_match_destroy
+db_sim_match_preview
+db_sim_match_snapshot
+db_sim_match_terrain
+db_sim_simulation_version
+```
+
+Create/apply/snapshot/preview use strict bounded UTF-8 JSON; terrain uses raw row-major bytes.
+Inputs reject duplicate or unknown fields, unknown closed variants, non-integers, trailing data,
+missing required-nullable fields, depth over 12, bytes over 256 KiB, and create rosters over four
+players before unbounded allocation. Production JSON is compact deterministic UTF-8 followed by
+exactly one LF and is capped at 8 MiB.
+
+Create returns the required `{schemaVersion,created,diagnostic,snapshot}` wrapper and owns a real
+session only on success. Apply uses clone-resolve-serialize-bound-commit, so output failure cannot
+advance authority. Snapshots are one composite versioned envelope. `turnOpened` and snapshots carry
+required-nullable `inputOpensAt`/`deadlineAt`; local C2 emits null until C3 owns its monotonic clock,
+while a future Rust server may supply server time. Transition and preview refusals are exact tagged
+unions rather than lossy strings.
+
+Every output is initialized on every negative status when its pointer is non-null. A returned buffer
+is an exact `Box<[u8]>`; free reconstructs that same boxed slice and clears `{ptr,len}` before drop.
+The documented unsafe contract now also requires valid aligned, non-overlapping, allocation-free
+output slots that do not alias input or handle storage. C3 must satisfy that with distinct zeroed
+locals and `SafeHandle`.
+
+Each handle contains a mutex and an atomic poison bit. Panics and terminal session/internal faults
+return `-4`, poison the live handle, and allow only destroy afterward. Domain gameplay refusals remain
+status `0` envelopes. The 13-test boundary suite covers strict decoding, invalid domain creation,
+output initialization, the response cap without commit, panic/terminal poisoning across all live
+operations, exact ownership, 64 complete lifecycle repetitions, and byte equality against the real
+fixture.
+
+Final audit tightened poison precedence: after required output slots and the live handle pointer
+validate, apply and preview acquire/check the handle before inspecting their request pointer, byte
+length, UTF-8/JSON, or version. Tests freeze `-4` for null, malformed, unsupported, oversized, and
+valid follow-up requests so terminal state cannot be masked by adapter validation.
+
+### Shared fixtures, CI, and installed tooling
+
+The horizontal duel fixture now contains raw create, preview, move, and ability requests plus exact
+production create/snapshot/preview/move/ability responses. The direct core test consumes the strict
+manifest and checks semantics/hashes; the FFI test feeds the same request bytes unchanged and
+compares every response byte. The required-nullable `turnOpened` clock fields are frozen in the
+ability response. Final hashes remain:
+
+| Snapshot | Hash |
+|---|---|
+| initial | `f67c5371bcddbdf5` |
+| after move | `378081bb2e830a5d` |
+| after ability / final | `d8686762470c0c36` |
+
+CI is pinned to Rust 1.94.0, runs the release FFI unwind path, checks the exact Linux export set, and
+installs/runs Valgrind against the complete ownership cycle. Serde/serde_json are locked only in the
+FFI adapter; `db-sim-core` remains serialization-dependency-free. The local dependency gate verifies
+.NET SDK 10.0.302, Rust/Cargo 1.94.0, Godot 4.7.1 .NET, and matching mono export templates. Valgrind
+3.26.0 was installed in Ubuntu/WSL2 for the memory gate.
+
+All CI compilation/test invocations now use the committed Rust lockfile with `--locked`. The root
+README reflects completed C1/C2 and the response fixtures. The binding security baseline was
+reconciled with ADR 0004: active Rust/FFI gates remain mandatory, while C#, persistence, and network
+controls become mandatory in the same milestone that introduces each surface; retired npm/React/
+TypeScript jobs no longer pretend to test absent code.
+
+### Compatibility and deliberate gaps
+
+`SIMULATION_VERSION` remains 6. This slice adds publication, restore, preview, and adapter contracts;
+it does not change an authoritative state transition, and all version-6 golden hashes remain fixed.
+
+Arzum's documented random 50-200% second hit is still not implemented: the live special performs its
+first strike, records/selects a teleport target, and teleports. The rated damage rule remains an owner
+decision in `todolist.md` P14 and must not be inferred in C#. Finite object expiry, object targeting/
+destruction, richer turret/gas behavior, remaining passive/hazard behavior, Numa numeric balance, and
+richer movement cause provenance also remain explicit gaps outside completed C1/C2.
+
+### Final gates
+
+| Gate | Result |
+|---|---|
+| `git diff --check` | clean |
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass, no warnings |
+| `cargo test --workspace --locked` | 530 pass, 0 fail: 508 core, 7 golden, 1 shared fixture, 13 FFI, 1 WASM |
+| `cargo test --release -p db-sim-ffi --locked` | 13 pass, 0 fail |
+| `cargo build --release -p db-sim-ffi --locked` | pass |
+| Windows `dumpbin /exports` | exact 10-symbol `db_sim_*` surface |
+| Linux `nm -D --defined-only` | exact 10-symbol `db_sim_*` surface |
+| WSL2 Valgrind release lifecycle | 0 errors; 0 definite/indirect bytes lost |
+| `cargo deny check` | advisories, bans, licenses, and sources pass; unused allow-list warnings only |
+| CI YAML parse | pass |
+| frozen request/response UTF-8/LF/compact-JSON validation | pass |
+| `scripts/verify-toolchain.ps1` | .NET 10.0.302, Rust/Cargo 1.94.0, Godot .NET/templates 4.7.1 pass |
+
+The Valgrind run reported 84,625 allocations, 84,623 frees, and 9,450,420 bytes allocated. Its two
+runtime-held blocks were 48 bytes possibly lost and 544 bytes still reachable; definite loss,
+indirect loss, and the error summary were all zero. CI fails on definite or indirect leaks.
+
+This entry is part of the landing commit on `feat/c1-outcome-provenance`; use `git rev-parse HEAD`
+and compare it with `@{upstream}` for the final identifier and push state. The next implementation
+milestone is C3's Godot-free .NET interop/session layer, not a scene.

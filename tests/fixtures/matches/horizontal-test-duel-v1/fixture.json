@@ -9,6 +9,15 @@
     "contentVersion": 1
   },
   "createRequestFile": "create-request.json",
+  "createResponseFile": "responses/create.json",
+  "initialSnapshotResponseFile": "responses/snapshot-initial.json",
+  "preview": {
+    "requestFile": "previews/001-basic.json",
+    "responseFile": "responses/preview-basic.json",
+    "legal": true,
+    "snapshotGeneration": 0,
+    "minimumProjectileTraces": 1
+  },
   "initial": {
     "snapshotGeneration": 0,
     "turnNumber": 1,
@@ -21,6 +30,7 @@
   "steps": [
     {
       "requestFile": "commands/001-move.json",
+      "responseFile": "responses/001-move.json",
       "expect": {
         "disposition": "accepted",
         "preGeneration": 0,
@@ -37,6 +47,7 @@
     },
     {
       "requestFile": "commands/002-ability.json",
+      "responseFile": "responses/002-ability.json",
       "expect": {
         "disposition": "accepted",
         "preGeneration": 1,

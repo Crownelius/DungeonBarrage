@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 db-sim-core = { path = "../db-sim-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints.rust]
 # This crate is the ONE place `unsafe` is permitted (ADR 0001 §1, ADR 0006), because a C ABI

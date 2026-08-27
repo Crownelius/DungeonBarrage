@@ -26,13 +26,14 @@ use crate::error::{SimError, SimResult};
 use crate::fixed::FIXED_TICK_RATE;
 use crate::match_host::MatchHost;
 use crate::match_setup::{MatchConfig, create_match, is_valid_match_local_id};
+use crate::rng::Rng;
 use crate::terrain;
 use crate::types::{
-    AbilityCommand, AbilitySlot, BallisticImpact, BallisticSample, CommandOutcome,
-    CommandRejection, CommandResult, CritRoll, DamageEvent, ImpactCause, MatchPhase,
+    AbilityCommand, AbilitySlot, Attack, BallisticImpact, BallisticSample, CommandOutcome,
+    CommandRejection, CommandResult, CritRoll, DamageEvent, EffectKind, ImpactCause, MatchPhase,
     PassiveChoiceCommand, PersistentObjectChange, PersistentObjectRemovalCause,
-    PersistentObjectTransition, SimulationState, StatusChange, StatusTransition, StrikeDelivery,
-    StrikeResolution, TurnEndReason,
+    PersistentObjectTransition, RandomOutcome, SimulationState, StatusChange, StatusTransition,
+    StrikeDelivery, StrikeResolution, TurnEndReason,
 };
 
 /// Maximum first-receipt results retained by one live session.
@@ -310,6 +311,92 @@ impl TransitionRejection {
     }
 }
 
+/// One read-only ability-guide request.
+///
+/// Unlike [`MatchCommand`], a preview has no command ID and therefore can never enter the
+/// idempotency ledger. The current authoritative turn number is read under the same session view;
+/// snapshot generation is the caller's freshness token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityPreviewRequest {
+    /// Client-contract schema version used to interpret this request.
+    pub schema_version: u32,
+    /// Session generation the guide was constructed against.
+    pub expected_snapshot_generation: u64,
+    /// Opaque player requesting the guide.
+    pub player_id: String,
+    /// Ability slot to inspect.
+    pub slot: AbilitySlot,
+    /// Fixed-point launch angle in millidegrees.
+    pub angle_millidegrees: i32,
+    /// Launch power in basis points.
+    pub power_basis_points: i32,
+    /// Optional primary target selection.
+    pub target_player_id: Option<String>,
+    /// Optional secondary target selection.
+    pub secondary_target_player_id: Option<String>,
+}
+
+impl AbilityPreviewRequest {
+    fn validate_structure(&self) -> Result<(), SessionFault> {
+        if self.schema_version != CLIENT_CONTRACT_VERSION {
+            return Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: self.schema_version,
+            });
+        }
+        if !is_valid_match_local_id(&self.player_id) {
+            return Err(SessionFault::InvalidCommand { field: "player id" });
+        }
+        for target in [
+            self.target_player_id.as_deref(),
+            self.secondary_target_player_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !is_valid_match_local_id(target) {
+                return Err(SessionFault::InvalidCommand {
+                    field: "target player id",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a well-formed preview is not currently legal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewRejection {
+    /// The caller previewed an older or future session generation.
+    SnapshotGenerationMismatch {
+        /// Generation named by the request.
+        expected: u64,
+        /// Current live generation.
+        actual: u64,
+    },
+    /// The authoritative command rules reject this intent in the current state.
+    Core(CommandRejection),
+}
+
+/// Read-only response for the initial closed ability-preview contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityPreviewResponse {
+    /// Client-contract schema version.
+    pub schema_version: u32,
+    /// Live generation this response describes.
+    pub snapshot_generation: u64,
+    /// Whether the exact request could be submitted now.
+    pub legal: bool,
+    /// Refusal detail when `legal` is false.
+    pub rejection_reason: Option<PreviewRejection>,
+    /// Exact authoritative special-gauge cost; zero for non-special slots.
+    pub gauge_cost: u16,
+    /// Sorted primary-target IDs accepted by this ability with the request's other fields.
+    pub legal_target_player_ids: Vec<String>,
+    /// Static projectile guides against the current snapshot, with no damage or RNG result.
+    pub projectile_traces: Vec<ProjectileTraceEvent>,
+}
+
 /// A non-gameplay failure at the session boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionFault {
@@ -448,11 +535,52 @@ pub struct DamageBreakdown {
     pub eliminated: bool,
 }
 
-/// Known provenance for a net state change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Identifiable authoritative provenance for an elimination.
+///
+/// The exact strike variant is producer-owned.  Itemized damage channels are retained when an
+/// effect rather than a strike made the health-zero transition.  `AuthoritativeResolution` is the
+/// honest fallback for host-owned settling/fall work whose current outcome DTO has no finer record.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeProvenance {
-    /// The command outcome retained itemized provenance.
-    RecordedOutcome,
+    /// One exact producer-owned strike reduced the player to zero health.
+    Strike {
+        /// Opaque attacking player ID.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+        /// Dense strike index from that ability outcome.
+        strike_index: u16,
+    },
+    /// The acting player's own Backlash reduced them to zero health.
+    Backlash {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// An effect's splash damage reduced the player to zero health.
+    Splash {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// Collision damage after authoritative displacement reduced the player to zero health.
+    WallImpact {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// Another itemized ability effect reduced the player to zero health.
+    AbilityEffect {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// World-hazard damage reduced the player to zero health.
+    Hazard,
     /// The change is authoritative but the current outcome DTO does not retain its cause.
     AuthoritativeResolution,
 }
@@ -538,6 +666,15 @@ pub enum PresentationEventKind {
         new_gauge: u16,
         /// Signed actual change, computed from the two authoritative values.
         delta: i32,
+    },
+    /// One resolver-owned public random result, emitted without exposing RNG state.
+    RandomOutcome {
+        /// Opaque player whose ability caused the draw.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+        /// Exact bounded result recorded at the authoritative draw site.
+        outcome: RandomOutcome,
     },
     /// One authoritative status transition, in the order the simulation produced it.
     ///
@@ -1026,6 +1163,15 @@ fn retained_presentation_event_kind_bytes(
             counter.u16(*new_gauge)?;
             counter.i32(*delta)?;
         }
+        PresentationEventKind::RandomOutcome {
+            owner_id,
+            ability_id,
+            outcome,
+        } => {
+            counter.string(owner_id)?;
+            counter.string(ability_id)?;
+            retained_random_outcome_bytes(counter, outcome)?;
+        }
         PresentationEventKind::StatusChanged {
             player_id,
             kind,
@@ -1066,7 +1212,7 @@ fn retained_presentation_event_kind_bytes(
         }
         PresentationEventKind::PlayerEliminated { player_id, cause } => {
             counter.string(player_id)?;
-            retained_change_provenance_bytes(counter, *cause)?;
+            retained_change_provenance_bytes(counter, cause)?;
         }
         PresentationEventKind::PassiveChoiceRequired {
             player_id,
@@ -1098,6 +1244,45 @@ fn retained_presentation_event_kind_bytes(
         }
         PresentationEventKind::MatchCompleted { outcome } => {
             retained_match_outcome_bytes(counter, *outcome)?;
+        }
+    }
+    Some(())
+}
+
+fn retained_random_outcome_bytes(
+    counter: &mut RetainedByteCounter,
+    outcome: &RandomOutcome,
+) -> Option<()> {
+    counter.tag()?;
+    match outcome {
+        RandomOutcome::ArzumChainStrikeTeleportTarget {
+            candidate_count,
+            selected_index,
+            target_player_id,
+            destination,
+        } => {
+            counter.u32(*candidate_count)?;
+            counter.u32(*selected_index)?;
+            counter.string(target_player_id)?;
+            counter.i32(destination.x)?;
+            counter.i32(destination.y)?;
+        }
+        RandomOutcome::AlephVeilstepTeleportPoint {
+            axis_bound,
+            x_result,
+            y_result,
+            fallback_used,
+            drawn_point,
+            destination,
+        } => {
+            counter.u32(*axis_bound)?;
+            counter.u32(*x_result)?;
+            counter.u32(*y_result)?;
+            counter.boolean(*fallback_used)?;
+            counter.i32(drawn_point.x)?;
+            counter.i32(drawn_point.y)?;
+            counter.i32(destination.x)?;
+            counter.i32(destination.y)?;
         }
     }
     Some(())
@@ -1233,12 +1418,40 @@ fn retained_entity_movement_cause_bytes(
 
 fn retained_change_provenance_bytes(
     counter: &mut RetainedByteCounter,
-    cause: ChangeProvenance,
+    cause: &ChangeProvenance,
 ) -> Option<()> {
     match cause {
-        ChangeProvenance::RecordedOutcome | ChangeProvenance::AuthoritativeResolution => {
-            counter.tag()
+        ChangeProvenance::Strike {
+            owner_id,
+            ability_id,
+            strike_index,
+        } => {
+            counter.tag()?;
+            counter.string(owner_id)?;
+            counter.string(ability_id)?;
+            counter.u16(*strike_index)
         }
+        ChangeProvenance::Backlash {
+            owner_id,
+            ability_id,
+        }
+        | ChangeProvenance::Splash {
+            owner_id,
+            ability_id,
+        }
+        | ChangeProvenance::WallImpact {
+            owner_id,
+            ability_id,
+        }
+        | ChangeProvenance::AbilityEffect {
+            owner_id,
+            ability_id,
+        } => {
+            counter.tag()?;
+            counter.string(owner_id)?;
+            counter.string(ability_id)
+        }
+        ChangeProvenance::Hazard | ChangeProvenance::AuthoritativeResolution => counter.tag(),
     }
 }
 
@@ -1580,6 +1793,22 @@ pub struct MatchSessionHost {
     closed: bool,
 }
 
+/// Opaque, complete restore input produced by [`MatchSessionHost::checkpoint`].
+///
+/// Fields are intentionally private: a caller can persist or transfer the whole value, but cannot
+/// manufacture a host-only restore that silently discards first-receipt results. Restoration still
+/// revalidates every entry and recomputes the exact retained-byte total before accepting it.
+#[derive(Debug, Clone)]
+pub struct MatchSessionCheckpoint {
+    host: MatchHost,
+    generation: u64,
+    ledger: BTreeMap<String, LedgerEntry>,
+    declared_ledger_len: usize,
+    declared_ledger_bytes: u64,
+    ledger_entry_limit: usize,
+    ledger_byte_limit: u64,
+}
+
 impl MatchSessionHost {
     /// Validates `config`, creates the authoritative match, and opens generation zero.
     ///
@@ -1589,6 +1818,51 @@ impl MatchSessionHost {
     /// [`create_match`].
     pub fn create(config: &MatchConfig) -> SimResult<Self> {
         create_match(config).map(Self::from_new_host)
+    }
+
+    /// Captures the complete live session restore unit.
+    ///
+    /// The host and ledger cannot be requested separately. This is deliberate: restoring only the
+    /// host would forget idempotency receipts and allow an already-applied command to execute again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionFault::Closed`] after a terminal fault. A closed session is disposal-only
+    /// and must not be revived by checkpointing it.
+    pub fn checkpoint(&self) -> Result<MatchSessionCheckpoint, SessionFault> {
+        if self.closed {
+            return Err(SessionFault::Closed);
+        }
+        Ok(MatchSessionCheckpoint {
+            host: self.host.clone(),
+            generation: self.generation,
+            ledger: self.ledger.clone(),
+            declared_ledger_len: self.ledger.len(),
+            declared_ledger_bytes: self.ledger_bytes,
+            ledger_entry_limit: self.ledger_entry_limit,
+            ledger_byte_limit: self.ledger_byte_limit,
+        })
+    }
+
+    /// Restores a complete checkpoint after verifying its host/ledger relationship and exact
+    /// retained-byte accounting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionFault::ContractInvariant`] for a missing, duplicated, contradictory, or
+    /// host-incoherent entry and [`SessionFault::ResourceLimit`] when the checkpoint crosses its
+    /// retained-entry/byte bounds. No partially restored session is returned.
+    pub fn restore(checkpoint: MatchSessionCheckpoint) -> Result<Self, SessionFault> {
+        validate_checkpoint(&checkpoint)?;
+        Ok(Self {
+            host: checkpoint.host,
+            generation: checkpoint.generation,
+            ledger: checkpoint.ledger,
+            ledger_entry_limit: checkpoint.ledger_entry_limit,
+            ledger_bytes: checkpoint.declared_ledger_bytes,
+            ledger_byte_limit: checkpoint.ledger_byte_limit,
+            closed: false,
+        })
     }
 
     /// Current publication generation.
@@ -1632,6 +1906,93 @@ impl MatchSessionHost {
     #[must_use]
     pub const fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// Computes one ability guide without mutating authoritative or session state.
+    ///
+    /// Legality is resolved on a disposable [`MatchHost`] clone so the answer follows the exact
+    /// same validation/effect path as submission. Projectile guides are integrated separately
+    /// against the immutable live snapshot: no damage, crit roll, relocation draw, terrain
+    /// mutation, processed-command ID, generation, or ledger entry can escape the clone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionFault::Closed`] after a terminal session fault, structure/schema faults
+    /// for malformed typed input, or a simulation fault if a supposedly valid host clone cannot
+    /// resolve its own rules. Ordinary gameplay and stale-generation refusals are successful
+    /// responses with `legal == false`.
+    pub fn preview(
+        &self,
+        request: &AbilityPreviewRequest,
+    ) -> Result<AbilityPreviewResponse, SessionFault> {
+        if self.closed {
+            return Err(SessionFault::Closed);
+        }
+        request.validate_structure()?;
+        if request.expected_snapshot_generation != self.generation {
+            return Ok(AbilityPreviewResponse {
+                schema_version: CLIENT_CONTRACT_VERSION,
+                snapshot_generation: self.generation,
+                legal: false,
+                rejection_reason: Some(PreviewRejection::SnapshotGenerationMismatch {
+                    expected: request.expected_snapshot_generation,
+                    actual: self.generation,
+                }),
+                gauge_cost: 0,
+                legal_target_player_ids: Vec::new(),
+                projectile_traces: Vec::new(),
+            });
+        }
+
+        let ability = self
+            .host
+            .state()
+            .player(&request.player_id)
+            .and_then(|player| character::find(&player.character_id))
+            .and_then(|definition| definition.ability(request.slot));
+        let gauge_cost = if request.slot.consumes_gauge() {
+            crate::types::GAUGE_FULL
+        } else {
+            0
+        };
+        let exact_command = preview_ability_command(self.host.state(), request)?;
+        let exact_rejection = preview_command_rejection(&self.host, &exact_command)?;
+        let legal = exact_rejection.is_none();
+
+        let mut legal_target_player_ids = Vec::new();
+        for candidate in self
+            .host
+            .state()
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated())
+        {
+            let mut candidate_request = request.clone();
+            candidate_request.target_player_id = Some(candidate.id.clone());
+            let candidate_command = preview_ability_command(self.host.state(), &candidate_request)?;
+            if preview_command_rejection(&self.host, &candidate_command)?.is_none() {
+                legal_target_player_ids.push(candidate.id.clone());
+            }
+        }
+        legal_target_player_ids.sort();
+
+        let projectile_traces = if legal {
+            match ability {
+                Some(ability) => preview_projectile_traces(self.host.state(), request, ability)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(AbilityPreviewResponse {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            snapshot_generation: self.generation,
+            legal,
+            rejection_reason: exact_rejection.map(PreviewRejection::Core),
+            gauge_cost,
+            legal_target_player_ids,
+            projectile_traces,
+        })
     }
 
     /// Applies one normalized command atomically and retains its first result.
@@ -2062,6 +2423,174 @@ impl MatchSessionHost {
     }
 }
 
+fn validate_checkpoint(checkpoint: &MatchSessionCheckpoint) -> Result<(), SessionFault> {
+    if checkpoint.declared_ledger_len != checkpoint.ledger.len() {
+        return Err(SessionFault::ContractInvariant);
+    }
+    if checkpoint.ledger_entry_limit > COMMAND_LEDGER_ENTRY_LIMIT
+        || checkpoint.ledger_byte_limit > COMMAND_LEDGER_BYTE_LIMIT
+        || checkpoint.ledger.len() > checkpoint.ledger_entry_limit
+    {
+        return Err(SessionFault::ResourceLimit);
+    }
+
+    let current_snapshot = MatchSnapshot::from_host(&checkpoint.host, checkpoint.generation);
+    let mut recomputed_bytes = 0u64;
+    let mut mutation_generations = BTreeSet::new();
+    let mut accepted_processed_ids = BTreeSet::new();
+    let mut saw_current_snapshot = checkpoint.ledger.is_empty() && checkpoint.generation == 0;
+
+    for (key, entry) in &checkpoint.ledger {
+        let (request_id, request_digest, is_processed_kind) = match &entry.request {
+            LedgerRequest::Client(command) => {
+                command.validate_structure()?;
+                (
+                    command.command_id.as_str(),
+                    command.canonical_digest(),
+                    matches!(
+                        command.kind,
+                        MatchCommandKind::Ability { .. } | MatchCommandKind::PassiveChoice { .. }
+                    ),
+                )
+            }
+            LedgerRequest::Authority(timeout) => {
+                timeout.validate_structure()?;
+                (
+                    timeout.action_id.as_str(),
+                    timeout.canonical_digest(),
+                    false,
+                )
+            }
+        };
+        if key != request_id
+            || entry.canonical_digest != request_digest
+            || entry.transition.command_id != request_id
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+        validate_restored_transition(&entry.transition, checkpoint.generation)?;
+
+        let entry_bytes = retained_ledger_entry_bytes(&entry.request, &entry.transition)
+            .ok_or(SessionFault::ResourceLimit)?;
+        recomputed_bytes = recomputed_bytes
+            .checked_add(entry_bytes)
+            .ok_or(SessionFault::ResourceLimit)?;
+        if recomputed_bytes > checkpoint.ledger_byte_limit {
+            return Err(SessionFault::ResourceLimit);
+        }
+
+        if entry.transition.disposition == TransitionDisposition::Accepted {
+            if entry.transition.post_snapshot_generation > entry.transition.pre_snapshot_generation
+                && !mutation_generations.insert(entry.transition.post_snapshot_generation)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            if is_processed_kind {
+                accepted_processed_ids.insert(request_id);
+            }
+        } else if is_processed_kind && checkpoint.host.state().has_processed(request_id) {
+            return Err(SessionFault::ContractInvariant);
+        }
+
+        if entry.transition.post_snapshot_generation == checkpoint.generation {
+            if entry.transition.post_snapshot != current_snapshot {
+                return Err(SessionFault::ContractInvariant);
+            }
+            saw_current_snapshot = true;
+        }
+    }
+
+    if recomputed_bytes != checkpoint.declared_ledger_bytes
+        || recomputed_bytes > checkpoint.ledger_byte_limit
+        || !saw_current_snapshot
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    let processed_ids: BTreeSet<&str> = checkpoint
+        .host
+        .state()
+        .processed_command_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if processed_ids.len() != checkpoint.host.state().processed_command_ids.len()
+        || processed_ids != accepted_processed_ids
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    let mut expected_generation = 1u64;
+    for generation in mutation_generations {
+        if generation != expected_generation {
+            return Err(SessionFault::ContractInvariant);
+        }
+        expected_generation = expected_generation
+            .checked_add(1)
+            .ok_or(SessionFault::ContractInvariant)?;
+    }
+    let completed_generation = expected_generation.saturating_sub(1);
+    if completed_generation != checkpoint.generation {
+        return Err(SessionFault::ContractInvariant);
+    }
+    Ok(())
+}
+
+fn validate_restored_transition(
+    transition: &MatchTransition,
+    live_generation: u64,
+) -> Result<(), SessionFault> {
+    if transition.schema_version != CLIENT_CONTRACT_VERSION
+        || transition.post_snapshot.client_contract_version != CLIENT_CONTRACT_VERSION
+        || transition.post_snapshot_generation != transition.post_snapshot.generation
+        || transition.post_state_hash != transition.post_snapshot.authoritative_state_hash
+        || transition.pre_snapshot_generation > transition.post_snapshot_generation
+        || transition.post_snapshot_generation > live_generation
+        || transition
+            .post_snapshot_generation
+            .saturating_sub(transition.pre_snapshot_generation)
+            > 1
+        || !transition.events.iter().enumerate().all(|(index, event)| {
+            u32::try_from(index) == Ok(event.sequence)
+                && transition
+                    .events
+                    .get(index.wrapping_sub(1))
+                    .is_none_or(|previous| {
+                        (previous.presentation_tick, previous.sequence)
+                            < (event.presentation_tick, event.sequence)
+                    })
+        })
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    match transition.disposition {
+        TransitionDisposition::Accepted => {
+            if transition.rejection_reason.is_some()
+                || (transition.post_snapshot_generation == transition.pre_snapshot_generation
+                    && (!transition.events.is_empty() || transition.input_lock_ticks != 0))
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        TransitionDisposition::Rejected => {
+            if transition.rejection_reason.is_none()
+                || transition.pre_snapshot_generation != transition.post_snapshot_generation
+                || !transition.events.is_empty()
+                || transition.input_lock_ticks != 0
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        TransitionDisposition::DuplicateReplay => {
+            // The ledger stores the original first result. Replay disposition is applied only
+            // to a detached response and must never overwrite that retained original.
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(())
+}
+
 enum AppliedCommand {
     /// Boxed because `CommandOutcome` carries several provenance vectors and dwarfs the
     /// rejection variant; an unboxed union would pay that size on every rejection too.
@@ -2117,6 +2646,86 @@ fn apply_to_working_host(
             Ok(AppliedCommand::Accepted(None))
         }
     }
+}
+
+fn preview_ability_command(
+    state: &SimulationState,
+    request: &AbilityPreviewRequest,
+) -> Result<AbilityCommand, SessionFault> {
+    let mut command_id = None;
+    // There are `len + 1` candidate IDs and at most `len` distinct retained IDs, so one must
+    // be absent. The bound avoids an unbounded search over authority-owned state.
+    for index in 0..=state.processed_command_ids.len() {
+        let candidate = format!("preview:{index}");
+        if !state.has_processed(&candidate) {
+            command_id = Some(candidate);
+            break;
+        }
+    }
+    let command_id = command_id.ok_or(SessionFault::ContractInvariant)?;
+    Ok(AbilityCommand {
+        command_id,
+        player_id: request.player_id.clone(),
+        expected_turn_number: state.turn_number,
+        slot: request.slot,
+        angle_millidegrees: request.angle_millidegrees,
+        power_basis_points: request.power_basis_points,
+        target_player_id: request.target_player_id.clone(),
+        secondary_target_player_id: request.secondary_target_player_id.clone(),
+    })
+}
+
+fn preview_command_rejection(
+    host: &MatchHost,
+    command: &AbilityCommand,
+) -> Result<Option<CommandRejection>, SessionFault> {
+    let mut working = host.clone();
+    match working.submit_ability(command)? {
+        CommandResult::Accepted(_) => Ok(None),
+        CommandResult::Rejected(reason) => Ok(Some(reason)),
+    }
+}
+
+fn preview_projectile_traces(
+    state: &SimulationState,
+    request: &AbilityPreviewRequest,
+    ability: &crate::types::AbilityDefinition,
+) -> Result<Vec<ProjectileTraceEvent>, SessionFault> {
+    let Attack::Projectile(projectile) = ability.attack else {
+        return Ok(Vec::new());
+    };
+    let actor_position = state
+        .player(&request.player_id)
+        .ok_or(SessionFault::ContractInvariant)?
+        .position;
+    let hitboxes: Vec<(String, crate::fixed::FixedPoint, i32)> = state
+        .players
+        .iter()
+        .filter(|player| player.id != request.player_id && !player.is_eliminated())
+        .map(|player| (player.id.clone(), player.position, crate::fixed::BODY_WIDTH))
+        .collect();
+    let input = crate::types::BallisticInput {
+        origin: actor_position,
+        angle_millidegrees: request.angle_millidegrees,
+        power_basis_points: request.power_basis_points,
+        wind_per_tick: state.wind_per_tick,
+    };
+    let mut traces = Vec::new();
+    for sequence in 0..u32::from(ability.strikes_per_turn.max(1)) {
+        let result = crate::ballistics::integrate(&input, &projectile, &state.terrain, &hitboxes)?;
+        traces.push(ProjectileTraceEvent {
+            trace_id: sequence,
+            owner_id: request.player_id.clone(),
+            ability_id: ability.id.to_owned(),
+            samples: result
+                .samples
+                .into_iter()
+                .map(snapshot_projectile_sample)
+                .collect(),
+            terminal_impact: snapshot_impact(result.impact),
+        });
+    }
+    Ok(traces)
 }
 
 /// Whether the authoritative state refuses this timeout outright.
@@ -2398,6 +3007,339 @@ fn snapshot_object_map(
     Ok(by_sequence)
 }
 
+/// Verifies that every public non-strike draw was recorded at its producer and that the
+/// record agrees with the bounded generator result actually reachable from the pre-state.
+///
+/// This replay is validation only: presentation events are emitted from `outcome` below,
+/// never synthesized from snapshots. The launch contract has two closed random effects, both
+/// with non-critical primary attacks, so their draw order is exact and no private RNG state is
+/// exposed outside this check.
+fn reconcile_random_outcomes(
+    command: &MatchCommand,
+    ability: &crate::types::AbilityDefinition,
+    pre_state: &SimulationState,
+    post_state: &SimulationState,
+    outcome: &CommandOutcome,
+) -> Result<(), SessionFault> {
+    match ability.id {
+        "arzum-chain-strike" => {
+            if outcome
+                .strikes
+                .iter()
+                .any(|strike| strike.crit != CritRoll::NotEligible)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let MatchCommandKind::Ability {
+                target_player_id: Some(first_target_id),
+                ..
+            } = &command.kind
+            else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            // Chain Strike chooses after its ordinary melee hit but before host-owned settling and
+            // turn completion. Reconstruct only that draw-time state from the immutable pre-state
+            // plus already-reconciled primary strike eliminations. Reading positions or liveness
+            // from the final snapshot would infer a random choice from state that later mechanics
+            // were allowed to change.
+            let mut draw_state = pre_state.clone();
+            for strike in &outcome.strikes {
+                if matches!(strike.delivery, StrikeDelivery::Melee) && strike.eliminated_target {
+                    let Some(player) = draw_state.player_mut(&strike.target_player_id) else {
+                        return Err(SessionFault::ContractInvariant);
+                    };
+                    player.health = 0;
+                }
+            }
+            let mut rng = Rng::from_state(pre_state.rng_state);
+            let expected = crate::resolve::relocation::draw_arzum_chain_strike_target(
+                &mut rng,
+                &draw_state,
+                &command.player_id,
+                first_target_id,
+            )?;
+            match expected {
+                Some(expected)
+                    if outcome.random_outcomes.len() == 1
+                        && outcome.random_outcomes.first() == Some(&expected) => {}
+                None if outcome.random_outcomes.is_empty() => {}
+                Some(_) | None => return Err(SessionFault::ContractInvariant),
+            }
+            if post_state.rng_state != rng.state() {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        "aleph-veilstep" => {
+            if outcome
+                .strikes
+                .iter()
+                .any(|strike| strike.crit != CritRoll::NotEligible)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let Some(center) = pre_state
+                .player(&command.player_id)
+                .map(|player| player.position)
+            else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            let Some(radius) = ability
+                .effects
+                .iter()
+                .find(|effect| effect.kind == EffectKind::Teleport)
+                .map(|effect| effect.magnitude)
+            else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            let mut rng = Rng::from_state(pre_state.rng_state);
+            let expected = crate::resolve::relocation::draw_aleph_veilstep_point(
+                &mut rng,
+                &pre_state.terrain,
+                center,
+                radius,
+            )?;
+            if outcome.random_outcomes.as_slice() != [expected]
+                || post_state.rng_state != rng.state()
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        _ if outcome.random_outcomes.is_empty() => {}
+        _ => return Err(SessionFault::ContractInvariant),
+    }
+    Ok(())
+}
+
+/// Reconciles every producer-owned strike against the attack definition, traces, aggregate
+/// damage, and pre/post authoritative states.
+///
+/// A dense vector alone is not sufficient: deleting a record and renumbering the rest would still
+/// look dense.  Projectile character impacts and melee target enumeration provide the independent
+/// expected cardinality, while aggregate direct damage proves that a surviving record was not
+/// silently altered.  Effects that intentionally aggregate direct damage without per-strike
+/// records are excluded from the final sum check until their contract gains an equivalent record.
+fn reconcile_strikes(
+    command: &MatchCommand,
+    ability: &crate::types::AbilityDefinition,
+    pre_state: &SimulationState,
+    post_state: &SimulationState,
+    outcome: &CommandOutcome,
+) -> Result<(), SessionFault> {
+    // Re-run the authoritative producer from the immutable pre-state before applying any
+    // aggregate or shape checks below. Those checks prove that records account for the final
+    // state, but they cannot prove ordered per-strike facts on their own: two crit/damage pairs
+    // can be exchanged while preserving every aggregate. The detached replay is the independent
+    // source for exact draw order, damage clamping, delivery, and the one strike that actually
+    // crossed a target from alive to eliminated. It cannot mutate the live/working host.
+    let replay_command = match &command.kind {
+        MatchCommandKind::Ability {
+            slot,
+            angle_millidegrees,
+            power_basis_points,
+            target_player_id,
+            secondary_target_player_id,
+        } => AbilityCommand {
+            command_id: command.command_id.clone(),
+            player_id: command.player_id.clone(),
+            expected_turn_number: command.expected_turn_number,
+            slot: *slot,
+            angle_millidegrees: *angle_millidegrees,
+            power_basis_points: *power_basis_points,
+            target_player_id: target_player_id.clone(),
+            secondary_target_player_id: secondary_target_player_id.clone(),
+        },
+        MatchCommandKind::Move { .. }
+        | MatchCommandKind::PassiveChoice { .. }
+        | MatchCommandKind::Pass => return Err(SessionFault::ContractInvariant),
+    };
+    let mut replay_state = pre_state.clone();
+    let replayed = match crate::command::apply_ability(&mut replay_state, &replay_command) {
+        CommandResult::Accepted(replayed) => replayed,
+        CommandResult::Rejected(_) => return Err(SessionFault::ContractInvariant),
+    };
+    if replayed.projectile_traces != outcome.projectile_traces
+        || replayed.strikes != outcome.strikes
+        || replay_state.rng_state != post_state.rng_state
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    let mut cited_traces = BTreeSet::new();
+    let mut eliminating_targets = BTreeSet::new();
+    let mut direct_by_target: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut melee_records: Vec<(&str, crate::fixed::FixedPoint)> = Vec::new();
+
+    for (index, strike) in outcome.strikes.iter().enumerate() {
+        if usize::from(strike.strike_index) != index
+            || pre_state.player(&strike.target_player_id).is_none()
+            || post_state.player(&strike.target_player_id).is_none()
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+        let counter = direct_by_target
+            .entry(strike.target_player_id.as_str())
+            .or_insert(0);
+        *counter = counter
+            .checked_add(u32::from(strike.damage_applied))
+            .ok_or(SessionFault::ContractInvariant)?;
+
+        match strike.delivery {
+            StrikeDelivery::Projectile { trace_sequence } => {
+                if !matches!(ability.attack, Attack::Projectile(_))
+                    || !cited_traces.insert(trace_sequence)
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+                let trace = outcome
+                    .projectile_traces
+                    .iter()
+                    .find(|trace| trace.sequence == trace_sequence)
+                    .ok_or(SessionFault::ContractInvariant)?;
+                if trace.impact.cause != ImpactCause::Character
+                    || trace.impact.position != strike.impact_point
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+                reconcile_primary_crit(ability, strike.crit)?;
+            }
+            StrikeDelivery::Melee => {
+                if !matches!(ability.attack, Attack::Strike(_)) {
+                    return Err(SessionFault::ContractInvariant);
+                }
+                melee_records.push((&strike.target_player_id, strike.impact_point));
+                reconcile_primary_crit(ability, strike.crit)?;
+            }
+            StrikeDelivery::Effect { kind } => {
+                if kind != EffectKind::MultiStrike
+                    || !ability.effects.iter().any(|effect| effect.kind == kind)
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+            }
+        }
+
+        if strike.eliminated_target
+            && (!eliminating_targets.insert(strike.target_player_id.as_str())
+                || pre_state
+                    .player(&strike.target_player_id)
+                    .is_none_or(crate::types::PlayerState::is_eliminated)
+                || post_state
+                    .player(&strike.target_player_id)
+                    .is_none_or(|player| !player.is_eliminated()))
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+
+    match ability.attack {
+        Attack::Projectile(_) => {
+            let character_impacts: BTreeSet<u32> = outcome
+                .projectile_traces
+                .iter()
+                .filter(|trace| trace.impact.cause == ImpactCause::Character)
+                .map(|trace| trace.sequence)
+                .collect();
+            if cited_traces != character_impacts || !melee_records.is_empty() {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        Attack::Strike(strike_attack) => {
+            if !cited_traces.is_empty() {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let actor_position = pre_state
+                .player(&command.player_id)
+                .ok_or(SessionFault::ContractInvariant)?
+                .position;
+            let (target_ids, impact_point): (Vec<&str>, crate::fixed::FixedPoint) =
+                if let MatchCommandKind::Ability {
+                    target_player_id: Some(target_id),
+                    ..
+                } = &command.kind
+                {
+                    let target = pre_state
+                        .player(target_id)
+                        .ok_or(SessionFault::ContractInvariant)?;
+                    (vec![target_id.as_str()], target.position)
+                } else {
+                    (
+                        pre_state
+                            .players
+                            .iter()
+                            .filter(|player| {
+                                player.id != command.player_id && !player.is_eliminated()
+                            })
+                            .filter(|player| {
+                                crate::fixed::within_radius(
+                                    player.position,
+                                    actor_position,
+                                    strike_attack.range,
+                                )
+                            })
+                            .map(|player| player.id.as_str())
+                            .collect(),
+                        actor_position,
+                    )
+                };
+            let mut expected = Vec::new();
+            for _ in 0..ability.strikes_per_turn.max(1) {
+                expected.extend(
+                    target_ids
+                        .iter()
+                        .map(|target_id| (*target_id, impact_point)),
+                );
+            }
+            if melee_records != expected {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+    }
+
+    let has_unrecorded_direct_effect = ability.effects.iter().any(|effect| {
+        matches!(
+            effect.kind,
+            EffectKind::Cluster | EffectKind::Return | EffectKind::Tunnel
+        )
+    });
+    if !has_unrecorded_direct_effect {
+        let aggregate_by_target: BTreeMap<&str, u32> = outcome
+            .damage
+            .iter()
+            .map(|damage| (damage.player_id.as_str(), u32::from(damage.direct)))
+            .collect();
+        if aggregate_by_target.len() != outcome.damage.len() {
+            return Err(SessionFault::ContractInvariant);
+        }
+        for (target_id, direct) in direct_by_target {
+            if aggregate_by_target.get(target_id).copied().unwrap_or(0) != direct {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        if aggregate_by_target.iter().any(|(target_id, direct)| {
+            *direct > 0
+                && !outcome
+                    .strikes
+                    .iter()
+                    .any(|strike| strike.target_player_id == **target_id)
+        }) {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_primary_crit(
+    ability: &crate::types::AbilityDefinition,
+    crit: CritRoll,
+) -> Result<(), SessionFault> {
+    let can_crit = ability.crit_chance_basis_points > 0
+        || ability.crit_damage_percent > ability.damage_percent;
+    if (can_crit && crit == CritRoll::NotEligible) || (!can_crit && crit != CritRoll::NotEligible) {
+        return Err(SessionFault::ContractInvariant);
+    }
+    Ok(())
+}
+
 /// Everything the authoritative layer recorded while applying one command.
 ///
 /// Grouped rather than passed as loose parameters because they are one concept — the
@@ -2442,6 +3384,7 @@ fn derive_events(
         let Some(outcome) = command_outcome else {
             return Err(SessionFault::ContractInvariant);
         };
+        reconcile_strikes(command, ability, pre_state, post_state, outcome)?;
         let mut trace_ids = BTreeSet::new();
         for trace in &outcome.projectile_traces {
             if !trace_ids.insert(trace.sequence)
@@ -2521,6 +3464,20 @@ fn derive_events(
                 },
             )?;
         }
+
+        reconcile_random_outcomes(command, ability, pre_state, post_state, outcome)?;
+        for random_outcome in &outcome.random_outcomes {
+            push_pending(
+                &mut pending,
+                resolution_tick,
+                5,
+                PresentationEventKind::RandomOutcome {
+                    owner_id: command.player_id.clone(),
+                    ability_id: ability.id.to_owned(),
+                    outcome: random_outcome.clone(),
+                },
+            )?;
+        }
     }
 
     let dirty_rectangles = terrain_dirty_rectangles(pre_state, post_state)?;
@@ -2594,7 +3551,6 @@ fn derive_events(
             return Err(SessionFault::ContractInvariant);
         };
         let breakdown = damage_breakdown(command_outcome, &post_player.id);
-        let recorded_elimination = breakdown.as_ref().is_some_and(|item| item.eliminated);
 
         if pre_player.position != post_player.position {
             // `submit_move` walks and settles synchronously. A net pre/post displacement cannot
@@ -2660,11 +3616,7 @@ fn derive_events(
         }
 
         if !pre_player.is_eliminated && post_player.is_eliminated {
-            let cause = if recorded_elimination {
-                ChangeProvenance::RecordedOutcome
-            } else {
-                ChangeProvenance::AuthoritativeResolution
-            };
+            let cause = elimination_cause(command, pre_state, command_outcome, &post_player.id)?;
             push_pending(
                 &mut pending,
                 resolution_tick,
@@ -2971,6 +3923,100 @@ fn damage_breakdown(outcome: Option<&CommandOutcome>, player_id: &str) -> Option
                 .find(|damage| damage.player_id == player_id)
         })
         .map(snapshot_damage)
+}
+
+fn elimination_cause(
+    command: &MatchCommand,
+    pre_state: &SimulationState,
+    outcome: Option<&CommandOutcome>,
+    player_id: &str,
+) -> Result<ChangeProvenance, SessionFault> {
+    let Some(outcome) = outcome else {
+        return Ok(ChangeProvenance::AuthoritativeResolution);
+    };
+
+    let mut eliminating_strikes = outcome
+        .strikes
+        .iter()
+        .filter(|strike| strike.target_player_id == player_id && strike.eliminated_target);
+    if let Some(strike) = eliminating_strikes.next() {
+        // A player cannot transition from living to eliminated twice without an intervening
+        // revival, and no such mechanic exists. Two producer records claiming the kill are a
+        // contradictory outcome and must fault before the working host is published.
+        if eliminating_strikes.next().is_some() {
+            return Err(SessionFault::ContractInvariant);
+        }
+        let ability_id = command_ability_id(command, pre_state)?;
+        return Ok(ChangeProvenance::Strike {
+            owner_id: command.player_id.clone(),
+            ability_id,
+            strike_index: strike.strike_index,
+        });
+    }
+
+    let Some(damage) = outcome
+        .damage
+        .iter()
+        .find(|damage| damage.player_id == player_id && damage.eliminated)
+    else {
+        // Host-owned settling can still eliminate after the command outcome was finalized.
+        return Ok(ChangeProvenance::AuthoritativeResolution);
+    };
+    let ability_id = command_ability_id(command, pre_state)?;
+    let attributed = |constructor: fn(String, String) -> ChangeProvenance| {
+        constructor(command.player_id.clone(), ability_id.clone())
+    };
+    if damage.backlash > 0 {
+        return Ok(attributed(|owner_id, ability_id| {
+            ChangeProvenance::Backlash {
+                owner_id,
+                ability_id,
+            }
+        }));
+    }
+    if damage.wall_impact > 0 {
+        return Ok(attributed(|owner_id, ability_id| {
+            ChangeProvenance::WallImpact {
+                owner_id,
+                ability_id,
+            }
+        }));
+    }
+    if damage.splash > 0 {
+        return Ok(attributed(|owner_id, ability_id| {
+            ChangeProvenance::Splash {
+                owner_id,
+                ability_id,
+            }
+        }));
+    }
+    if damage.hazard > 0 {
+        return Ok(ChangeProvenance::Hazard);
+    }
+    Ok(attributed(|owner_id, ability_id| {
+        ChangeProvenance::AbilityEffect {
+            owner_id,
+            ability_id,
+        }
+    }))
+}
+
+fn command_ability_id(
+    command: &MatchCommand,
+    pre_state: &SimulationState,
+) -> Result<String, SessionFault> {
+    let MatchCommandKind::Ability { slot, .. } = command.kind else {
+        return Err(SessionFault::ContractInvariant);
+    };
+    let player = pre_state
+        .player(&command.player_id)
+        .ok_or(SessionFault::ContractInvariant)?;
+    let definition =
+        character::find(&player.character_id).ok_or(SessionFault::ContractInvariant)?;
+    definition
+        .ability(slot)
+        .map(|ability| ability.id.to_owned())
+        .ok_or(SessionFault::ContractInvariant)
 }
 
 const fn snapshot_damage(damage: &DamageEvent) -> DamageBreakdown {
@@ -3554,6 +4600,127 @@ mod tests {
     }
 
     #[test]
+    fn complete_checkpoint_restore_preserves_replay_and_can_continue() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let mut stale = pass_command(&session, "restore-stale");
+        stale.expected_snapshot_generation = 99;
+        let stale_first = session
+            .apply(stale.clone())
+            .expect("stale receipt must be retained");
+
+        let move_command = command(
+            &session,
+            "restore-move",
+            MatchCommandKind::Move { dx: POSITION_SCALE },
+        );
+        let move_first = session
+            .apply(move_command.clone())
+            .expect("move must resolve");
+        let ability = ability_command(&session, "restore-ability");
+        let ability_first = session
+            .apply(ability.clone())
+            .expect("ability must resolve");
+        let expected_snapshot = session.snapshot();
+        let expected_generation = session.generation();
+        let expected_ledger_bytes = session.ledger_bytes();
+        let expected_ledger_len = session.ledger_len();
+
+        let checkpoint = session.checkpoint().expect("live session must checkpoint");
+        let mut restored =
+            MatchSessionHost::restore(checkpoint).expect("complete checkpoint must restore");
+
+        assert_eq!(restored.snapshot(), expected_snapshot);
+        assert_eq!(restored.generation(), expected_generation);
+        assert_eq!(restored.ledger_len(), expected_ledger_len);
+        assert_eq!(restored.ledger_bytes(), expected_ledger_bytes);
+        for (request, first) in [
+            (stale, stale_first),
+            (move_command, move_first),
+            (ability, ability_first),
+        ] {
+            let replay = restored.apply(request).expect("first receipt must replay");
+            assert_eq!(replay.disposition, TransitionDisposition::DuplicateReplay);
+            assert_eq!(replay.command_id, first.command_id);
+            assert_eq!(replay.post_snapshot, first.post_snapshot);
+            assert_eq!(replay.events, first.events);
+        }
+        assert_eq!(restored.snapshot(), expected_snapshot);
+        assert_eq!(restored.ledger_len(), expected_ledger_len);
+        assert_eq!(restored.ledger_bytes(), expected_ledger_bytes);
+
+        let next = pass_command(&restored, "restore-continues");
+        let continued = restored
+            .apply(next)
+            .expect("restored session must continue");
+        assert_eq!(continued.disposition, TransitionDisposition::Accepted);
+        assert_eq!(restored.generation(), expected_generation + 1);
+    }
+
+    #[test]
+    fn restore_rejects_incomplete_or_misaccounted_ledgers() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let mut stale = pass_command(&session, "checkpoint-rejected");
+        stale.expected_snapshot_generation = 99;
+        session
+            .apply(stale)
+            .expect("stale receipt must be retained");
+        let pass = pass_command(&session, "checkpoint-accepted");
+        session.apply(pass).expect("pass must resolve");
+        let checkpoint = session.checkpoint().expect("live session must checkpoint");
+
+        let mut missing_rejection = checkpoint.clone();
+        let _removed = missing_rejection.ledger.remove("checkpoint-rejected");
+        assert!(matches!(
+            MatchSessionHost::restore(missing_rejection),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut missing_acceptance = checkpoint.clone();
+        let removed = missing_acceptance
+            .ledger
+            .remove("checkpoint-accepted")
+            .expect("accepted entry must exist");
+        let removed_bytes = retained_ledger_entry_bytes(&removed.request, &removed.transition)
+            .expect("fixture entry must be countable");
+        missing_acceptance.declared_ledger_len -= 1;
+        missing_acceptance.declared_ledger_bytes -= removed_bytes;
+        assert!(matches!(
+            MatchSessionHost::restore(missing_acceptance),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut wrong_bytes = checkpoint.clone();
+        wrong_bytes.declared_ledger_bytes = wrong_bytes.declared_ledger_bytes.saturating_add(1);
+        assert!(matches!(
+            MatchSessionHost::restore(wrong_bytes),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut wrong_digest = checkpoint.clone();
+        wrong_digest
+            .ledger
+            .get_mut("checkpoint-accepted")
+            .expect("accepted entry must exist")
+            .canonical_digest = "0000000000000000".to_owned();
+        assert!(matches!(
+            MatchSessionHost::restore(wrong_digest),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut replay_in_ledger = checkpoint.clone();
+        replay_in_ledger
+            .ledger
+            .get_mut("checkpoint-accepted")
+            .expect("accepted entry must exist")
+            .transition
+            .disposition = TransitionDisposition::DuplicateReplay;
+        assert!(matches!(
+            MatchSessionHost::restore(replay_in_ledger),
+            Err(SessionFault::ContractInvariant)
+        ));
+    }
+
+    #[test]
     fn dirty_rectangles_are_exact_sorted_changed_cell_row_runs() {
         let previous = build_initial_state(&duel()).expect("fixture state must build");
         let mut current = previous.clone();
@@ -3614,14 +4781,16 @@ mod tests {
 #[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod strike_provenance_tests {
     use super::*;
-    use crate::match_setup::{MatchMode, MatchPlayerConfig};
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
     use crate::types::Appearance;
 
     const TARGET: &str = "b-local-bot";
 
     fn karl_duel() -> MatchConfig {
         MatchConfig {
-            seed: 12_345,
+            // Seed 1 yields the stable ordered crit sequence Landed/Missed/Missed after
+            // rejection sampling, which makes the draw-order mutation test non-vacuous.
+            seed: 1,
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
@@ -3639,6 +4808,16 @@ mod strike_provenance_tests {
                 },
             ],
         }
+    }
+
+    fn low_health_karl_session() -> MatchSessionHost {
+        let mut state = build_initial_state(&karl_duel()).expect("fixture state must build");
+        state
+            .player_mut(TARGET)
+            .expect("fixture target must exist")
+            .health = 1;
+        let host = MatchHost::start(state).expect("fixture match must start");
+        MatchSessionHost::from_new_host(host)
     }
 
     /// Flat shot empirically verified to land every one of Karl's three strikes.
@@ -3839,6 +5018,1042 @@ mod strike_provenance_tests {
             }
         }
         assert_eq!(checked, 3, "all three strikes must have been checked");
+    }
+
+    #[test]
+    fn omitted_or_tampered_strike_records_fail_before_session_publication() {
+        let session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let command = landing_volley(&session);
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let outcome = match apply_to_working_host(&mut working, &command)
+            .expect("fixture host application must not fault")
+        {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture ability must retain an outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture ability rejected: {reason:?}"),
+        };
+        let definition = character::find(
+            &pre_state
+                .player(&command.player_id)
+                .expect("fixture actor")
+                .character_id,
+        )
+        .expect("fixture definition");
+        let ability = definition
+            .ability(AbilitySlot::Basic)
+            .expect("fixture basic");
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &outcome),
+            Ok(())
+        );
+
+        let mut missing = outcome.as_ref().clone();
+        let _removed = missing.strikes.pop();
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &missing),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        let mut tampered = outcome.as_ref().clone();
+        let Some(first) = tampered.strikes.first_mut() else {
+            panic!("fixture must contain strikes")
+        };
+        first.damage_applied = first.damage_applied.saturating_add(1);
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &tampered),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        let mut reordered_draws = outcome.as_ref().clone();
+        assert_eq!(
+            reordered_draws
+                .strikes
+                .iter()
+                .map(|strike| strike.crit)
+                .collect::<Vec<_>>(),
+            vec![CritRoll::Landed, CritRoll::Missed, CritRoll::Missed],
+            "the mutation fixture must contain distinguishable ordered draws",
+        );
+        let first_pair = (
+            reordered_draws.strikes[0].crit,
+            reordered_draws.strikes[0].damage_applied,
+        );
+        let second_pair = (
+            reordered_draws.strikes[1].crit,
+            reordered_draws.strikes[1].damage_applied,
+        );
+        reordered_draws.strikes[0].crit = second_pair.0;
+        reordered_draws.strikes[0].damage_applied = second_pair.1;
+        reordered_draws.strikes[1].crit = first_pair.0;
+        reordered_draws.strikes[1].damage_applied = first_pair.1;
+        assert_eq!(
+            reordered_draws
+                .strikes
+                .iter()
+                .map(|strike| u32::from(strike.damage_applied))
+                .sum::<u32>(),
+            outcome
+                .strikes
+                .iter()
+                .map(|strike| u32::from(strike.damage_applied))
+                .sum::<u32>(),
+            "the mutation must preserve the aggregate the older check accepted",
+        );
+        assert_eq!(
+            reconcile_strikes(
+                &command,
+                ability,
+                &pre_state,
+                working.state(),
+                &reordered_draws,
+            ),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        let mut duplicate_kill = outcome.as_ref().clone();
+        let Some(first) = duplicate_kill.strikes.first_mut() else {
+            panic!("fixture must contain strikes")
+        };
+        first.eliminated_target = true;
+        let Some(second) = duplicate_kill.strikes.get_mut(1) else {
+            panic!("fixture must contain multiple strikes")
+        };
+        second.eliminated_target = true;
+        assert_eq!(
+            reconcile_strikes(
+                &command,
+                ability,
+                &pre_state,
+                working.state(),
+                &duplicate_kill,
+            ),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        // Reconciliation is performed against the working clone. The live session remains
+        // generation zero with an empty ledger until every record passes and commit occurs.
+        assert_eq!(session.host().state(), &pre_state);
+        assert_eq!(session.generation(), 0);
+        assert_eq!(session.ledger_len(), 0);
+        assert_eq!(session.ledger_bytes(), 0);
+    }
+
+    #[test]
+    fn omitting_the_exact_strike_elimination_flag_fails_reconciliation() {
+        let session = low_health_karl_session();
+        let command = landing_volley(&session);
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let outcome = match apply_to_working_host(&mut working, &command)
+            .expect("fixture host application must not fault")
+        {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture ability must retain an outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture ability rejected: {reason:?}"),
+        };
+        let definition = character::find(
+            &pre_state
+                .player(&command.player_id)
+                .expect("fixture actor")
+                .character_id,
+        )
+        .expect("fixture definition");
+        let ability = definition
+            .ability(AbilitySlot::Basic)
+            .expect("fixture basic");
+        let mut omitted = outcome.as_ref().clone();
+        let killing_strike = omitted
+            .strikes
+            .iter_mut()
+            .find(|strike| strike.eliminated_target)
+            .expect("low-health fixture must contain a killing strike");
+        killing_strike.eliminated_target = false;
+
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &omitted),
+            Err(SessionFault::ContractInvariant)
+        );
+        assert_eq!(session.host().state(), &pre_state);
+        assert_eq!(session.generation(), 0);
+        assert_eq!(session.ledger_len(), 0);
+    }
+
+    #[test]
+    fn omitting_an_uncited_miss_trace_fails_exact_reconciliation() {
+        let session = low_health_karl_session();
+        let command = landing_volley(&session);
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let outcome = match apply_to_working_host(&mut working, &command)
+            .expect("fixture host application must not fault")
+        {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture ability must retain an outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture ability rejected: {reason:?}"),
+        };
+        let definition = character::find(
+            &pre_state
+                .player(&command.player_id)
+                .expect("fixture actor")
+                .character_id,
+        )
+        .expect("fixture definition");
+        let ability = definition
+            .ability(AbilitySlot::Basic)
+            .expect("fixture basic");
+        let mut omitted = outcome.as_ref().clone();
+        let miss_index = omitted
+            .projectile_traces
+            .iter()
+            .position(|trace| trace.impact.cause != ImpactCause::Character)
+            .expect("later projectiles must miss after the first eliminates the only target");
+        let removed_sequence = omitted.projectile_traces.remove(miss_index).sequence;
+        assert!(
+            omitted.strikes.iter().all(|strike| !matches!(
+                strike.delivery,
+                StrikeDelivery::Projectile { trace_sequence }
+                    if trace_sequence == removed_sequence
+            )),
+            "the removed miss must be independently uncited by any strike",
+        );
+
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &omitted),
+            Err(SessionFault::ContractInvariant)
+        );
+        assert_eq!(session.host().state(), &pre_state);
+        assert_eq!(session.generation(), 0);
+        assert_eq!(session.ledger_len(), 0);
+    }
+}
+
+/// Producer-owned non-strike RNG provenance and fail-closed session reconciliation.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod random_outcome_tests {
+    use super::*;
+    use crate::fixed::BODY_WIDTH;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::{Appearance, GAUGE_FULL};
+
+    fn player(player_id: &str, team: u8, character_id: &str) -> MatchPlayerConfig {
+        MatchPlayerConfig {
+            player_id: player_id.to_owned(),
+            team,
+            character_id: character_id.to_owned(),
+            appearance: Appearance::default(),
+        }
+    }
+
+    fn special_session(
+        actor_character_id: &str,
+        actor_passive_id: &str,
+        seed: u64,
+    ) -> MatchSessionHost {
+        let config = MatchConfig {
+            seed,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                player("a-actor", 0, actor_character_id),
+                player("b-target", 1, "huck"),
+            ],
+        };
+        let mut state = build_initial_state(&config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        // Keep both players on the known-supported spawn cell. Moving the target sideways
+        // before `MatchHost::start` can place it over a gap in the horizontal test map, and
+        // the initial settle would correctly eliminate it before the special is submitted.
+        let target_position = actor_position;
+
+        let actor = state.player_mut("a-actor").expect("fixture actor");
+        actor.special_gauge = GAUGE_FULL;
+        actor.has_chosen_passive = true;
+        actor.passive_id = Some(actor_passive_id.to_owned());
+        state
+            .player_mut("b-target")
+            .expect("fixture target")
+            .position = target_position;
+
+        let host = MatchHost::start(state).expect("fixture match must start");
+        MatchSessionHost::from_new_host(host)
+    }
+
+    fn special_command(session: &MatchSessionHost, command_id: &str) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: command_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind: MatchCommandKind::Ability {
+                slot: AbilitySlot::Special,
+                angle_millidegrees: 45_000,
+                power_basis_points: 5_000,
+                target_player_id: Some("b-target".to_owned()),
+                secondary_target_player_id: None,
+            },
+        }
+    }
+
+    fn applied_outcome(
+        session: &MatchSessionHost,
+        command: &MatchCommand,
+    ) -> (SimulationState, SimulationState, Box<CommandOutcome>) {
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let result = apply_to_working_host(&mut working, command)
+            .expect("fixture host application must not fault");
+        let outcome = match result {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture special must retain its outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture special rejected: {reason:?}"),
+        };
+        (pre_state, working.state().clone(), outcome)
+    }
+
+    fn ability_for(
+        state: &SimulationState,
+        command: &MatchCommand,
+    ) -> &'static crate::types::AbilityDefinition {
+        let player = state
+            .player(&command.player_id)
+            .expect("fixture actor must exist");
+        let definition = character::find(&player.character_id).expect("fixture definition");
+        definition
+            .ability(AbilitySlot::Special)
+            .expect("fixture special ability")
+    }
+
+    #[test]
+    fn arzum_target_draw_is_emitted_after_the_strike_with_exact_public_bounds() {
+        let mut session = special_session("arzum", "arzum-momentum", 4_242);
+        let command = special_command(&session, "arzum-random-target");
+        let target_position = session
+            .host()
+            .state()
+            .player("b-target")
+            .expect("fixture target")
+            .position;
+        let pre_rng = session.host().state().rng_state;
+
+        let transition = session.apply(command).expect("special must resolve");
+        assert_eq!(
+            transition.disposition,
+            TransitionDisposition::Accepted,
+            "unexpected rejection: {:?}",
+            transition.rejection_reason,
+        );
+        let random_events: Vec<_> = transition
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, PresentationEventKind::RandomOutcome { .. }))
+            .collect();
+        assert_eq!(random_events.len(), 1);
+        let PresentationEventKind::RandomOutcome {
+            owner_id,
+            ability_id,
+            outcome,
+        } = &random_events[0].kind
+        else {
+            panic!("filtered event must be random outcome");
+        };
+        assert_eq!(owner_id, "a-actor");
+        assert_eq!(ability_id, "arzum-chain-strike");
+        assert_eq!(
+            outcome,
+            &RandomOutcome::ArzumChainStrikeTeleportTarget {
+                candidate_count: 1,
+                selected_index: 0,
+                target_player_id: "b-target".to_owned(),
+                destination: target_position,
+            }
+        );
+        let strike_sequence = transition
+            .events
+            .iter()
+            .find(|event| matches!(event.kind, PresentationEventKind::StrikeResolved { .. }))
+            .expect("Arzum special must retain its first strike")
+            .sequence;
+        assert!(strike_sequence < random_events[0].sequence);
+        assert_ne!(session.host().state().rng_state, pre_rng);
+    }
+
+    #[test]
+    fn aleph_point_draw_is_emitted_with_the_bounded_pair_and_legal_destination() {
+        let mut session = special_session("aleph", "aleph-volatile", 99);
+        let command = special_command(&session, "aleph-random-point");
+        let actor_before = session
+            .host()
+            .state()
+            .player("a-actor")
+            .expect("fixture actor")
+            .position;
+
+        let transition = session.apply(command).expect("special must resolve");
+        assert_eq!(
+            transition.disposition,
+            TransitionDisposition::Accepted,
+            "unexpected rejection: {:?}",
+            transition.rejection_reason,
+        );
+        let random = transition
+            .events
+            .iter()
+            .find_map(|event| match &event.kind {
+                PresentationEventKind::RandomOutcome {
+                    owner_id,
+                    ability_id,
+                    outcome,
+                } => Some((owner_id, ability_id, outcome)),
+                _ => None,
+            })
+            .expect("Veilstep must publish its point draw");
+        assert_eq!(random.0, "a-actor");
+        assert_eq!(random.1, "aleph-veilstep");
+        let RandomOutcome::AlephVeilstepTeleportPoint {
+            axis_bound,
+            x_result,
+            y_result,
+            drawn_point,
+            destination,
+            ..
+        } = random.2
+        else {
+            panic!("Veilstep must use the point outcome variant");
+        };
+        assert_eq!(
+            *axis_bound,
+            u32::try_from(16 * BODY_WIDTH + 1).expect("bound")
+        );
+        assert!(*x_result < *axis_bound && *y_result < *axis_bound);
+        assert!(crate::fixed::within_radius(
+            *drawn_point,
+            actor_before,
+            8 * BODY_WIDTH,
+        ));
+        assert_eq!(
+            transition
+                .post_snapshot
+                .players
+                .iter()
+                .find(|player| player.id == "a-actor")
+                .expect("post actor")
+                .position
+                .x,
+            destination.x,
+            "ordinary settling may change Y, but never the chosen destination X",
+        );
+    }
+
+    #[test]
+    fn omitted_duplicated_or_tampered_random_records_fail_reconciliation() {
+        for (character_id, passive_id, seed) in [
+            ("arzum", "arzum-momentum", 4_242),
+            ("aleph", "aleph-volatile", 99),
+        ] {
+            let session = special_session(character_id, passive_id, seed);
+            let command = special_command(&session, "mutation-random-outcome");
+            let (pre_state, post_state, outcome) = applied_outcome(&session, &command);
+            let ability = ability_for(&pre_state, &command);
+            assert_eq!(
+                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &outcome),
+                Ok(())
+            );
+
+            if character_id == "arzum" {
+                let mut altered_final_state = post_state.clone();
+                let Some(recorded_target) =
+                    outcome
+                        .random_outcomes
+                        .first()
+                        .and_then(|record| match record {
+                            RandomOutcome::ArzumChainStrikeTeleportTarget {
+                                target_player_id,
+                                ..
+                            } => Some(target_player_id.as_str()),
+                            RandomOutcome::AlephVeilstepTeleportPoint { .. } => None,
+                        })
+                else {
+                    panic!("Arzum fixture must record its target")
+                };
+                let Some(target) = altered_final_state.player_mut(recorded_target) else {
+                    panic!("recorded target must remain in state")
+                };
+                target.position.x = target
+                    .position
+                    .x
+                    .saturating_add(100 * crate::fixed::BODY_WIDTH);
+                assert_eq!(
+                    reconcile_random_outcomes(
+                        &command,
+                        ability,
+                        &pre_state,
+                        &altered_final_state,
+                        &outcome,
+                    ),
+                    Ok(()),
+                    "Arzum reconciliation must use draw-time state, not final positions"
+                );
+            }
+
+            let mut missing = outcome.as_ref().clone();
+            missing.random_outcomes.clear();
+            assert_eq!(
+                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &missing),
+                Err(SessionFault::ContractInvariant)
+            );
+
+            let mut duplicate = outcome.as_ref().clone();
+            duplicate
+                .random_outcomes
+                .extend(outcome.random_outcomes.iter().cloned());
+            assert_eq!(
+                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &duplicate),
+                Err(SessionFault::ContractInvariant)
+            );
+
+            let mut tampered = outcome.as_ref().clone();
+            match tampered.random_outcomes.first_mut() {
+                Some(RandomOutcome::ArzumChainStrikeTeleportTarget { selected_index, .. }) => {
+                    *selected_index = selected_index.saturating_add(1)
+                }
+                Some(RandomOutcome::AlephVeilstepTeleportPoint { x_result, .. }) => {
+                    *x_result = x_result.saturating_add(1)
+                }
+                None => panic!("fixture must contain a random outcome"),
+            }
+            assert_eq!(
+                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &tampered),
+                Err(SessionFault::ContractInvariant)
+            );
+        }
+    }
+}
+
+/// Direct end-to-end transition scenarios required by `CLIENT_SPEC.md` § 20.1.
+///
+/// These deliberately use real roster definitions, the real horizontal map, `MatchHost`, and
+/// `MatchSessionHost`.  Unit tests of the individual resolver or diff helper are valuable but do
+/// not prove that the complete ordered event vocabulary survives the publication boundary.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod direct_transition_scenario_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::{Appearance, GAUGE_FULL};
+
+    fn player(player_id: &str, team: u8, character_id: &str) -> MatchPlayerConfig {
+        MatchPlayerConfig {
+            player_id: player_id.to_owned(),
+            team,
+            character_id: character_id.to_owned(),
+            appearance: Appearance::default(),
+        }
+    }
+
+    fn config(actor_character_id: &str, target_character_id: &str) -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                player("a-actor", 0, actor_character_id),
+                player("b-target", 1, target_character_id),
+            ],
+        }
+    }
+
+    fn command(
+        session: &MatchSessionHost,
+        command_id: &str,
+        kind: MatchCommandKind,
+    ) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: command_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind,
+        }
+    }
+
+    fn ability(
+        session: &MatchSessionHost,
+        command_id: &str,
+        slot: AbilitySlot,
+        target_player_id: Option<&str>,
+    ) -> MatchCommand {
+        command(
+            session,
+            command_id,
+            MatchCommandKind::Ability {
+                slot,
+                angle_millidegrees: 0,
+                power_basis_points: 5_000,
+                target_player_id: target_player_id.map(str::to_owned),
+                secondary_target_player_id: None,
+            },
+        )
+    }
+
+    fn event_index(
+        transition: &MatchTransition,
+        predicate: impl Fn(&PresentationEventKind) -> bool,
+    ) -> usize {
+        transition
+            .events
+            .iter()
+            .position(|event| predicate(&event.kind))
+            .expect("required event must be present")
+    }
+
+    fn assert_post_hash_is_live(session: &MatchSessionHost, transition: &MatchTransition) {
+        let live = crate::hash::hash_state(session.host().state());
+        assert_eq!(transition.post_state_hash, live);
+        assert_eq!(transition.post_snapshot.authoritative_state_hash, live);
+    }
+
+    #[test]
+    fn melee_terrain_and_block_mutation_are_one_ordered_real_transition() {
+        let match_config = config("huck", "huck");
+        let mut state = build_initial_state(&match_config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        // Haymaker is melee-only. Keeping the target on the actor's supported spawn cell both
+        // guarantees contact and centres its real crater over a real destructible map block.
+        state
+            .player_mut("b-target")
+            .expect("fixture target")
+            .position = actor_position;
+
+        let host = MatchHost::start(state).expect("fixture match must start");
+        let mut session = MatchSessionHost::from_new_host(host);
+        let attack = ability(
+            &session,
+            "melee-terrain-passive",
+            AbilitySlot::Basic,
+            Some("b-target"),
+        );
+        let transition = session.apply(attack).expect("Haymaker must resolve");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_post_hash_is_live(&session, &transition);
+
+        let strike_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::StrikeResolved {
+                    strike: StrikeResolution {
+                        delivery: StrikeDelivery::Melee,
+                        target_player_id,
+                        ..
+                    },
+                    ..
+                } if target_player_id == "b-target"
+            )
+        });
+        let terrain_index = event_index(
+            &transition,
+            |kind| matches!(kind, PresentationEventKind::TerrainChanged { dirty_rectangles, .. } if !dirty_rectangles.is_empty()),
+        );
+        let block_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::BlockChanged {
+                    previous_health: Some(previous),
+                    new_health: Some(current),
+                    ..
+                } if current < previous
+            )
+        });
+        assert!(strike_index < terrain_index);
+        assert!(terrain_index < block_index);
+    }
+
+    #[test]
+    fn passive_required_then_chosen_holds_and_resumes_the_same_real_turn() {
+        let match_config = config("arzum", "huck");
+        let mut state = build_initial_state(&match_config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        state
+            .player_mut("a-actor")
+            .expect("fixture actor")
+            .special_gauge = GAUGE_FULL - 1;
+        // A point-blank projectile guarantees enough real damage to fill the final gauge unit,
+        // while Arzum's basic has no terrain effect that could eliminate the fixture players.
+        state
+            .player_mut("b-target")
+            .expect("fixture target")
+            .position = actor_position;
+
+        let host = MatchHost::start(state).expect("fixture match must start");
+        let mut session = MatchSessionHost::from_new_host(host);
+        let attack = ability(
+            &session,
+            "raise-passive-choice",
+            AbilitySlot::Basic,
+            Some("b-target"),
+        );
+        let transition = session.apply(attack).expect("Arzum basic must resolve");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_eq!(session.host().phase(), MatchPhase::PassiveSelection);
+        assert_post_hash_is_live(&session, &transition);
+        let passive_required_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::PassiveChoiceRequired {
+                    player_id,
+                    passive_ids,
+                } if player_id == "a-actor" && passive_ids.len() == 3
+            )
+        });
+        let strike_index = event_index(&transition, |kind| {
+            matches!(kind, PresentationEventKind::StrikeResolved { .. })
+        });
+        assert!(strike_index < passive_required_index);
+        assert!(
+            !transition
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, PresentationEventKind::TurnEnded { .. })),
+            "the passive interrupt must hold the current turn open",
+        );
+
+        let choice = command(
+            &session,
+            "choose-arzum-passive",
+            MatchCommandKind::PassiveChoice {
+                passive_id: "arzum-momentum".to_owned(),
+            },
+        );
+        let chosen = session.apply(choice).expect("passive choice must resolve");
+        assert_post_hash_is_live(&session, &chosen);
+        let chosen_index = event_index(&chosen, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::PassiveChosen {
+                    player_id,
+                    passive_id,
+                } if player_id == "a-actor" && passive_id == "arzum-momentum"
+            )
+        });
+        let ended_index = event_index(&chosen, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnEnded {
+                    player_id,
+                    reason: ClientTurnEndReason::Attacked,
+                } if player_id == "a-actor"
+            )
+        });
+        let opened_index = event_index(&chosen, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnOpened { player_id, .. }
+                    if player_id == "b-target"
+            )
+        });
+        assert!(chosen_index < ended_index && ended_index < opened_index);
+    }
+
+    #[test]
+    fn pass_reports_the_reason_and_opens_the_next_turn_in_order() {
+        let mut session =
+            MatchSessionHost::create(&config("zeke", "huck")).expect("fixture session must start");
+        let pass = command(&session, "direct-pass", MatchCommandKind::Pass);
+        let transition = session.apply(pass).expect("pass must resolve");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_post_hash_is_live(&session, &transition);
+        let ended_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnEnded {
+                    player_id,
+                    reason: ClientTurnEndReason::Passed,
+                } if player_id == "a-actor"
+            )
+        });
+        let opened_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnOpened {
+                    player_id,
+                    turn_number: 2,
+                } if player_id == "b-target"
+            )
+        });
+        assert!(ended_index < opened_index);
+    }
+
+    #[test]
+    fn melee_elimination_is_attributed_before_victory_and_no_turn_reopens() {
+        let match_config = config("natomica", "huck");
+        let mut state = build_initial_state(&match_config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        let actor = state.player_mut("a-actor").expect("fixture actor");
+        actor.special_gauge = GAUGE_FULL;
+        actor.has_chosen_passive = true;
+        actor.passive_id = Some("natomica-stable-core".to_owned());
+        let target = state.player_mut("b-target").expect("fixture target");
+        target.position = actor_position;
+        target.health = 1;
+
+        let host = MatchHost::start(state).expect("fixture match must start");
+        let mut session = MatchSessionHost::from_new_host(host);
+        let attack = ability(&session, "victory-attribution", AbilitySlot::Special, None);
+        let transition = session.apply(attack).expect("Repulse must resolve");
+
+        assert_post_hash_is_live(&session, &transition);
+        let strike_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::StrikeResolved {
+                    strike: StrikeResolution {
+                        target_player_id,
+                        eliminated_target: true,
+                        ..
+                    },
+                    ..
+                } if target_player_id == "b-target"
+            )
+        });
+        let eliminated_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::PlayerEliminated {
+                    player_id,
+                    cause: ChangeProvenance::Strike {
+                        owner_id,
+                        ability_id,
+                        strike_index: 0,
+                    },
+                } if player_id == "b-target"
+                    && owner_id == "a-actor"
+                    && ability_id == "natomica-repulse"
+            )
+        });
+        let turn_ended_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnEnded {
+                    player_id,
+                    reason: ClientTurnEndReason::Attacked,
+                } if player_id == "a-actor"
+            )
+        });
+        let victory_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::MatchCompleted {
+                    outcome: ClientMatchOutcome::Victory { team: 0 },
+                }
+            )
+        });
+        assert!(strike_index < eliminated_index);
+        assert!(eliminated_index < turn_ended_index);
+        assert!(turn_ended_index < victory_index);
+        assert!(
+            !transition
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, PresentationEventKind::TurnOpened { .. })),
+            "a completed match cannot reopen a planning turn",
+        );
+        assert_eq!(session.host().phase(), MatchPhase::MatchComplete);
+        assert_eq!(
+            session.host().outcome(),
+            crate::types::MatchOutcome::Victory { team: 0 }
+        );
+    }
+}
+
+/// Read-only preview semantics, including the negative proof that no live state, RNG, generation,
+/// or idempotency metadata changes even when the disposable legality clone runs a random ability.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod preview_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::{Appearance, GAUGE_FULL};
+
+    fn config(actor_character_id: &str) -> MatchConfig {
+        MatchConfig {
+            seed: 9_876,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-actor".to_owned(),
+                    team: 0,
+                    character_id: actor_character_id.to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-target".to_owned(),
+                    team: 1,
+                    character_id: "huck".to_owned(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    fn request(session: &MatchSessionHost, slot: AbilitySlot) -> AbilityPreviewRequest {
+        AbilityPreviewRequest {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            expected_snapshot_generation: session.generation(),
+            player_id: "a-actor".to_owned(),
+            slot,
+            angle_millidegrees: 45_000,
+            power_basis_points: 1_500,
+            target_player_id: None,
+            secondary_target_player_id: None,
+        }
+    }
+
+    fn assert_session_unchanged(
+        session: &MatchSessionHost,
+        before: &SimulationState,
+        generation: u64,
+        ledger_len: usize,
+        ledger_bytes: u64,
+    ) {
+        assert_eq!(session.host().state(), before);
+        assert_eq!(session.host().state().rng_state, before.rng_state);
+        assert_eq!(session.generation(), generation);
+        assert_eq!(session.ledger_len(), ledger_len);
+        assert_eq!(session.ledger_bytes(), ledger_bytes);
+    }
+
+    #[test]
+    fn projectile_preview_is_repeatable_and_mutates_nothing() {
+        let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
+        let preview_request = request(&session, AbilitySlot::Basic);
+        let before = session.host().state().clone();
+
+        let first = session
+            .preview(&preview_request)
+            .expect("preview must resolve");
+        let second = session
+            .preview(&preview_request)
+            .expect("preview must repeat");
+
+        assert_eq!(first, second);
+        assert!(first.legal);
+        assert_eq!(first.rejection_reason, None);
+        assert_eq!(first.snapshot_generation, 0);
+        assert_eq!(first.gauge_cost, 0);
+        assert_eq!(first.projectile_traces.len(), 1);
+        assert!(
+            first
+                .projectile_traces
+                .first()
+                .is_some_and(|trace| trace.samples.len() >= 2)
+        );
+        assert!(
+            first
+                .legal_target_player_ids
+                .windows(2)
+                .all(|pair| matches!(pair, [left, right] if left < right))
+        );
+        assert_session_unchanged(&session, &before, 0, 0, 0);
+    }
+
+    #[test]
+    fn stale_and_illegal_previews_are_normal_non_mutating_responses() {
+        let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
+        let before = session.host().state().clone();
+        let mut stale = request(&session, AbilitySlot::Basic);
+        stale.expected_snapshot_generation = 1;
+
+        let stale_response = session.preview(&stale).expect("staleness is not a fault");
+        assert!(!stale_response.legal);
+        assert_eq!(
+            stale_response.rejection_reason,
+            Some(PreviewRejection::SnapshotGenerationMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert!(stale_response.projectile_traces.is_empty());
+        assert!(stale_response.legal_target_player_ids.is_empty());
+
+        let mut illegal = request(&session, AbilitySlot::Basic);
+        illegal.angle_millidegrees = 360_000;
+        let illegal_response = session
+            .preview(&illegal)
+            .expect("gameplay refusal is normal");
+        assert!(!illegal_response.legal);
+        assert_eq!(
+            illegal_response.rejection_reason,
+            Some(PreviewRejection::Core(CommandRejection::InputOutOfRange))
+        );
+        assert!(illegal_response.projectile_traces.is_empty());
+
+        let special = session
+            .preview(&request(&session, AbilitySlot::Special))
+            .expect("gauge refusal is normal");
+        assert!(!special.legal);
+        assert_eq!(special.gauge_cost, GAUGE_FULL);
+        assert_eq!(
+            special.rejection_reason,
+            Some(PreviewRejection::Core(CommandRejection::GaugeNotReady))
+        );
+        assert_session_unchanged(&session, &before, 0, 0, 0);
+    }
+
+    #[test]
+    fn random_ability_legality_runs_only_on_a_disposable_clone() {
+        let match_config = config("aleph");
+        let mut state = build_initial_state(&match_config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        let actor = state.player_mut("a-actor").expect("fixture actor");
+        actor.special_gauge = GAUGE_FULL;
+        actor.has_chosen_passive = true;
+        actor.passive_id = Some("aleph-volatile".to_owned());
+        state
+            .player_mut("b-target")
+            .expect("fixture target")
+            .position = actor_position;
+        let host = MatchHost::start(state).expect("fixture match must start");
+        let session = MatchSessionHost::from_new_host(host);
+        let before = session.host().state().clone();
+        let mut preview_request = request(&session, AbilitySlot::Special);
+        preview_request.target_player_id = Some("b-target".to_owned());
+
+        let first = session
+            .preview(&preview_request)
+            .expect("preview must resolve");
+        let second = session
+            .preview(&preview_request)
+            .expect("preview must repeat");
+
+        assert!(first.legal);
+        assert_eq!(first, second);
+        assert!(first.projectile_traces.is_empty());
+        assert_eq!(first.gauge_cost, GAUGE_FULL);
+        assert_session_unchanged(&session, &before, 0, 0, 0);
+    }
+
+    #[test]
+    fn malformed_preview_structure_faults_without_mutation() {
+        let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
+        let before = session.host().state().clone();
+        let mut malformed = request(&session, AbilitySlot::Basic);
+        malformed.schema_version = CLIENT_CONTRACT_VERSION.saturating_add(1);
+
+        assert_eq!(
+            session.preview(&malformed),
+            Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: CLIENT_CONTRACT_VERSION.saturating_add(1),
+            })
+        );
+        assert_session_unchanged(&session, &before, 0, 0, 0);
     }
 }
 

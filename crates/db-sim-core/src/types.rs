@@ -1211,6 +1211,55 @@ pub struct StrikeResolution {
     pub eliminated_target: bool,
 }
 
+/// One public, non-strike outcome drawn from the authoritative match generator.
+///
+/// The record is created by the resolver at the draw site. It deliberately exposes the
+/// bounded result needed to explain the visible action, but never the generator's private
+/// state or rejected raw PCG values. Closed variants keep a target draw from being confused
+/// with a point draw and give the session boundary enough information to reject tampered
+/// provenance before publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RandomOutcome {
+    /// Arzum's Chain Strike selected one candidate from a sorted eligible-target list.
+    ArzumChainStrikeTeleportTarget {
+        /// Exclusive upper bound supplied to `Rng::bounded`.
+        candidate_count: u32,
+        /// Result returned by `Rng::bounded(candidate_count)`.
+        selected_index: u32,
+        /// Candidate selected at `selected_index`.
+        target_player_id: String,
+        /// Exact position chosen before ordinary host settling.
+        destination: FixedPoint,
+    },
+    /// Aleph's Veilstep accepted one `(x, y)` pair from its bounded-square sampler.
+    AlephVeilstepTeleportPoint {
+        /// Exclusive upper bound used independently for the X and Y offset draws.
+        axis_bound: u32,
+        /// Accepted X result, or the final rejected X result when the fallback was used.
+        x_result: u32,
+        /// Accepted Y result, or the final rejected Y result when the fallback was used.
+        y_result: u32,
+        /// Whether all bounded point pairs missed the disk and the deterministic centre
+        /// fallback was used. In that case `x_result`/`y_result` are the final rejected pair.
+        fallback_used: bool,
+        /// Point produced by the accepted bounded pair before terrain correction.
+        drawn_point: FixedPoint,
+        /// Nearest legal authoritative destination selected from `drawn_point`.
+        destination: FixedPoint,
+    },
+}
+
+impl RandomOutcome {
+    /// Stable wire purpose identifier. Never localize these.
+    #[must_use]
+    pub const fn purpose_wire_name(&self) -> &'static str {
+        match self {
+            Self::ArzumChainStrikeTeleportTarget { .. } => "arzumChainStrikeTeleportTarget",
+            Self::AlephVeilstepTeleportPoint { .. } => "alephVeilstepTeleportPoint",
+        }
+    }
+}
+
 /// What happened to one status on one player, recorded where it happened.
 ///
 /// A status can be applied and expire inside the same synchronous host call — a
@@ -1325,6 +1374,12 @@ pub struct CommandOutcome {
     /// several strikes crit, and guessing would put a presentation layer's animation out of
     /// step with the authoritative RNG stream.
     pub strikes: Vec<StrikeResolution>,
+    /// Public non-strike random outcomes, in exact draw-site order.
+    ///
+    /// These are resolver-owned records. A consumer must not infer a selected target or
+    /// teleport point from the post-state because settling and later effects may obscure the
+    /// original choice, and doing so cannot account for whether a bounded draw occurred.
+    pub random_outcomes: Vec<RandomOutcome>,
     /// Every status lifecycle transition this command caused, in the order it caused them.
     ///
     /// Includes transitions that both begin and end within this one command, which a
