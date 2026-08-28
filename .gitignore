@@ -19,6 +19,7 @@ Cargo.lock.bak
 .godot/
 /client/export/
 export_presets.cfg
+!client/src/DungeonBarrage.Client/export_presets.cfg
 
 # Build output
 /dist/

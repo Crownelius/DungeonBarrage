@@ -1835,3 +1835,190 @@ creation request and the closed enums; the snapshot, transition, and presentatio
 still described only by the frozen envelopes and the Rust types.
 
 Arzum's rated second Chain Strike remains an owner decision, unchanged by this milestone.
+
+---
+
+## C4 — Godot render/export spike
+
+Resumed from a working tree containing substantial unfinished C4 work: the Rust side had gained
+`positionScale`/`fixedTickRate` on every snapshot, the contracts assembly had gained the complete
+presentation-event/response/snapshot DTO surface, and a Godot project skeleton existed
+(`project.godot`, `export_presets.cfg`, App/Match/Settings scripts, a presentation manifest) — but
+none of it had been run end to end, the frozen fixture files were stale relative to the Rust source,
+and there was no scene: `project.godot` named `res://Scenes/Main.tscn`, which did not exist. Nothing
+was reverted; every piece of that prior work was read, verified, and completed.
+
+### What the prior work had gotten right
+
+Reading before touching anything: `client_contract.rs`/`wire.rs` add `position_scale`/
+`fixed_tick_rate` as envelope metadata, not authoritative state — the state hash assertions in
+`db-sim-ffi/src/tests.rs` are unchanged (`f67c5371bcddbdf5` -> `378081bb2e830a5d` ->
+`d8686762470c0c36`), confirming this cannot have touched simulation behaviour. A proper
+`#[ignore]`-gated `regenerate_shared_response_fixtures_from_production_abi` test exists as the sole
+legitimate fixture writer, invoking the exported production ABI so regeneration can never bless a
+test-only serializer. `PresentationContracts.cs`/`ResponseContracts.cs`/`SnapshotContracts.cs` are a
+faithful, complete transcription of every closed enum and every `PresentationEventKind` variant —
+verified field-by-field against `match_session.rs` while reading them, not assumed correct because
+they looked plausible.
+
+### The stale-fixture bug, and how it was found
+
+`cargo test --workspace` failed one test:
+`shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes`, "production wire bytes
+changed". A first pass misread this as "fixtures already contain the new fields" because of a
+pipeline exit-code trap — `grep -o pattern file | head -1; echo $?` reports `head`'s exit code, not
+`grep`'s, so a failed match still prints `exit=0`. Byte-diffing the actual assertion values (not the
+printed `Debug` dump, which is unreadable at 2.4 KB) found the real story: production output already
+had `positionScale`/`fixedTickRate`; the frozen files on disk did not.
+
+Fix: ran the ignored regeneration test explicitly. Four response files updated
+(`create.json`, `snapshot-initial.json`, `001-move.json`, `002-ability.json`);
+`preview-basic.json` correctly did not change, since a preview response carries no embedded
+snapshot. Full workspace suite green afterward, including both existing C# fixture-parity test
+projects, which read the same files.
+
+One clippy finding surfaced alongside: the regeneration test's outer `unsafe` block had no
+`SAFETY` comment (`db-sim-ffi` denies `undocumented_unsafe_blocks`). Fixed by matching the
+identical comment already used on the sibling replay test, rather than inventing new wording for
+the same fact.
+
+### The missing scene
+
+`project.godot` referenced a main scene that did not exist, and nothing wired the existing
+`FixtureMatchBootstrapper`/`C4SmokeOptions`/`C4SmokeReport` scaffolding into a running node. Built
+`Scenes/Main.tscn` and `App/Main.cs`: a menu showing `BuildDiagnostics.DisplayText`, click-or-Enter
+to bootstrap the real duel through `LocalMatchSession`, and a placeholder render — terrain cells by
+material, blocks by health state, players as colored circles at their converted pixel position, HUD
+text with turn/generation/hash. `PositionScale` (1024 fixed-point units per terrain cell, confirmed
+from `fixed.rs`'s own doc comment before use) converts authoritative coordinates to pixels;
+`PixelsPerCell = 12` is a placeholder, matching CLIENT_SPEC §22's own note that art direction remains
+an open decision.
+
+Scoped deliberately to CLIENT_SPEC's actual C4 gate (§20.5 steps 1-4 and 6): menu diagnostics, start
+the real duel, render terrain/blocks/players from one snapshot, clean disposal on exit. Step 5 —
+move, fire, reconcile — is explicitly C5, and nothing here attempts it.
+
+### Bugs found only by actually running the gates
+
+Compiling was not the bar; the gates in CLIENT_SPEC §20.6 were. Running them in order surfaced four
+real problems a green build had hidden:
+
+1. **`PresentationManifest.cs:32`** — `Godot.FileAccess.GetLength()` returns `ulong`;
+   `GetBuffer` takes `long`. A straight `dotnet build` of the interop/contracts projects never
+   compiles this file at all (it is only ever compiled as part of the Godot SDK build), so this had
+   never been caught. Fixed with a `checked` cast and a comment on why the checked bound is
+   defensive rather than a realistic runtime path.
+2. **Godot's C# exporter requires a solution file colocated with `project.godot`.** `export-release`
+   failed: "This project contains C# files but no solution file was found at
+   `...\DungeonBarrage.Client\DungeonBarrage.Client.sln`". This is a Godot-imposed constraint
+   CLIENT_SPEC's file tree (§8.4) did not anticipate, and it is a *different* file from the
+   top-level `client/DungeonBarrage.sln` the C3 gates already use — the two are not redundant, and
+   removing either breaks a different gate. Created it with `dotnet new sln` +
+   `dotnet sln add` scoped to Client/Contracts/Interop, mirroring what Godot's own "Create C#
+   solution" editor action would generate.
+3. **The locally installed .NET export templates were misnamed.** `export-release` failed:
+   "No export template found at ...4.7.1.stable.mono\windows_release_x86_64.exe". The templates
+   were sitting in `...4.7.1.stable\` instead — but that directory's own `version.txt` reported
+   `4.7.1.stable.mono`, proving the *content* was already correct and only the directory name was
+   wrong (a leftover from however the archive was originally extracted, documented in an earlier
+   BUILD_LOG entry). Fixed by copying — not moving — the directory to the name the mono/.NET editor
+   expects, leaving the original in place. A machine toolchain fix, not a repository change.
+4. **The first real screenshot was a flat, wrong gray frame** — not the placeholder render, not even
+   the app's own defined background color. `_Ready()` runs before the engine's first process/draw
+   cycle, so the `QueueRedraw()` that requested the frame had not yet caused `_Draw()` to run by the
+   time the screenshot was captured. Fixed by making `_Ready` `async void` (the documented Godot C#
+   pattern for a lifecycle override that must yield) and awaiting two real `ProcessFrame` signals —
+   the first is where `_Draw` actually executes; the second is where the viewport texture is
+   guaranteed to reflect a presented frame that included it — before capturing. Verified by
+   re-running and visually inspecting the resulting image, not by re-reading the code and assuming
+   the fix was sufdone.
+
+A fifth issue was found by defensive review rather than by a failure: the original smoke path only
+caught a curated exception list around the bootstrap, so the very JSON-deserialization exception
+from bug #3's stale-DLL condition (reproduced live during this session — see below) escaped
+uncaught, was logged by the engine, and left the headless process running forever with nothing able
+to advance it. A smoke tool's entire purpose is to convert failure into a report and a clean exit;
+one that can hang instead is worse than useless in an unattended run. Widened the catch to
+unconditional `Exception`, and moved `GetTree().Quit()` into a `finally` in the caller so a failure
+inside report-writing itself cannot cause the same hang.
+
+That reproduction was real, not hypothetical: the `client/native/win-x64/db_sim_ffi.dll` staged for
+the Godot export predated this session's Rust changes (positionScale/fixedTickRate did not exist in
+it yet). The export packaged that stale DLL; the exported binary's bootstrap threw a genuine
+`JsonException` — "missing required properties including 'positionScale', 'fixedTickRate'" — and
+hung exactly as described above. Fixed by rebuilding `cargo build --release -p db-sim-ffi` and
+re-copying the fresh artifact. The hardened catch-and-quit fix above means this class of staleness
+will produce a failed report in the future, not a hung process.
+
+### Evidence
+
+All of the following ran from `$SCRATCH/export-test`, well outside the repository (§20.5 step 1),
+against a release export built by `godot --headless --export-release "Windows Desktop"`.
+
+**Headless smoke run** (`--headless -- --c4-smoke-report ... --c4-screenshot ...`):
+
+```json
+{
+  "success": true, "error": null,
+  "matchId": "fixture-horizontal-duel-v1", "stateHash": "f67c5371bcddbdf5",
+  "terrainWidth": 50, "terrainHeight": 20, "terrainByteCount": 1000, "solidTerrainCellCount": 96,
+  "blockCount": 8, "playerCount": 2, "positionScale": 1024, "fixedTickRate": 60,
+  "screenshotWidth": 0, "screenshotHeight": 0,
+  "sessionDisposed": true, "disposedSessionRejectedReuse": true
+}
+```
+
+`stateHash` matches the frozen create-response hash exactly. `screenshotWidth`/`Height` are
+correctly zero: `--headless` has no display driver, and `CaptureScreenshot` detects that
+(`DisplayServer.GetName() == "headless"`) rather than let it fail deeper inside image encoding.
+`sessionDisposed`/`disposedSessionRejectedReuse` are both `true`, proving clean native-handle
+disposal (§20.5 step 6): the session was disposed, and a subsequent call against it threw
+`ObjectDisposedException` rather than silently reusing a freed handle.
+
+**Windowed smoke run** (same command, no `--headless`): identical report, except
+`screenshotWidth: 1280, screenshotHeight: 720` — a real OpenGL 3.3 context on the machine's actual
+NVIDIA GPU, not a software fallback. The PNG was read back and visually inspected, not just checked
+for existing: it shows the 8 placeholder blocks in their fixture positions, a blue circle for zeke
+(220/220) and a red circle for huck (400/400) at their authoritative positions, and the footer HUD
+text `turn 1  gen 0  hash f67c5371bcddbdf5`. This is §20.5 steps 2 through 4, with a pixel as the
+proof rather than a claim.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | 530 pass, 0 fail |
+| `cargo test --release -p db-sim-ffi` | 13 pass, 1 ignored (the regeneration test, by design) |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories, bans, licenses, sources ok |
+| `betterleaks git` (full history) | no leaks |
+| `dotnet restore client/DungeonBarrage.sln --locked-mode` | pass (lock files regenerated after adding the two new C4 projects; the three pre-existing lock files regenerated byte-identical) |
+| `dotnet build client/DungeonBarrage.sln -c Release --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-build` | **30 pass**, 0 fail (25 Interop.Tests + 5 Contracts.Tests) |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes` | pass |
+| `godot --headless --path client/src/DungeonBarrage.Client --editor --quit-after 1` | pass |
+| `godot --headless ... --export-release "Windows Desktop" ...` | pass |
+| headless smoke run of the export | pass, see report above |
+| windowed smoke run of the export | pass, real screenshot inspected |
+
+### Notes for whoever picks this up
+
+- Two solution files now exist for `client/`, deliberately: `client/DungeonBarrage.sln` (the
+  developer/CI workspace solution — Contracts, Interop, Client, both test projects) and
+  `client/src/DungeonBarrage.Client/DungeonBarrage.Client.sln` (Godot's own requirement, scoped to
+  Client/Contracts/Interop). Do not delete either.
+- `client/native/win-x64/db_sim_ffi.dll` is a staged build artifact, gitignored, and it does not
+  auto-refresh. After any Rust change that touches the client-facing envelope, rebuild
+  (`cargo build --release -p db-sim-ffi`) and recopy before trusting a Godot export.
+- The placeholder render's `PixelsPerCell = 12` and all placeholder colors are exactly that —
+  placeholder. CLIENT_SPEC §22.1 leaves art direction open; nothing here should be read as a claimed
+  final value.
+- `App/Main.cs`'s smoke path is the automated proxy for §20.5 steps 1-4 and 6. It does not attempt
+  step 5 (move/fire/reconcile); that is C5's `RunSmoke` equivalent to build once input exists.
+
+### Still open
+
+C5: input contexts, transition playback, terrain dirty updates, HUD essentials, and reconciliation —
+the actual playable turn. See HANDOFF §7c for the ordered next sequence.

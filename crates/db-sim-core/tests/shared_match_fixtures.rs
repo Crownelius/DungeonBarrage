@@ -25,7 +25,7 @@ use db_sim_core::match_session::{
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig};
 use db_sim_core::types::{AbilitySlot, Appearance};
-use db_sim_core::{CONTENT_VERSION, SIMULATION_VERSION};
+use db_sim_core::{CONTENT_VERSION, FIXED_TICK_RATE, POSITION_SCALE, SIMULATION_VERSION};
 use serde::Deserialize;
 
 const FIXTURE_SCHEMA_VERSION: u32 = 1;
@@ -665,6 +665,8 @@ fn assert_hash_or_collect_pending(
 }
 
 fn assert_initial_snapshot(snapshot: &MatchSnapshot, expected: &InitialExpectation) {
+    assert_eq!(snapshot.position_scale, POSITION_SCALE);
+    assert_eq!(snapshot.fixed_tick_rate, FIXED_TICK_RATE);
     assert_eq!(snapshot.generation, expected.snapshot_generation);
     assert_eq!(snapshot.turn_number, expected.turn_number);
     assert_eq!(snapshot.phase, expected.phase.into());
@@ -683,6 +685,8 @@ fn assert_step(
     transition: &MatchTransition,
     expected: &StepExpectation,
 ) {
+    assert_eq!(transition.post_snapshot.position_scale, POSITION_SCALE);
+    assert_eq!(transition.post_snapshot.fixed_tick_rate, FIXED_TICK_RATE);
     assert_eq!(transition.disposition, expected.disposition.into());
     assert_eq!(transition.pre_snapshot_generation, expected.pre_generation);
     assert_eq!(

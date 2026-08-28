@@ -1,5 +1,11 @@
 use super::*;
 use serde_json::Value;
+use std::path::Path;
+
+const FIXTURE_RESPONSE_DIRECTORY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/matches/horizontal-test-duel-v1/responses"
+);
 
 const CREATE_REQUEST: &[u8] =
     include_bytes!("../../../tests/fixtures/matches/horizontal-test-duel-v1/create-request.json");
@@ -44,15 +50,20 @@ unsafe fn apply(handle: *mut SimHandle, bytes: &[u8]) -> (c_int, DbOwnedBuffer) 
 }
 
 unsafe fn json_and_free(buffer: &mut DbOwnedBuffer) -> Value {
+    // SAFETY: delegated with the same live allocation required by this helper.
+    let bytes = unsafe { bytes_and_free(buffer) };
+    serde_json::from_slice(&bytes).expect("ABI output must be valid JSON")
+}
+
+unsafe fn bytes_and_free(buffer: &mut DbOwnedBuffer) -> Vec<u8> {
     assert!(!buffer.ptr.is_null());
     // SAFETY: `buffer` is a live allocation returned by this library.
-    let bytes = unsafe { core::slice::from_raw_parts(buffer.ptr, buffer.len) };
-    let value = serde_json::from_slice(bytes).expect("ABI output must be valid JSON");
+    let bytes = unsafe { core::slice::from_raw_parts(buffer.ptr, buffer.len) }.to_vec();
     // SAFETY: freed exactly once; the function clears the value.
     unsafe { db_sim_buffer_free(buffer) };
     assert!(buffer.ptr.is_null());
     assert_eq!(buffer.len, 0);
-    value
+    bytes
 }
 
 unsafe fn fixture_json_and_free(buffer: &mut DbOwnedBuffer, expected: &[u8]) -> Value {
@@ -69,11 +80,73 @@ unsafe fn destroy(handle: *mut SimHandle) {
     unsafe { db_sim_match_destroy(handle) };
 }
 
+fn write_fixture_response(file_name: &str, bytes: &[u8]) {
+    assert_eq!(bytes.last(), Some(&b'\n'), "fixture response needs one LF");
+    assert!(!bytes.contains(&b'\r'), "fixture response contains CR");
+    assert!(
+        !bytes.starts_with(&[0xef, 0xbb, 0xbf]),
+        "fixture response contains a UTF-8 BOM"
+    );
+    let path = Path::new(FIXTURE_RESPONSE_DIRECTORY).join(file_name);
+    std::fs::write(&path, bytes)
+        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
+}
+
 #[test]
 fn versions_are_exactly_reexported() {
     assert_eq!(db_sim_abi_version(), ABI_VERSION);
     assert_eq!(db_sim_simulation_version(), db_sim_core::SIMULATION_VERSION);
     assert_eq!(db_sim_content_version(), db_sim_core::CONTENT_VERSION);
+}
+
+#[test]
+#[ignore = "explicitly rewrites the frozen shared response corpus"]
+fn regenerate_shared_response_fixtures_from_production_abi() {
+    // This is the sole response-fixture writer. It invokes the exported production ABI, whose
+    // ordinary code path uses the production wire serializer, so regeneration cannot bless a
+    // test-only serialization implementation.
+    //
+    // SAFETY: every pointer used below comes from a live Rust value and every allocation is freed.
+    unsafe {
+        let (create_code, handle, mut create_buffer) = create(CREATE_REQUEST);
+        assert_eq!(create_code, status::OK);
+        assert!(!handle.is_null());
+        let create_response = bytes_and_free(&mut create_buffer);
+
+        let mut snapshot_buffer = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_snapshot(handle, &mut snapshot_buffer),
+            status::OK
+        );
+        let snapshot_response = bytes_and_free(&mut snapshot_buffer);
+
+        let mut preview_buffer = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_preview(
+                handle,
+                PREVIEW_REQUEST.as_ptr(),
+                PREVIEW_REQUEST.len(),
+                &mut preview_buffer,
+            ),
+            status::OK
+        );
+        let preview_response = bytes_and_free(&mut preview_buffer);
+
+        let (move_code, mut move_buffer) = apply(handle, MOVE_REQUEST);
+        assert_eq!(move_code, status::OK);
+        let move_response = bytes_and_free(&mut move_buffer);
+
+        let (ability_code, mut ability_buffer) = apply(handle, ABILITY_REQUEST);
+        assert_eq!(ability_code, status::OK);
+        let ability_response = bytes_and_free(&mut ability_buffer);
+        destroy(handle);
+
+        write_fixture_response("create.json", &create_response);
+        write_fixture_response("snapshot-initial.json", &snapshot_response);
+        write_fixture_response("preview-basic.json", &preview_response);
+        write_fixture_response("001-move.json", &move_response);
+        write_fixture_response("002-ability.json", &ability_response);
+    }
 }
 
 #[test]
@@ -86,6 +159,14 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
         let created = fixture_json_and_free(&mut created_buffer, CREATE_RESPONSE);
         assert_eq!(created["created"], true);
         assert_eq!(created["snapshot"]["abiVersion"], ABI_VERSION);
+        assert_eq!(
+            created["snapshot"]["positionScale"],
+            db_sim_core::POSITION_SCALE
+        );
+        assert_eq!(
+            created["snapshot"]["fixedTickRate"],
+            db_sim_core::FIXED_TICK_RATE
+        );
         assert_eq!(created["snapshot"]["matchId"], "fixture-horizontal-duel-v1");
         assert_eq!(created["snapshot"]["mapId"], "horizontal-test-array");
         assert_eq!(created["snapshot"]["stateHash"], "f67c5371bcddbdf5");
@@ -96,6 +177,8 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             status::OK
         );
         let snapshot = fixture_json_and_free(&mut snapshot_buffer, INITIAL_SNAPSHOT_RESPONSE);
+        assert_eq!(snapshot["positionScale"], db_sim_core::POSITION_SCALE);
+        assert_eq!(snapshot["fixedTickRate"], db_sim_core::FIXED_TICK_RATE);
         assert_eq!(snapshot["snapshotGeneration"], 0);
         assert_eq!(snapshot["players"].as_array().map(Vec::len), Some(2));
         assert_eq!(snapshot["blocks"].as_array().map(Vec::len), Some(8));
@@ -161,6 +244,14 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
         let moved = fixture_json_and_free(&mut move_buffer, MOVE_RESPONSE);
         assert_eq!(moved["disposition"], "accepted");
         assert_eq!(moved["postSnapshotGeneration"], 1);
+        assert_eq!(
+            moved["postSnapshot"]["positionScale"],
+            db_sim_core::POSITION_SCALE
+        );
+        assert_eq!(
+            moved["postSnapshot"]["fixedTickRate"],
+            db_sim_core::FIXED_TICK_RATE
+        );
         assert_eq!(moved["postStateHash"], "378081bb2e830a5d");
 
         let (ability_code, mut ability_buffer) = apply(handle, ABILITY_REQUEST);
@@ -168,6 +259,14 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
         let ability = fixture_json_and_free(&mut ability_buffer, ABILITY_RESPONSE);
         assert_eq!(ability["disposition"], "accepted");
         assert_eq!(ability["postSnapshotGeneration"], 2);
+        assert_eq!(
+            ability["postSnapshot"]["positionScale"],
+            db_sim_core::POSITION_SCALE
+        );
+        assert_eq!(
+            ability["postSnapshot"]["fixedTickRate"],
+            db_sim_core::FIXED_TICK_RATE
+        );
         assert_eq!(ability["postStateHash"], "d8686762470c0c36");
         assert_eq!(ability["postSnapshot"]["stateHash"], "d8686762470c0c36");
         assert!(ability["events"].as_array().is_some_and(|events| {

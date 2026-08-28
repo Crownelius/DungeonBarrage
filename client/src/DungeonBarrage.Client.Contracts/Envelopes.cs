@@ -33,7 +33,11 @@ public static class ClientEnvelope
             NumberHandling = JsonNumberHandling.Strict,
             ReadCommentHandling = JsonCommentHandling.Disallow,
             AllowTrailingCommas = false,
+            AllowDuplicateProperties = false,
+            AllowOutOfOrderMetadataProperties = true,
             DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+            RespectNullableAnnotations = true,
+            RespectRequiredConstructorParameters = true,
             WriteIndented = false,
         };
 

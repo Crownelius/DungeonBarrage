@@ -15,7 +15,7 @@
 //! consumers when to fetch that payload.
 
 use crate::blocks::TerrainBlock;
-use crate::fixed::FixedPoint;
+use crate::fixed::{FIXED_TICK_RATE, FixedPoint, POSITION_SCALE};
 use crate::match_host::MatchHost;
 use crate::types::{
     Appearance, EffectKind, ErosionAxis, MatchOutcome, MatchPhase, Material, PersistentObject,
@@ -291,6 +291,10 @@ pub struct MatchSnapshot {
     pub simulation_version: u32,
     /// Version of gameplay content definitions.
     pub content_version: u32,
+    /// Number of authoritative fixed-point position units in one terrain cell.
+    pub position_scale: i32,
+    /// Number of authoritative simulation ticks per second.
+    pub fixed_tick_rate: u32,
     /// Caller-supplied monotonic publication generation.
     pub generation: u64,
     /// Authoritative simulation tick.
@@ -354,6 +358,8 @@ impl MatchSnapshot {
             client_contract_version: CLIENT_CONTRACT_VERSION,
             simulation_version: state.simulation_version,
             content_version: state.content_version,
+            position_scale: POSITION_SCALE,
+            fixed_tick_rate: FIXED_TICK_RATE,
             generation,
             tick: state.tick,
             turn_number: state.turn_number,
@@ -713,6 +719,8 @@ mod tests {
             client_contract_version,
             simulation_version,
             content_version,
+            position_scale,
+            fixed_tick_rate,
             generation,
             tick,
             turn_number,
@@ -735,6 +743,8 @@ mod tests {
         assert_eq!(client_contract_version, CLIENT_CONTRACT_VERSION);
         assert_eq!(simulation_version, authoritative.simulation_version);
         assert_eq!(content_version, authoritative.content_version);
+        assert_eq!(position_scale, POSITION_SCALE);
+        assert_eq!(fixed_tick_rate, FIXED_TICK_RATE);
         assert_eq!(generation, 55);
         assert_eq!(tick, 4_242);
         assert_eq!(turn_number, authoritative.turn_number);

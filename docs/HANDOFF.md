@@ -248,8 +248,10 @@ indirect leaks and also enforces the release panic test and exact export list.
 
 These are outside the completed C1/C2 boundary:
 
-- ~~No C# project, `SafeHandle`, managed DTO layer, or `LocalMatchSession` exists~~ — all added in C3. No Godot project exists; that is C4. The original note read: C3 is
-  next; do not begin scenes first.
+- ~~No C# project, `SafeHandle`, managed DTO layer, or `LocalMatchSession` exists~~ — all added in
+  C3. ~~No Godot project exists~~ — added in C4, but it is a render/export spike only: a menu, a
+  static placeholder render of the fixture duel, and clean disposal. There is no movement, no aim,
+  no firing, and no HUD; that is C5.
 - Arzum's documented 50–200% Chain Strike second-hit damage is not implemented. The current special
   performs its first strike, records/selects a target, and teleports. The owner must settle the rated
   random-damage rule before Rust gains the real second strike and another producer-owned outcome.
@@ -283,18 +285,66 @@ strictness. All four documented .NET gates pass, plus every Rust gate (530 tests
 See `docs/BUILD_LOG.md` for the design reasoning, the CA5392/CA5393 analyzer conflict and why
 `AssemblyDirectory` is correct here, and the mutation checks.
 
-### Next: C4's Godot shell
+---
 
-Do not reopen C1/C2/C3 unless a gate regresses.
+## 7c. C4 is complete — Godot render/export spike
 
-1. Add `DungeonBarrage.Client` — the engine project, `project.godot`, export presets — referencing
-   the interop assembly. Keep every existing test Godot-free; adding an engine reference to the
-   current test projects would make them unrunnable headlessly, which is the property C3 bought.
-2. Model the remaining envelopes in the contracts assembly. Only the creation request and the
-   closed enums exist today; snapshot, transition, and presentation-event DTOs are still described
-   only by the frozen envelopes and the Rust types.
-3. Populate `client/native/` for the other advertised RIDs when those targets are actually built.
-   Three directories are deliberately empty rather than filled with untested binaries.
+`client/src/DungeonBarrage.Client` is a real Godot 4.7.1 .NET project: `project.godot`,
+`export_presets.cfg` (Windows Desktop), `Scenes/Main.tscn`, and `App/Main.cs` driving a menu →
+real-fixture-duel → static placeholder render, plus a `--c4-smoke-report`/`--c4-screenshot`
+automation path (`App/C4Smoke.cs`) that turns CLIENT_SPEC §20.5 steps 1–4 and 6 into a
+machine-checkable JSON report instead of a one-time human walkthrough.
+
+The full contract is now modeled: `PresentationContracts.cs`, `ResponseContracts.cs`, and
+`SnapshotContracts.cs` cover every closed enum and every `PresentationEventKind` variant from
+`match_session.rs`, verified against the real frozen fixtures in
+`DungeonBarrage.Client.Contracts.Tests` (5 tests). Rust's `client_contract.rs` now also emits
+`positionScale`/`fixedTickRate` on every snapshot — the two constants a client needs to convert an
+authoritative fixed-point position into screen pixels and pace presentation — regenerated through
+the fixture corpus's sole legitimate writer (`regenerate_shared_response_fixtures_from_production_abi`,
+`#[ignore]`-gated in `db-sim-ffi/src/tests.rs`) so the frozen bytes are the production serializer's
+own output, never a hand-edited or test-only shape.
+
+**The gate is met, with real evidence, not an assertion of one.** A release export built from a
+clean `--headless --export-release "Windows Desktop"` run, launched from outside the repository:
+
+- Headless smoke run: bootstraps the real `horizontal-test-duel-v1` fixture through the real
+  release `db_sim_ffi`, reaching `stateHash f67c5371bcddbdf5` — the same hash the direct Rust and
+  C# fixture-parity tests assert — with correct terrain (50×20, 96 solid cells), 8 blocks, 2
+  players, and `sessionDisposed: true` / `disposedSessionRejectedReuse: true` proving clean native
+  handle disposal (`ObjectDisposedException` on reuse after `Dispose()`).
+- Windowed smoke run: the same pipeline, plus a genuine 1280×720 GPU-rendered screenshot (real
+  OpenGL context, real NVIDIA device) showing the 8 placeholder blocks and both players — zeke and
+  huck — at their correct authoritative positions and health, with the frozen hash burned into the
+  HUD text. See `docs/BUILD_LOG.md` for the image.
+
+Three real bugs were found and fixed by actually running the gates rather than trusting that the
+code compiled, in order: a `ulong`→`long` CS1503 in `PresentationManifest.cs`; Godot's C# exporter
+requiring a solution file colocated with `project.godot` (a Godot-imposed constraint CLIENT_SPEC's
+file tree did not anticipate — see `docs/BUILD_LOG.md` for why the top-level `client/DungeonBarrage.sln`
+does not replace it); and a locally installed export-template directory misnamed `4.7.1.stable`
+instead of `4.7.1.stable.mono` (a machine toolchain fix, not a repository change). A fourth issue was
+a genuine logic bug, not a build failure: the very first windowed screenshot captured a blank frame,
+because `_Ready` runs before the engine's first process/draw cycle — `QueueRedraw()` had not
+actually painted anything yet. Fixed by awaiting two real `ProcessFrame` signals (the Godot C#
+idiom for this) before capturing.
+
+### Next: C5 — one playable authoritative turn
+
+Do not reopen C1–C4 unless a gate regresses.
+
+1. Add input contexts for movement, aim/charge, and target selection sufficient for the fixture's
+   own move and ability commands — nothing beyond what `horizontal-test-duel-v1` exercises yet.
+2. Play transitions from `ClientMatchTransition.Events` in presentation-tick order; lock input for
+   `InputLockTicks` after a committed action, per `PresentationTickRate`.
+3. Apply terrain dirty-rectangle updates from `ClientTerrainChangedEvent`/`ClientBlockChangedEvent`
+   rather than re-reading the whole mask every time.
+4. Add HUD essentials: active player, phase, health, gauge — enough to make one full turn legible,
+   not the complete C6 HUD.
+5. Reconcile every view to `PostSnapshot` after playback, and assert the reconciled hash matches.
+
+**Gate:** a human moves and fires one complete turn without a debugger; input is locked during
+playback; every view ends at the post-snapshot; direct Rust and C# hashes still match.
 
 ---
 
@@ -359,12 +409,16 @@ Additional native gates passed:
 `core.autocrlf` LF-to-CRLF notices are non-failing warnings. Do not normalize the repository to
 silence them.
 
+.NET inventory: 30 passing tests — 25 `DungeonBarrage.Client.Interop.Tests`, 5
+`DungeonBarrage.Client.Contracts.Tests`. Godot gates: headless editor import, headless
+`--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c.
+
 ---
 
 ## 9. Copy-paste Opus resume prompt
 
 ```text
-Continue Dungeon Barrage from the completed C1/C2 checkpoint and implement C3 only.
+Continue Dungeon Barrage from the completed C1-C4 checkpoint and implement C5 only.
 
 Canonical repo: C:\Users\rsfit\DungeonBarrage
 Branch: feat/c1-outcome-provenance tracking origin/feat/c1-outcome-provenance
@@ -385,19 +439,27 @@ Do not reset, checkout, clean, bulk-stage, normalize line endings, read/stage .g
 rewrite accepted ADR history. Preserve unrelated work. Use apply_patch for edits.
 
 Architecture is settled: Godot 4.7.1 .NET + C# is presentation; Rust db-sim-core is the only
-authority and the future server is Rust-native. C1 and C2 are complete. ABI version 1 has the exact
-ten exports listed in HANDOFF section 5, strict bounded JSON, clone-serialize-commit apply, poisoned
-handles, and exact Rust-owned boxed buffers. The shared fixture freezes create/snapshot/preview/move/
-ability response bytes and hashes f67c5371bcddbdf5 -> 378081bb2e830a5d -> d8686762470c0c36.
+authority and the future server is Rust-native. C1 through C4 are complete. ABI version 1 has the
+exact ten exports listed in HANDOFF section 5, strict bounded JSON, clone-serialize-commit apply,
+poisoned handles, and exact Rust-owned boxed buffers. The shared fixture freezes create/snapshot/
+preview/move/ability response bytes and hashes f67c5371bcddbdf5 -> 378081bb2e830a5d ->
+d8686762470c0c36. `client/src/DungeonBarrage.Client` is a real Godot project — menu, real-fixture
+bootstrap, static placeholder render, clean disposal — verified by a real windowed smoke run with a
+screenshot, not just a compile.
 
-Next task: C3 headless .NET interop/session only. Add LibraryImport, MatchSafeHandle, exact DTOs,
-RID-only native resolution, LocalMatchSession, and xUnit tests against the real release DLL and the
-existing raw fixture. Do not add gameplay rules to C#, do not start Godot scenes, and do not infer
-missing mechanics. Arzum's random second hit, object expiry/destruction, richer turret/gas behavior,
-remaining passives/hazards, and Numa balance are explicit gaps, not C3 work.
+Next task: C5, one playable authoritative turn, only. Add input contexts for movement/aim/target
+selection sufficient for the existing fixture commands; play `ClientMatchTransition.Events` in
+presentation-tick order with input locked for `InputLockTicks`; apply terrain dirty-rectangle
+updates instead of re-reading the whole mask; add HUD essentials (active player, phase, health,
+gauge); reconcile every view to `PostSnapshot` and assert the hash. Do not add gameplay rules to
+C#, do not build the full C6 HUD/roster/bot yet, and do not infer missing mechanics. Arzum's random
+second hit, object expiry/destruction, richer turret/gas behavior, remaining passives/hazards, and
+Numa balance are explicit gaps, not C5 work.
 
-Run every gate in HANDOFF section 8 plus the CLIENT_SPEC C3 .NET gates. Maintain HANDOFF and append
-BUILD_LOG; leave a clean, committed, verified tree and report commit/push state exactly.
+Run every gate in HANDOFF section 8 plus the CLIENT_SPEC Godot gates (headless editor import,
+export-release, and a real windowed smoke run — a screenshot proving pixels painted, not just that
+the export succeeded). Maintain HANDOFF and append BUILD_LOG; leave a clean, committed, verified
+tree and report commit/push state exactly.
 ```
 
 ---

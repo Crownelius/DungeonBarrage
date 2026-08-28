@@ -1496,6 +1496,8 @@ fn retained_match_snapshot_bytes(
         client_contract_version,
         simulation_version,
         content_version,
+        position_scale,
+        fixed_tick_rate,
         generation,
         tick,
         turn_number,
@@ -1517,6 +1519,8 @@ fn retained_match_snapshot_bytes(
     counter.u32(*client_contract_version)?;
     counter.u32(*simulation_version)?;
     counter.u32(*content_version)?;
+    counter.i32(*position_scale)?;
+    counter.u32(*fixed_tick_rate)?;
     counter.u64(*generation)?;
     counter.u64(*tick)?;
     counter.u32(*turn_number)?;

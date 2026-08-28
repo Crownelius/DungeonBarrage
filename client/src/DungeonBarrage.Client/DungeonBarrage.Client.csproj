@@ -1,0 +1,33 @@
+<Project Sdk="Godot.NET.Sdk/4.7.1">
+
+  <PropertyGroup>
+    <RootNamespace>DungeonBarrage.Client</RootNamespace>
+    <AssemblyName>DungeonBarrage.Client</AssemblyName>
+    <TargetFramework>net10.0</TargetFramework>
+    <Configurations>Debug;Release;ExportDebug;ExportRelease</Configurations>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Version>0.4.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Godot scripts must be public and are instantiated by the engine, not managed code. -->
+    <NoWarn>$(NoWarn);CA1515;CA1812;CA1003;CA2007</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DungeonBarrage.Client.Contracts\DungeonBarrage.Client.Contracts.csproj" />
+    <ProjectReference Include="..\DungeonBarrage.Client.Interop\DungeonBarrage.Client.Interop.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One canonical fixture drives Rust, headless .NET, and the C4 render smoke. -->
+    <EmbeddedResource Include="..\..\..\tests\fixtures\matches\horizontal-test-duel-v1\create-request.json"
+                      LogicalName="DungeonBarrage.Client.Fixtures.HorizontalTestDuelCreateRequest.json" />
+
+    <!-- The resolver probes this RID-qualified path relative to the interop assembly. -->
+    <None Include="..\..\native\win-x64\db_sim_ffi.dll"
+          Condition="Exists('..\..\native\win-x64\db_sim_ffi.dll')"
+          Link="runtimes\win-x64\native\db_sim_ffi.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
