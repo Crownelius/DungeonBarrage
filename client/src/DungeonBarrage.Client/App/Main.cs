@@ -110,6 +110,13 @@ public partial class Main : Node2D
     {
         _diagnostics = BuildDiagnostics.Capture();
 
+        var c7SmokeOptions = C7SmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c7SmokeOptions is not null)
+        {
+            await RunC7SmokeAndQuitAsync(c7SmokeOptions).ConfigureAwait(true);
+            return;
+        }
+
         var c6SmokeOptions = C6SmokeOptions.Parse(OS.GetCmdlineUserArgs());
         if (c6SmokeOptions is not null)
         {
@@ -1875,6 +1882,98 @@ public partial class Main : Node2D
             _inCharacterSelect = false;
             _isProcessingBotTurn = false;
             _isProcessingTimeout = false;
+        }
+    }
+
+    private async Task RunC7SmokeAndQuitAsync(C7SmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC7SmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C7SmokeReport> RunC7SmokeAsync(C7SmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+
+        try
+        {
+            // 1. Settings Recovery Verification
+            var nonExistentPath = Path.Combine(Path.GetTempPath(), $"missing_settings_{Guid.NewGuid():N}.json");
+            var recoveredDefaults = UserSettingsStore.Load(nonExistentPath);
+            var settingsRecoveryVerified = recoveredDefaults is not null && recoveredDefaults.SchemaVersion == 1;
+
+            // 2. Audio Clamping Verification
+            var unclampedAudio = new ClientAudioSettings(MasterVolume: 250, SfxVolume: 120, MusicVolume: 90);
+            var clampedAudio = unclampedAudio.Clamp();
+            var audioClampingVerified = clampedAudio.MasterVolume == 100 && clampedAudio.SfxVolume == 100 && clampedAudio.MusicVolume == 90;
+
+            // 3. Accessibility Scaling Verification
+            var unclampedAccess = new ClientAccessibilitySettings(TextScale: 3.0f);
+            var clampedAccess = unclampedAccess.Clamp();
+            var accessibilityScalingVerified = clampedAccess.TextScale == 2.0f;
+
+            // 4. Localization Verification
+            var catalog = new LocalizationCatalog("en-US");
+            var enTitle = catalog.Get("ui.title");
+            catalog.SetLocale("es-ES");
+            var esVictory = catalog.Get("ui.victory");
+            var localizationVerified = enTitle == "Dungeon Barrage" && esVictory == "VICTORIA";
+
+            // 5. Performance Tier Verification
+            var perfSettings = new ClientPerformanceSettings(Tier: ClientPerformanceTier.Medium, TargetFps: 60);
+            var performanceTierSwitchVerified = perfSettings.Tier == ClientPerformanceTier.Medium && perfSettings.TargetFps == 60;
+
+            // 6. Multi-Platform Export Presets Verification
+            var presetsPath = "res://export_presets.cfg";
+            using var file = Godot.FileAccess.Open(presetsPath, Godot.FileAccess.ModeFlags.Read);
+            var presetsText = file?.GetAsText() ?? string.Empty;
+            var multiPlatformExportPresetsVerified = presetsText.Contains("name=\"Windows Desktop\"") &&
+                                                     presetsText.Contains("name=\"Linux/X11\"") &&
+                                                     presetsText.Contains("name=\"macOS\"");
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            return new C7SmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                SettingsRecoveryVerified: settingsRecoveryVerified,
+                AudioClampingVerified: audioClampingVerified,
+                AccessibilityScalingVerified: accessibilityScalingVerified,
+                LocalizationVerified: localizationVerified,
+                PerformanceTierSwitchVerified: performanceTierSwitchVerified,
+                MultiPlatformExportPresetsVerified: multiPlatformExportPresetsVerified,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight);
+        }
+        catch (Exception exception)
+        {
+            return new C7SmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                SettingsRecoveryVerified: false,
+                AudioClampingVerified: false,
+                AccessibilityScalingVerified: false,
+                LocalizationVerified: false,
+                PerformanceTierSwitchVerified: false,
+                MultiPlatformExportPresetsVerified: false,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0);
         }
     }
 

@@ -111,8 +111,10 @@ public static class NativeLibraryResolver
         var assemblyDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         if (string.IsNullOrEmpty(assemblyDirectory))
         {
-            return [];
+            assemblyDirectory = AppContext.BaseDirectory;
         }
+
+        var currentDir = Directory.GetCurrentDirectory();
 
         return
         [
@@ -121,6 +123,15 @@ public static class NativeLibraryResolver
 
             // Where a plain build copies it.
             Path.GetFullPath(Path.Combine(assemblyDirectory, fileName)),
+
+            // Probe current working directory
+            Path.GetFullPath(Path.Combine(currentDir, fileName)),
+
+            // Probe target release folder
+            Path.GetFullPath(Path.Combine(currentDir, "target", "release", fileName)),
+
+            // Probe client native folder
+            Path.GetFullPath(Path.Combine(currentDir, "client", "native", rid, fileName)),
         ];
     }
 

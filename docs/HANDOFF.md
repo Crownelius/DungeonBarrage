@@ -4,14 +4,15 @@
 
 **Audience:** the next implementation agent, especially Claude Opus
 
-**State:** C0 through C6 are implemented — authority-only turn timeout, the coarse C ABI, the
+**State:** C0 through C7 are complete — authority-only turn timeout, the coarse C ABI, the
 headless .NET interop/session layer, the Godot render/export spike, playable turn execution
-(move, aim/fire, input lock, HUD, reconciliation), and full 9-starter roster selection with automated
+(move, aim/fire, input lock, HUD, reconciliation), full 9-starter roster selection with automated
 bot opponent turn execution, passive selection modal, terminal match results screen, rematch system,
-and automated C6 smoke verification suite. All local Rust, release, supply-chain, toolchain,
-fixture-byte, export-surface, Valgrind, and secret-scan gates pass. The commit containing this file
-is the landing checkpoint; verify its exact ID and upstream state rather than trusting a chat
-summary.
+audio settings recovery, accessibility text scaling, localization catalog, performance tiers,
+cross-platform export presets (Windows Desktop, Linux/X11, macOS), and automated CLI verification suites.
+All local Rust, release, supply-chain, toolchain, fixture-byte, export-surface, Valgrind, and secret-scan
+gates pass. The commit containing this file is the landing checkpoint; verify its exact ID and upstream
+state rather than trusting a chat summary.
 
 This is the mutable resume document. `docs/CLIENT_SPEC.md` is the normative client contract,
 `docs/BUILD_LOG.md` is append-only evidence, and accepted ADRs retain the architectural history.

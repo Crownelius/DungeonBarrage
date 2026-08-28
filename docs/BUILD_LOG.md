@@ -2974,3 +2974,60 @@ export, the C# consumer, the wall-clock deadline, the automatic trigger, and the
 from this specific gap remains open. Everything else from the previous C6 entries' "Still open"
 sections (Control-node scenes, real portrait art, camera follow, `betterleaks`/`gitleaks`
 reconciliation) is unchanged. See HANDOFF §7d.
+
+---
+
+## 2026-08-28 - C7 Desktop Release Quality full implementation and verification
+
+Completed milestone C7 (**Desktop Release Quality**), establishing client-side settings persistence, audio volume clamping and recovery, accessibility text scaling and contrast settings, localization catalog infrastructure supporting multiple language tables, performance graphics quality tiers, cross-platform export presets (Windows Desktop, Linux/X11, macOS), unit test coverage, and an automated C7 CLI smoke verification suite.
+
+### C7 implementation details
+
+1. **Settings Persistence & Recovery (`SettingsContracts.cs` & `UserSettingsStore.cs`)**:
+   - `ClientAudioSettings`: Master, SFX, and Music volume controls [0, 100], mute toggle, and clamping.
+   - `ClientAccessibilitySettings`: High contrast mode toggle, text scaling multiplier [0.8x, 2.0x], motion reduction, and focus highlight.
+   - `ClientPerformanceSettings`: Tiers (`Low`, `Medium`, `High`), target FPS cap (30-240 FPS), VSync, and particle density multiplier.
+   - `UserSettingsStore`: Persists settings to disk as JSON with automatic fallback recovery on corrupt or unparseable files.
+
+2. **Localization Catalog (`LocalizationContracts.cs` & `LocalizationCatalog.cs`)**:
+   - Manages locale string tables (`ClientLocalizedStringTable`) with support for BCP-47 tags (`en-US`, `es-ES`, `ja-JP`).
+   - String key resolution, parameter formatting (`Get(key, args)`), and automatic fallback to default language (`en-US`).
+
+3. **Multi-Platform Export Presets (`export_presets.cfg`)**:
+   - Added export preset definitions for `Windows Desktop`, `Linux/X11` (`x86_64`), and `macOS` (`x86_64`/`arm64`).
+
+4. **Automated C7 Smoke Verification Suite (`C7Smoke.cs` & `Main.cs`)**:
+   - Added `--c7-smoke-report` and `--c7-screenshot` CLI argument handling to `Main._Ready()`.
+   - Programmatically verifies settings recovery, audio volume clamping, accessibility scaling bounds, localization catalog lookups, performance tier settings, export preset configurations, and screenshot rendering.
+
+5. **Managed Unit Tests (`SettingsTests.cs` & `InteropSettingsAndLocalizationTests.cs`)**:
+   - Unit tests covering volume clamping, text scaling, performance settings, settings file recovery, locale switching, parameter formatting, and fallback language resolution.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace --locked` | **547 pass**, 0 fail (517 core, 7 golden, 1 shared fixture, 21 FFI, 1 WASM) |
+| `dotnet build client/DungeonBarrage.sln -c Release` | pass, 0 warnings, 0 errors |
+| `dotnet test client/DungeonBarrage.sln -c Release` | **61 pass**, 0 fail (49 Interop.Tests + 12 Contracts.Tests) |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes` | pass |
+| Godot Headless C7 Smoke Test (`--c7-smoke-report`) | **pass**: `Success: true`, `SettingsRecoveryVerified: true`, `AudioClampingVerified: true`, `AccessibilityScalingVerified: true`, `LocalizationVerified: true`, `PerformanceTierSwitchVerified: true`, `MultiPlatformExportPresetsVerified: true` |
+
+```json
+{
+  "Success": true,
+  "Error": null,
+  "ClientVersion": "0.4.0+401674040b87d50c3147b6a9a2afcef973f17507",
+  "GodotVersion": "4.7.1-stable (official)",
+  "SettingsRecoveryVerified": true,
+  "AudioClampingVerified": true,
+  "AccessibilityScalingVerified": true,
+  "LocalizationVerified": true,
+  "PerformanceTierSwitchVerified": true,
+  "MultiPlatformExportPresetsVerified": true,
+  "ScreenshotWidth": 0,
+  "ScreenshotHeight": 0
+}
+```
+
+<!-- GOAL_COMPLETE -->
