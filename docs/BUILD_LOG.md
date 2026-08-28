@@ -2022,3 +2022,124 @@ proof rather than a claim.
 
 C5: input contexts, transition playback, terrain dirty updates, HUD essentials, and reconciliation —
 the actual playable turn. See HANDOFF §7c for the ordered next sequence.
+
+---
+
+## C5 — one playable authoritative turn
+
+Built on the completed C4 checkpoint: a `ClientMatchCommand` polymorphic envelope
+(`Contracts/CommandContracts.cs`), a Godot-free `LiveMatch` (moved into
+`DungeonBarrage.Client.Interop` specifically so it stays headlessly testable — it has zero Godot
+dependency and belongs in the Godot-free assembly, not the Client project it was first drafted in),
+real input handling in `Main.cs` (movement, drag-to-aim/fire), a minimal HUD, and a
+`--c5-smoke-report`/`--c5-screenshot` automation path mirroring C4's.
+
+### Two apparent bugs, both root-caused to wrong test expectations, not production defects
+
+**Finding 1 — the ability's post-state hash never matched the frozen fixture, and changed on every
+edit.** Traced RNG derivation in `command.rs` first (confirmed it comes purely from
+`state.rng_state`, zero `command_id` involvement — not the cause). Isolated the real variable by
+editing only the command-id strings in the already-passing `CommandRoundTripTests`
+(`"fixture-move-001"` → `"probe-move"`) — that alone changed the hash, proving command id affects it.
+Found the exact mechanism in `db-sim-core/src/hash.rs`: `hash_state` explicitly folds the *sorted*
+`processed_command_ids` list into the hash as domain `0x04` ("Commands"), and this is provably
+intentional — the crate's own `adding_a_processed_command_id_changes_hash` test exists specifically
+to pin that behavior, and `command_id_vec_order_does_not_affect_hash` confirms it is the *set* of
+ids, not insertion order, that matters. Conclusion: this was never a bug. `LiveMatch` mints its own
+command ids rather than replaying the fixture's literal ones, so it can never reproduce the frozen
+fixture's exact hash — by design, since the hash correctly proves client/server ledger-state
+agreement, and the ledger legitimately differs when the accepted command-id set differs. The test's
+expectation was wrong, not the code. Fixed by rewriting `LiveMatchTests.cs` and `RunC5SmokeAsync` to
+check what is actually invariant regardless of command id — disposition, real damage dealt, turn
+handoff, and reconciliation against the command's own `PostSnapshot` — instead of a frozen-hash
+comparison, with the reasoning documented in both files' remarks for whoever reads them next.
+
+**Finding 2 — `inputLockedImmediatelyAfterMove` reported `false`.** Read the frozen fixture directly:
+`001-move.json` has `inputLockTicks: 0` (a plain reposition has no projectile flight to play back —
+genuinely nothing to lock for), `002-ability.json` has `inputLockTicks: 7` (a real strike with
+ballistic flight). The check was against the wrong command. Fixed by moving the
+lock-engaged-immediately assertion to the ability submission (both in `LiveMatchTests.cs` and
+`RunC5SmokeAsync`), where it actually has something meaningful to prove.
+
+A mutation-check on `The_same_scripted_sequence_is_deterministic_across_independent_sessions` also
+produced a false-negative-looking result at first: changing only the second session's launch angle
+(45000 → 30000) did not fail the test. Investigated rather than deleted: `hash_state` hashes
+persistent authoritative state (positions/health/etc.), not ballistic trajectory samples — those are
+presentation-only, carried in `CommandOutcome`/events, not `SimulationState`. A modestly different
+angle at the same power can land within the target's hit-radius tolerance and produce identical
+final damage/position, hence an identical hash — not a broken test, just a mutation that didn't
+discriminate for this geometry. Re-verified the test was meaningful with a `dx` mutation
+(1024 → 2048) instead, which correctly failed.
+
+### Evidence
+
+All runs from `$SCRATCH/export-c5b`, outside the repository, against a clean
+`--headless --export-release "Windows Desktop"` build.
+
+**Headless smoke run:**
+
+```json
+{
+  "success": true, "error": null,
+  "beforeActivePlayerId": "a-local-player",
+  "moveAccepted": true, "moveEventCount": 1, "moveDx": 1024, "moveInputLockTicks": 0,
+  "abilityAccepted": true, "abilityEventCount": 8, "abilityInputLockTicks": 7,
+  "inputLockedImmediatelyAfterAbility": true,
+  "inputUnlockedAfterWaitingOutTheAbilityLock": true,
+  "defenderPlayerId": "b-local-bot",
+  "defenderHealthBeforeAbility": 400, "defenderHealthAfterAbility": 359,
+  "abilityDealtRealDamage": true,
+  "finalSnapshotMatchesAbilityPostSnapshot": true,
+  "afterActivePlayerId": "b-local-bot",
+  "turnHandedOverToTheOtherPlayer": true, "turnNumberAfter": 2,
+  "screenshotWidth": 0, "screenshotHeight": 0
+}
+```
+
+Move accepted with a genuinely zero lock (nothing to play back); ability accepted with a real 7-tick
+lock that engaged immediately and correctly lifted after the wait; 41 real damage landed
+(400 → 359 HP); the turn correctly handed to `b-local-bot`; reconciliation holds.
+
+**Windowed smoke run:** identical report, plus `screenshotWidth: 1280, screenshotHeight: 720` — a
+real OpenGL 3.3 context on the machine's NVIDIA GPU. The PNG was read back and visually inspected:
+HUD text `active b-local-bot  phase Movement`, health lines `huck 359/400  gauge 0` and
+`zeke 220/220  gauge 1640`, two distinctly colored player circles at their post-turn positions, the 8
+placeholder terrain blocks, and the footer `turn 2  gen 2  hash 693609e6fcefb2f0`. A pixel-level
+proof that the move and ability actually played and reconciled, not a claim based on the JSON alone.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | pass, 0 fail |
+| `cargo test --release -p db-sim-ffi` | 13 pass, 1 ignored (regeneration test, by design) |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories, bans, licenses, sources ok (unused allow-list warnings only) |
+| `betterleaks detect` (full history) | no leaks |
+| `dotnet build client/DungeonBarrage.sln -c Release` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-build` | **40 pass**, 0 fail (31 Interop.Tests + 9 Contracts.Tests) |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes` | pass |
+| `godot --headless ... --export-release "Windows Desktop" ...` | pass |
+| headless smoke run of the export | pass, see report above |
+| windowed smoke run of the export | pass, real screenshot inspected |
+
+### Notes for whoever picks this up
+
+- `LiveMatch` lives in `DungeonBarrage.Client.Interop/Match/`, not the Client project — it has no
+  Godot dependency and stays headlessly testable there. `Main.cs`'s `CreateLiveMatch` is the small
+  Godot-specific glue that bridges `FixtureMatchBootstrapper`'s result into `LiveMatch.Create(...)`.
+- Do not add a frozen-hash assertion to anything driven through `LiveMatch` or `Main`'s live input
+  path. Command ids it generates will never match a fixture's literal ids, and `hash_state` correctly
+  treats that as a real state difference, not noise. Assert gameplay facts and
+  reconcile-to-`PostSnapshot` instead — see `LiveMatchTests.cs`'s class remarks for the full argument.
+- `CommandContractTests.cs` compares parsed JSON values, not raw bytes, for command fixtures.
+  Byte-order equality is only meaningful for frozen *responses*; `System.Text.Json`'s polymorphic
+  serializer writes the `kind` discriminator first, which differs from the frozen fixture's own
+  field order, and `serde_json` struct deserialization on the Rust side is order-insensitive anyway.
+
+### Still open
+
+C6: all nine starter kits, passive prompt, Rust bot, local clock/timeout, victory/results/rematch,
+objects, statuses, camera, and the full HUD. See HANDOFF §7d for the ordered next sequence.

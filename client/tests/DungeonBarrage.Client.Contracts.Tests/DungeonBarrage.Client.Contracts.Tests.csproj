@@ -23,6 +23,12 @@
     <None Include="..\..\..\tests\fixtures\matches\horizontal-test-duel-v1\responses\*.json"
           Link="fixtures\%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\tests\fixtures\matches\horizontal-test-duel-v1\commands\*.json"
+          Link="fixtures\commands\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\tests\fixtures\matches\horizontal-test-duel-v1\create-request.json"
+          Link="fixtures\create-request.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
