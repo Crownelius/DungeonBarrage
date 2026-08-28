@@ -865,3 +865,119 @@ fn repeated_create_apply_preview_snapshot_terrain_and_destroy_cycles_complete_cl
         }
     }
 }
+
+#[test]
+fn bot_decide_proposes_a_valid_action_through_the_real_c_abi() {
+    // SAFETY: `handle` is a live handle from `create`; the request bytes and output pointer
+    // remain valid for the call; the buffer is freed exactly once.
+    unsafe {
+        let (code, handle, mut created) = create(CREATE_REQUEST);
+        assert_eq!(code, status::OK);
+        let _value = json_and_free(&mut created);
+
+        let request =
+            br#"{"schemaVersion":1,"playerId":"a-local-player","difficulty":"standard","decisionSeed":7}"#;
+        let mut output = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_bot_decide(handle, request.as_ptr(), request.len(), &mut output),
+            status::OK
+        );
+        let decision = json_and_free(&mut output);
+        assert_eq!(decision["schemaVersion"], Value::from(1));
+        let kind = decision["kind"].as_str().expect("kind must be a string");
+        assert!(
+            ["move", "ability", "passiveChoice", "pass"].contains(&kind),
+            "unexpected kind: {kind}"
+        );
+        if kind == "ability" {
+            let slot = decision["slot"].as_str().expect("slot must be a string");
+            assert!(["basic", "basicAlt", "special"].contains(&slot));
+        }
+
+        destroy(handle);
+    }
+}
+
+#[test]
+fn bot_decide_never_mutates_the_session() {
+    // A decision is a read-only query: calling it must not change what the session would
+    // otherwise apply next, unlike `db_sim_match_apply`. Proven by taking two snapshots
+    // around several decide calls and asserting they are byte-identical.
+    // SAFETY: same contract as the test above.
+    unsafe {
+        let (code, handle, mut created) = create(CREATE_REQUEST);
+        assert_eq!(code, status::OK);
+        let _value = json_and_free(&mut created);
+
+        let mut before = DbOwnedBuffer::empty();
+        assert_eq!(db_sim_match_snapshot(handle, &mut before), status::OK);
+        let before = bytes_and_free(&mut before);
+
+        let request =
+            br#"{"schemaVersion":1,"playerId":"a-local-player","difficulty":"casual","decisionSeed":1}"#;
+        for _ in 0..5 {
+            let mut output = DbOwnedBuffer::empty();
+            assert_eq!(
+                db_sim_match_bot_decide(handle, request.as_ptr(), request.len(), &mut output),
+                status::OK
+            );
+            db_sim_buffer_free(&mut output);
+        }
+
+        let mut after = DbOwnedBuffer::empty();
+        assert_eq!(db_sim_match_snapshot(handle, &mut after), status::OK);
+        let after = bytes_and_free(&mut after);
+
+        assert_eq!(before, after, "a decision must not mutate the session");
+        destroy(handle);
+    }
+}
+
+#[test]
+fn bot_decide_rejects_a_malformed_or_oversized_request() {
+    // SAFETY: same contract as the tests above; the oversized buffer is never dereferenced
+    // past its claimed length because the length check runs first.
+    unsafe {
+        let (code, handle, mut created) = create(CREATE_REQUEST);
+        assert_eq!(code, status::OK);
+        let _value = json_and_free(&mut created);
+
+        for bytes in [b"{".as_slice(), b"not json".as_slice()] {
+            let mut output = DbOwnedBuffer::empty();
+            assert_eq!(
+                db_sim_match_bot_decide(handle, bytes.as_ptr(), bytes.len(), &mut output),
+                status::MALFORMED_ENVELOPE
+            );
+            assert!(output.ptr.is_null());
+        }
+
+        let unsupported = br#"{"schemaVersion":999,"playerId":"a-local-player","difficulty":"casual","decisionSeed":1}"#;
+        let mut output = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_bot_decide(handle, unsupported.as_ptr(), unsupported.len(), &mut output),
+            status::UNSUPPORTED_VERSION
+        );
+        assert!(output.ptr.is_null());
+
+        let one_byte = [0u8];
+        let mut output = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_bot_decide(handle, one_byte.as_ptr(), MAX_INPUT_BYTES + 1, &mut output),
+            status::MALFORMED_ENVELOPE
+        );
+        assert!(output.ptr.is_null());
+
+        assert_eq!(
+            db_sim_match_bot_decide(handle, core::ptr::null(), 0, &mut output),
+            status::NULL_POINTER
+        );
+        assert!(output.ptr.is_null());
+
+        assert_eq!(
+            db_sim_match_bot_decide(core::ptr::null(), core::ptr::null(), 0, &mut output),
+            status::NULL_POINTER
+        );
+
+        destroy(handle);
+    }
+}

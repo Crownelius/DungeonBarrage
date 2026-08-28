@@ -187,6 +187,10 @@ db_sim_buffer_free
 The retired scaffold symbols and any test-only panic symbol are absent. Windows `dumpbin /exports`
 and Linux `nm -D --defined-only` both reported this exact ten-symbol `db_sim_*` surface.
 
+**Superseded by ABI version 2** (C6, see §7d): `db_sim_match_bot_decide` is now an eleventh export,
+confirmed via a direct PE export-table read of the release DLL. This is a historical record of
+version 1's surface, not a claim about the current one.
+
 ### Boundary behavior
 
 - Create owns a real `MatchSessionHost`. A domain-invalid config is ABI `OK` with `created:false`, a
@@ -392,14 +396,35 @@ grid-search resolution and aim-error jitter; every candidate projectile is score
 originally walked the bot onto the target's exact tile, which then detonated Huck's own Crater
 terrain effect under both fighters simultaneously.
 
+**Done — the bot-decide export, ABI version 2** (`crates/db-sim-ffi/src/lib.rs`'s
+`db_sim_match_bot_decide`, `crates/db-sim-ffi/src/wire.rs`'s `BotDecisionRequestDto`/
+`WireBotDecision`). Read-only, like `db_sim_match_preview`: it observes the live handle's state and
+returns a decision shaped like `MatchCommandDto`'s own `kind` variants minus the session-bookkeeping
+fields (`commandId`/`expectedTurnNumber`/`expectedSnapshotGeneration`) — those belong to whichever
+caller turns the decision into an ordinary command and submits it through the existing
+`db_sim_match_apply`, never a special mutation route. `ABI_VERSION` is now `2` (a function-set
+addition, per CLIENT_SPEC §8's own versioning rule); confirmed via a direct PE export-table read
+that the release DLL exports exactly eleven `db_sim_*` symbols, the original ten plus
+`db_sim_match_bot_decide`, nothing else. The frozen fixture corpus was regenerated for the new
+`abiVersion:2` field — every `stateHash` is unchanged (`f67c5371bcddbdf5` → `378081bb2e830a5d` →
+`d8686762470c0c36`), confirming this touched only version metadata, not gameplay. 3 new
+`db-sim-ffi` tests, including one proving a decision call never mutates the session (two snapshots
+taken around several `bot_decide` calls are byte-identical).
+
+**Intentionally not yet done as part of this:** `client/native/win-x64/db_sim_ffi.dll` (the staged
+DLL the Godot client links) and the C# native resolver's expected-ABI-version check are both still
+on version 1 — left alone on purpose, so the existing C# test suite keeps exercising a
+version-matched pair. Bump both together with the C# consumer below, not separately; a stale DLL
+paired with an already-bumped C# expectation (or vice versa) would fail the version-mismatch gate
+by design, which is correct behavior, not a bug to route around.
+
 **Still open, in the order to tackle them:**
 
-1. Bump `ABI_VERSION` and add a coarse `db_sim_bot_decide`-shaped export so a client can ask "what
-   would the bot do" without porting any gameplay rule to C# — the decision still gets submitted
-   through the ordinary `db_sim_apply` path, never a special mutation route. `bot::decide` itself
-   needs no changes; this is purely a new FFI/wire surface plus a `LocalMatchSession`-side caller
-   that drives one bot turn (Move-then-Ability, per `bot.rs`'s own doc comment on the calling
-   contract) whenever the local active player is bot-controlled.
+1. Rebuild and recopy `client/native/win-x64/db_sim_ffi.dll`, bump the C# native resolver's expected
+   `ABI_VERSION` to `2`, and add the `LocalMatchSession`-side caller that drives one bot turn
+   (Move-then-Ability, per `bot.rs`'s own doc comment on the calling contract) whenever the local
+   active player is bot-controlled — calling `db_sim_match_bot_decide`, then submitting the result
+   through the existing apply path exactly as a human command would be.
 2. Expose `LAUNCH_ROSTER` through the client contract so `CharacterSelect.tscn` is backed by real
    data instead of the fixture's two placeholder kits.
 3. Add `LocalSetup.tscn` (map/mode/human-bot slots) and `CharacterSelect.tscn`.
@@ -457,12 +482,12 @@ $env:DUNGEON_BARRAGE_GODOT = [Environment]::GetEnvironmentVariable('DUNGEON_BARR
 git status --short --branch
 ```
 
-Latest inventory: 539 passing tests.
+Latest inventory: 542 passing tests.
 
 - 517 `db-sim-core` unit tests (includes 9 for the C6 `bot` module).
 - 7 golden-vector tests.
 - 1 shared direct fixture test.
-- 13 real `db-sim-ffi` tests.
+- 16 real `db-sim-ffi` tests (includes 3 for `db_sim_match_bot_decide`).
 - 1 dormant `db-sim-wasm` test.
 
 Additional native gates passed:

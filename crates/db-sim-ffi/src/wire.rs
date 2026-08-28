@@ -6,6 +6,7 @@
 //! struct visitors also reject duplicate known fields.
 
 use core::fmt;
+use db_sim_core::bot::BotDifficulty;
 use db_sim_core::client_contract::{
     AppearanceSnapshot, BlockSnapshot, ClientErosionAxis, ClientMatchOutcome, ClientMatchPhase,
     ClientMaterial, ClientObjectKind, ClientStatusKind, ClientTurnEndReason, MatchSnapshot,
@@ -435,6 +436,47 @@ impl AbilityPreviewRequestDto {
             target_player_id: target_player_id.0,
             secondary_target_player_id: secondary_target_player_id.0,
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BotDecisionRequestDto {
+    schema_version: u32,
+    player_id: String,
+    difficulty: BotDifficultyDto,
+    decision_seed: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BotDifficultyDto {
+    Casual,
+    Standard,
+}
+
+impl BotDifficultyDto {
+    const fn into_core(self) -> BotDifficulty {
+        match self {
+            Self::Casual => BotDifficulty::Casual,
+            Self::Standard => BotDifficulty::Standard,
+        }
+    }
+}
+
+impl BotDecisionRequestDto {
+    pub(crate) const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Consumes the request into `(player_id, difficulty, decision_seed)`, the exact
+    /// argument shape `db_sim_core::bot::decide` takes.
+    pub(crate) fn into_core(self) -> (String, BotDifficulty, u64) {
+        (
+            self.player_id,
+            self.difficulty.into_core(),
+            self.decision_seed,
+        )
     }
 }
 
@@ -1431,6 +1473,73 @@ impl WirePreview {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WireBotDecision {
+    schema_version: u32,
+    #[serde(flatten)]
+    action: WireBotAction,
+}
+
+/// The bot's proposed action, shaped like `MatchCommandDto`'s own `kind` variants but with
+/// none of that type's session-bookkeeping fields (`commandId`, `expectedTurnNumber`,
+/// `expectedSnapshotGeneration`): those belong to the caller that submits this decision
+/// through the ordinary apply path, not to the decision itself.
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum WireBotAction {
+    Move {
+        dx: i32,
+    },
+    Ability {
+        slot: &'static str,
+        angle_millidegrees: i32,
+        power_basis_points: i32,
+        target_player_id: Option<String>,
+        secondary_target_player_id: Option<String>,
+    },
+    PassiveChoice {
+        passive_id: String,
+    },
+    Pass,
+}
+
+impl WireBotDecision {
+    fn from_core(decision: MatchCommandKind) -> Self {
+        Self {
+            schema_version: db_sim_core::client_contract::CLIENT_CONTRACT_VERSION,
+            action: WireBotAction::from_core(decision),
+        }
+    }
+}
+
+impl WireBotAction {
+    fn from_core(decision: MatchCommandKind) -> Self {
+        match decision {
+            MatchCommandKind::Move { dx } => Self::Move { dx },
+            MatchCommandKind::Ability {
+                slot,
+                angle_millidegrees,
+                power_basis_points,
+                target_player_id,
+                secondary_target_player_id,
+            } => Self::Ability {
+                slot: slot.wire_name(),
+                angle_millidegrees,
+                power_basis_points,
+                target_player_id,
+                secondary_target_player_id,
+            },
+            MatchCommandKind::PassiveChoice { passive_id } => Self::PassiveChoice { passive_id },
+            MatchCommandKind::Pass => Self::Pass,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WireCreateDiagnostic {
     code: &'static str,
     message: String,
@@ -1490,6 +1599,12 @@ pub(crate) fn serialize_preview(
     response: &AbilityPreviewResponse,
 ) -> Result<Vec<u8>, serde_json::Error> {
     serialize_line(&WirePreview::from_core(response))
+}
+
+pub(crate) fn serialize_bot_decision(
+    decision: MatchCommandKind,
+) -> Result<Vec<u8>, serde_json::Error> {
+    serialize_line(&WireBotDecision::from_core(decision))
 }
 
 fn serialize_line<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {

@@ -28,7 +28,12 @@ use serde::de::DeserializeOwned;
 mod wire;
 
 /// Native calling convention and buffer-ownership version.
-pub const ABI_VERSION: u32 = 1;
+///
+/// Version 2 adds the eleventh export, [`db_sim_match_bot_decide`] — an addition to the
+/// function set, which `docs/CLIENT_SPEC.md` §8 requires bumping this for even though no
+/// existing export's signature or envelope decoding changed. Version 1 exposed exactly the
+/// ten version/create/apply/snapshot/terrain/preview/disposal symbols.
+pub const ABI_VERSION: u32 = 2;
 /// Maximum accepted JSON request size: 256 KiB.
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
 /// Maximum serialized transition/snapshot/preview size: 8 MiB.
@@ -640,6 +645,79 @@ pub unsafe extern "C" fn db_sim_match_preview(
         };
         // SAFETY: checked non-null and writable.
         unsafe { *preview_out = output };
+        status::OK
+    })
+}
+
+/// Proposes one action for a bot-controlled player, without submitting or mutating anything.
+///
+/// The caller is responsible for turning the returned decision into an ordinary command
+/// (adding a fresh `commandId` and reading `expectedTurnNumber`/`expectedSnapshotGeneration`
+/// off its own current snapshot) and submitting it through [`db_sim_match_apply`] exactly as
+/// a human command would be. This call never mutates the session: a bot's move gets no
+/// special access, and only ever takes effect via the same validated path a person's does
+/// (`docs/PRODUCT_SPEC.md`: "Bot difficulty changes candidate search and aim error; it does
+/// not ignore wind, collision, ammunition, or hazards").
+///
+/// # Safety
+///
+/// `handle`, `request_json`, and `decision_out` may be null and then follow the documented
+/// status precedence. A non-null `handle` must be live. A non-null `request_json` must name
+/// `request_len` readable bytes. A non-null `decision_out` must be a writable, allocation-free
+/// slot that does not overlap the handle or input range. A live handle must not be destroyed
+/// concurrently. A poisoned live handle is checked before the request pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sim_match_bot_decide(
+    handle: *const SimHandle,
+    request_json: *const u8,
+    request_len: usize,
+    decision_out: *mut DbOwnedBuffer,
+) -> c_int {
+    if decision_out.is_null() {
+        return status::NULL_POINTER;
+    }
+    // SAFETY: checked non-null and writable.
+    unsafe { *decision_out = DbOwnedBuffer::empty() };
+    if handle.is_null() {
+        return status::NULL_POINTER;
+    }
+    // SAFETY: caller guarantees a live handle for the call.
+    let handle_ref = unsafe { &*handle };
+    guard(Some(handle_ref), || {
+        // Poison is a terminal session state and takes precedence over request decoding.
+        let inner = match lock_handle(handle_ref) {
+            Ok(inner) => inner,
+            Err(code) => return code,
+        };
+        if request_json.is_null() {
+            return status::NULL_POINTER;
+        }
+        if request_len > MAX_INPUT_BYTES {
+            return status::MALFORMED_ENVELOPE;
+        }
+        // SAFETY: caller promises exactly `request_len` readable bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(request_json, request_len) };
+        let request: wire::BotDecisionRequestDto = match decode_json(bytes) {
+            Ok(request) => request,
+            Err(code) => return code,
+        };
+        if request.schema_version() != CLIENT_CONTRACT_VERSION {
+            return status::UNSUPPORTED_VERSION;
+        }
+        let (player_id, difficulty, decision_seed) = request.into_core();
+        let decision = db_sim_core::bot::decide(
+            inner.session.host().state(),
+            &player_id,
+            difficulty,
+            decision_seed,
+        );
+        let output =
+            match serialize_status(Some(handle_ref), wire::serialize_bot_decision(decision)) {
+                Ok(output) => output,
+                Err(code) => return code,
+            };
+        // SAFETY: checked non-null and writable; serialization and allocation already succeeded.
+        unsafe { *decision_out = output };
         status::OK
     })
 }

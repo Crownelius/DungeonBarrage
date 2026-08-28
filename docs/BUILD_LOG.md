@@ -2257,3 +2257,77 @@ C6, remaining: the FFI bot-decision export and `ABI_VERSION` bump, roster exposu
 `LocalSetup.tscn`/`CharacterSelect.tscn`, the passive-prompt modal, `LocalMatchSession`'s own local
 planning clock, `Results.tscn`/rematch, camera, and the full HUD. See HANDOFF §7d for the ordered
 next sequence.
+
+---
+
+## C6 — the bot-decide export and ABI version 2
+
+Added `db_sim_match_bot_decide` to `db-sim-ffi`, the eleventh native export, so a client can ask
+"what would the bot do" without porting any gameplay rule to C#. Modeled directly on
+`db_sim_match_preview`'s existing shape (`lock_handle` for the poison check, `decode_json` into a
+strict DTO, `serialize_status`/`boxed_buffer` for the output) since both are read-only queries
+against a live handle: this call never mutates the session, and the decision it returns only takes
+effect once the caller submits it through the ordinary `db_sim_match_apply`, exactly like a human
+command. Request: `{schemaVersion, playerId, difficulty, decisionSeed}`. Response is shaped like
+`MatchCommandDto`'s own `kind` variants (`WireBotDecision`/`WireBotAction`, an internally-tagged
+enum matching the `#[serde(tag = "kind", ...)]` convention already used for `WireEvent`), but
+without that type's session-bookkeeping fields (`commandId`, `expectedTurnNumber`,
+`expectedSnapshotGeneration`): those are the submitting caller's responsibility, not the decision's.
+
+### The ABI_VERSION bump, and why it was correct to do
+
+`docs/CLIENT_SPEC.md` §8's own versioning rule: "Increment `ABI_VERSION` only when the native
+calling convention, function set, ownership, or envelope decoding compatibility breaks." Adding an
+eleventh export is a function-set change, so `ABI_VERSION` moved `1` -> `2`. Confirmed the resulting
+release DLL's actual export surface rather than assuming the source change was sufficient: no
+`dumpbin`/`nm`/`objdump` available in this shell, so installed `pefile` into the Python environment
+`python3` actually resolves to (a `pip`/`python3` mismatch between Python 3.11 and 3.12 installs on
+this machine meant the first `pip install` landed in the wrong interpreter and needed
+`python3 -m pip install` instead) and read the PE export directory directly: exactly eleven
+`db_sim_*` symbols, the original ten plus `db_sim_match_bot_decide`, nothing else leaked in.
+
+The version bump changed the `abiVersion` field embedded in every response envelope, which broke
+`shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes` — expected, not a regression:
+the frozen fixture corpus is production output frozen at a point in time, and production output
+correctly changed. Regenerated it through the sole legitimate writer
+(`regenerate_shared_response_fixtures_from_production_abi`, `#[ignore]`-gated). Diffed every changed
+file before trusting the regeneration: all four (`create.json`, `snapshot-initial.json`,
+`001-move.json`, `002-ability.json`) changed in exactly one field, `abiVersion:1` -> `abiVersion:2`,
+and every `stateHash` is byte-identical to before (`f67c5371bcddbdf5` -> `378081bb2e830a5d` ->
+`d8686762470c0c36`) — proof this touched only version metadata, never gameplay or hashing.
+
+**Deliberately not touched in this step:** `client/native/win-x64/db_sim_ffi.dll` (the DLL the
+Godot client actually links) and the C# native resolver's expected-`ABI_VERSION` constant are both
+still pinned to version 1. Bumping only one side would fail the version-mismatch gate the client is
+supposed to enforce (`docs/CLIENT_SPEC.md` §20: "On mismatch, show a fatal repair/update screen")
+— correct behavior, not a bug, but not something to trigger by accident mid-step either. Both move
+together with the `LocalMatchSession`-side bot-turn caller, the next piece of C6.
+
+### Evidence
+
+3 new tests in `db-sim-ffi/src/tests.rs`, against the real C ABI (not the Rust-level `bot::decide`
+directly): a positive-path call asserting a well-formed `kind`/`schemaVersion` response; a
+non-mutation proof (two `db_sim_match_snapshot` calls bracketing five `bot_decide` calls are
+byte-identical); and the standard malformed/oversized/unsupported-version/null-pointer negative
+suite, matching the pattern every other export in this file already follows.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings |
+| `cargo test --workspace` | **542 pass**, 0 fail (16 `db-sim-ffi`, up from 13) |
+| `cargo test --release -p db-sim-ffi` | pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories, bans, licenses, sources ok (unused allow-list warnings only, unchanged) |
+| `betterleaks detect` (full history) | no leaks |
+| PE export-table read of the release DLL | exactly 11 `db_sim_*` symbols |
+
+### Still open
+
+C6, remaining: rebuild/recopy the client's staged native DLL, bump the C# native resolver's expected
+`ABI_VERSION`, add the `LocalMatchSession`-side bot-turn caller, roster exposure to the client,
+`LocalSetup.tscn`/`CharacterSelect.tscn`, the passive-prompt modal, `LocalMatchSession`'s own local
+planning clock, `Results.tscn`/rematch, camera, and the full HUD. See HANDOFF §7d for the ordered
+next sequence.
