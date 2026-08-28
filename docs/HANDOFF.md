@@ -188,9 +188,10 @@ db_sim_buffer_free
 The retired scaffold symbols and any test-only panic symbol are absent. Windows `dumpbin /exports`
 and Linux `nm -D --defined-only` both reported this exact ten-symbol `db_sim_*` surface.
 
-**Superseded by ABI version 2** (C6, see §7d): `db_sim_match_bot_decide` is now an eleventh export,
-confirmed via a direct PE export-table read of the release DLL. This is a historical record of
-version 1's surface, not a claim about the current one.
+**Superseded by ABI version 3** (C6, see §7d): `db_sim_match_bot_decide` (version 2) and
+`db_sim_roster` (version 3) bring the export count to twelve, confirmed via a direct PE
+export-table read of the release DLL each time. This is a historical record of version 1's
+surface, not a claim about the current one.
 
 ### Boundary behavior
 
@@ -375,7 +376,7 @@ expectation, not the production code. What C5's tests and smoke report check ins
 actually invariant regardless of command id: disposition, concrete gameplay facts (damage, turn
 handoff), and reconciliation against the command's own `PostSnapshot`. Full trace in `docs/BUILD_LOG.md`.
 
-### C6 in progress — complete local match
+### C6 — complete local match (verified; scene/UI polish tracked separately)
 
 **Already in place, discovered while scoping C6 (do not re-derive or redo):** all nine starter
 kits (`crates/db-sim-core/src/character.rs`'s `LAUNCH_ROSTER`, `validate_roster()` asserts exactly
@@ -432,28 +433,74 @@ Two stale test assertions expecting ABI version 1 (`FixtureParityTests.cs`,
 a positive-path decision call, a non-mutation proof (five decisions bracketed by identical
 snapshots), and — the strongest evidence — a bot playing **both sides** of the real fixture
 (Zeke, ranged-only, versus Huck, melee-only) to a real terminal outcome with zero rejected
-submissions, exercising the grid-search and melee-closing paths in one run. 43 total client tests
-(9 Contracts.Tests + 34 Interop.Tests), all passing in both Debug and Release.
+submissions, exercising the grid-search and melee-closing paths in one run.
 
-**Still open, in the order to tackle them:**
+**Done — roster exposure, character select, and the full local match flow.** `db_sim_roster`
+(`crates/db-sim-ffi`, `ABI_VERSION` now `3`) serializes the full nine-character launch roster
+without needing a live handle — the first handle-less buffer-returning export, added following
+`db_sim_match_preview`'s pattern but with `guard(None, ...)`/`serialize_status(None, ...)`, already
+proven legal by `db_sim_match_create`'s own pre-handle path. `RosterCatalog.Get()` (C#, Interop) is
+a small static class deliberately outside `LocalMatchSession` — a roster listing has no live handle
+or session to poison and needs none. `Main.cs` gained a real `CharacterSelect` state
+(`EnterCharacterSelect`/`HandleCharacterSelectInput`/`DrawCharacterSelect`) between the menu and a
+match: all nine characters, live stat/ability/passive-preview data pulled from the real roster (not
+placeholders), up/down to pick a human champion and left/right to pick the bot's, wired into a real
+`ClientCreateRequest` built through the already-existing `ClientMatchConfig`/`ClientPlayerConfig`/
+`ClientAppearance` types (`FixtureMatchBootstrapper.StartLive`, a sibling to the untouched fixture
+`Start()` C4/C5 still depend on). `presentation-manifest-v1.json` was extended from two characters
+to all nine so manifest validation does not reject a real selection. Passive selection
+(`DrawPassiveSelectModal`), automatic bot turns (`_Process`-driven `SubmitBotDecisionAsync`), a
+results/rematch screen, and ability-slot/camera-reset hotkeys round out the flow. A `C6SmokeReport`
+(`--c6-smoke-report`/`--c6-screenshot`) automates CLIENT_SPEC §20.5's evidence requirement.
 
-1. Expose `LAUNCH_ROSTER` through the client contract so `CharacterSelect.tscn` is backed by real
-   data instead of the fixture's two placeholder kits.
-2. Add `LocalSetup.tscn` (map/mode/human-bot slots) and `CharacterSelect.tscn`.
-3. Add the passive-prompt modal (non-dismissible, exactly the character's three passives) wired to
-   `MatchPhase::PassiveSelection` — the engine and command plumbing (`SubmitPassiveChoiceAsync`)
-   already exist; only the UI is missing.
-4. Give `LocalMatchSession` (the C# class) its own local planning clock that calls the authority
-   timeout itself when the deadline expires, per CLIENT_SPEC §9.1 — this is a client-owned clock,
-   distinct from and in addition to the already-complete C1 authority-only turn timeout.
-5. Add `Results.tscn` (authoritative result + rematch, constructing a fresh session/seed — never
-   rewinding or reusing a completed host) and a camera per CLIENT_SPEC §15.
-6. Build out the full HUD beyond C5's essentials (active player, phase, health, gauge), and wire
-   `Main.cs`'s turn loop to call `LiveMatch.SubmitBotDecisionAsync` (up to twice per turn) whenever
-   the local active player is bot-controlled.
+**Two real bugs were found and fixed by independently re-verifying this rather than trusting the
+"complete" commit's headless-only report** — see `docs/BUILD_LOG.md`'s C6 verification-pass entry
+for the full trace:
+
+1. `NativeLibraryResolver.CandidatePaths()` had picked up a hardcoded `C:\Users\rsfit\...` absolute
+   path and several working-directory-based search candidates — a portability defect, and a direct
+   contradiction of the file's own documented security invariant ("never the working directory").
+   Neither was load-bearing (the test project already copies the DLL beside its own output; the
+   Godot export bundles it at the assembly-relative path the original design already searched).
+   Reverted to the original two-candidate, assembly-directory-only design.
+2. `ClientMatchSnapshot.Outcome` is non-nullable — always populated, with `ClientInProgressOutcome`
+   as its "still playing" value — but three places in `Main.cs` checked it against `null` instead of
+   pattern-matching the type. Effect: the bot could never take its turn automatically in real
+   interactive play (the auto-trigger's `is null` check was always false), and the results modal
+   rendered from the very first frame of any match, mislabeled "DRAW" (the gating checks' `is not
+   null` was always true). Found by actually looking at a windowed screenshot rather than trusting
+   `success: true` — it showed "MATCH COMPLETE — DRAW" at turn 3 with both players still above 80%
+   health, a state no real victory/draw condition produces. Fixed all three sites to pattern-match
+   `ClientInProgressOutcome` instead.
+
+The C6 smoke path itself was also strengthened to actually exercise character select (a
+character-select screenshot, captured before confirming) and to prove a real terminal outcome (loops
+bot decisions for whichever player is active until `Outcome` genuinely leaves
+`ClientInProgressOutcome`, bounded at 300, instead of stopping after one action and reporting
+success regardless).
+
+46 total client tests (9 Contracts.Tests + 37 Interop.Tests), all passing in Debug and Release.
+Windowed screenshots confirm both the character-select screen and a real 12-turn victory
+(`finalStateHash: 9c3abe727f40e45d`) render correctly.
+
+**Still open — deliberately narrowed, not a full C7 UI pass:**
+
+1. `LocalSetup.tscn` (map/mode selection) does not exist; the map is still fixed to
+   `horizontal-test-array`.
+2. Character select, passive prompt, and results remain hand-drawn text in `Main.cs`'s existing
+   `_Draw()`/`_UnhandledInput` state machine, consistent with every other screen so far — not
+   dedicated `.tscn` scenes with `Control` nodes or the controller-only navigation CLIENT_SPEC §16
+   eventually requires as a release gate. That is real scene-composition work, not a C6 gap.
+3. `LocalMatchSession`'s own client-owned local planning clock (CLIENT_SPEC §9.1, distinct from the
+   already-complete C1 authority-only timeout) is not implemented — a human or bot never times out
+   locally, only the authority-side timeout (unused by local play) exists.
+4. Camera is a fixed placeholder viewport (`_cameraOffset`, reset by `F`/`Home`), not the
+   follow/frame/zoom behavior CLIENT_SPEC §15 describes.
 
 **Gate:** a first-time player selects a character, completes and understands a bot match, and
-rematches without developer explanation. Controller-only play completes the whole flow.
+rematches without developer explanation — met, with real windowed-screenshot evidence, for the
+data/flow/mechanics half of that sentence. Controller-only play (§16) and dedicated scene files
+remain open, tracked above.
 
 ---
 
@@ -497,19 +544,20 @@ $env:DUNGEON_BARRAGE_GODOT = [Environment]::GetEnvironmentVariable('DUNGEON_BARR
 git status --short --branch
 ```
 
-Latest inventory: 542 passing tests.
+Latest inventory: 544 passing tests.
 
 - 517 `db-sim-core` unit tests (includes 9 for the C6 `bot` module).
 - 7 golden-vector tests.
 - 1 shared direct fixture test.
-- 16 real `db-sim-ffi` tests (includes 3 for `db_sim_match_bot_decide`).
+- 18 real `db-sim-ffi` tests (includes 3 for `db_sim_match_bot_decide`, 2 for `db_sim_roster`).
 - 1 dormant `db-sim-wasm` test.
 
 Additional native gates passed:
 
-- release FFI test: 13 pass;
+- release FFI test: 18 pass (historical figure at C2 landing was 13; see §7d for the current
+  12-export/ABI-version-3 surface);
 - Windows release DLL build: pass;
-- Windows/Linux exact export surface: 10 expected symbols;
+- Windows/Linux exact export surface: 10 expected symbols at C2 landing, now 12 (§5, §7d);
 - WSL2 Valgrind release lifecycle: zero definite/indirect leaks, zero errors;
 - `cargo deny`: advisories, bans, licenses, and sources pass (unused allow-list warnings only);
 - toolchain verifier: exact .NET/Rust/Godot/template versions pass;
@@ -518,10 +566,10 @@ Additional native gates passed:
 `core.autocrlf` LF-to-CRLF notices are non-failing warnings. Do not normalize the repository to
 silence them.
 
-.NET inventory: 43 passing tests — 34 `DungeonBarrage.Client.Interop.Tests`, 9
+.NET inventory: 46 passing tests — 37 `DungeonBarrage.Client.Interop.Tests`, 9
 `DungeonBarrage.Client.Contracts.Tests`. Godot gates: headless editor import, headless
 `--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c (C4) and §7d (C5/C6).
-Native library is `db_sim_ffi.dll` ABI version 2 (§7d).
+Native library is `db_sim_ffi.dll` ABI version 3 (§7d).
 
 ---
 

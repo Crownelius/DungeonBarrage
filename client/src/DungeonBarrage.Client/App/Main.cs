@@ -111,8 +111,11 @@ public partial class Main : Node2D
             QueueRedraw();
         }
 
-        // Automatic bot turn processing when active player is bot-controlled
-        if (_live is not null && !IsInputLocked() && !_isProcessingBotTurn && _live.CurrentSnapshot.Outcome is null)
+        // Automatic bot turn processing when active player is bot-controlled. Outcome is never
+        // actually null — it is always populated, with ClientInProgressOutcome as its "nothing
+        // decided yet" value — so this must pattern-match the type, not check for null.
+        if (_live is not null && !IsInputLocked() && !_isProcessingBotTurn &&
+            _live.CurrentSnapshot.Outcome is ClientInProgressOutcome)
         {
             var activeId = _live.CurrentSnapshot.ActivePlayerId;
             if (activeId is "b-local-bot" || IsBotPlayer(activeId))
@@ -358,8 +361,10 @@ public partial class Main : Node2D
             return;
         }
 
-        // Handles Results screen rematch trigger when match is complete
-        if (_live.CurrentSnapshot.Outcome is not null)
+        // Handles Results screen rematch trigger when match is complete. Outcome is never null
+        // (ClientInProgressOutcome is its populated "still playing" value), so this must
+        // pattern-match away that specific type rather than check for null.
+        if (_live.CurrentSnapshot.Outcome is not ClientInProgressOutcome)
         {
             if (@event.IsActionPressed("ui_accept") ||
                 (@event is InputEventKey { Pressed: true, Keycode: Key.R }))
@@ -678,7 +683,10 @@ public partial class Main : Node2D
             DrawPassiveSelectModal();
         }
 
-        if (snapshot.Outcome is not null)
+        // Outcome is never null (ClientInProgressOutcome is its populated "still playing"
+        // value): the results screen must only appear once the match has actually left that
+        // state, not on every frame of ordinary play.
+        if (snapshot.Outcome is not ClientInProgressOutcome)
         {
             DrawResultsScreen(snapshot);
         }
@@ -1095,44 +1103,42 @@ public partial class Main : Node2D
     private async Task<C6SmokeReport> RunC6SmokeAsync(C6SmokeOptions options)
     {
         var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
-        LiveMatch? live = null;
-        LiveMatch? rematchLive = null;
 
         try
         {
-            var roster = RosterCatalog.Get();
-            if (roster.Characters.Count == 0)
+            // Drives the exact same methods a real player's input does — EnterCharacterSelect,
+            // then ConfirmCharacterAndStartDuel, then Rematch — rather than building requests by
+            // hand and calling FixtureMatchBootstrapper.StartLive directly. A hand-built request
+            // proves the backend accepts a well-formed request; it does not prove the interactive
+            // character-select screen itself (DrawCharacterSelect/HandleCharacterSelectInput) ever
+            // ran or rendered. This is the whole point of a C6 smoke test, per CLIENT_SPEC §20.5's
+            // own rule: a real pixel is the proof, not a claim that the code compiles.
+            EnterCharacterSelect();
+            if (_roster is null || _roster.Count == 0)
             {
-                throw new InvalidOperationException("Roster returned 0 characters.");
+                throw new InvalidOperationException($"Character select failed to load a roster: {_menuError}");
             }
 
-            var humanChar = roster.Characters.FirstOrDefault(c => c.Id == "zeke") ?? roster.Characters[0];
-            var botChar = roster.Characters.FirstOrDefault(c => c.Id == "huck") ?? roster.Characters[1];
+            var rosterCount = _roster.Count;
+            var humanChar = _roster[_selectedCharacterIndex];
+            var botChar = _roster[_selectedBotCharacterIndex];
 
-            var appearance = new ClientAppearance("default", ["default", "default", "default"], "default");
-            var request = new ClientCreateRequest(
-                SchemaVersion: 1,
-                MatchId: "c6-smoke-match-v1",
-                SimulationVersion: LocalMatchSession.SimulationVersion,
-                ContentVersion: LocalMatchSession.ContentVersion,
-                Match: new ClientMatchConfig(
-                    Seed: 9999,
-                    MapId: "horizontal-test-array",
-                    Mode: "turnBased",
-                    Players:
-                    [
-                        new ClientPlayerConfig("a-local-player", Team: 0, humanChar.Id, appearance),
-                        new ClientPlayerConfig("b-local-bot", Team: 1, botChar.Id, appearance),
-                    ]));
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (characterSelectWidth, characterSelectHeight) = CaptureScreenshot(options.CharacterSelectScreenshotPath);
 
-            live = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(request));
-            _live = live;
+            ConfirmCharacterAndStartDuel();
+            if (_live is null)
+            {
+                throw new InvalidOperationException($"Character select confirmation failed to start a match: {_menuError}");
+            }
 
             // 1. Human Move & Ability Turn
-            var moveTrans = await live.SubmitMoveAsync(MoveStepDx).ConfigureAwait(true);
+            var moveTrans = await _live.SubmitMoveAsync(MoveStepDx).ConfigureAwait(true);
             await WaitTicksAsync(moveTrans.InputLockTicks, moveTrans.PresentationTickRate).ConfigureAwait(true);
 
-            var abilityTrans = await live.SubmitAbilityAsync(
+            var abilityTrans = await _live.SubmitAbilityAsync(
                 ClientAbilitySlot.Basic,
                 angleMillidegrees: 45_000,
                 powerBasisPoints: 1_500,
@@ -1142,59 +1148,71 @@ public partial class Main : Node2D
             var humanTurnExecuted = moveTrans.Disposition == ClientTransitionDisposition.Accepted &&
                                     abilityTrans.Disposition == ClientTransitionDisposition.Accepted;
 
-            // 2. Bot Turn Execution
-            var botTrans = await live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed: 777uL)
-                .ConfigureAwait(true);
-            await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
+            // 2. Drive the match to genuine completion — after the human's one demonstration
+            // turn, the bot plays every remaining turn for whichever player is active (bounded,
+            // like the Rust bot::tests and BotDecisionTests full-duel proofs already do) until
+            // Outcome actually leaves ClientInProgressOutcome. A single bot decision call proves
+            // a bot CAN act; it does not prove C6's own gate — "completes... a bot match" — which
+            // needs a real terminal outcome, not one action.
+            var decisionSeed = 777uL;
+            var turnsPlayed = 0;
+            var botTurnExecuted = false;
+            while (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome && turnsPlayed < 300)
+            {
+                turnsPlayed++;
+                var botTrans = await _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed++)
+                    .ConfigureAwait(true);
+                await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
+                botTurnExecuted = botTurnExecuted || botTrans.Disposition == ClientTransitionDisposition.Accepted;
+            }
 
-            var botTurnExecuted = botTrans.Disposition == ClientTransitionDisposition.Accepted;
+            var matchCompleted = _live.CurrentSnapshot.Outcome is not ClientInProgressOutcome;
 
             QueueRedraw();
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
 
-            var finalSnapshot = live.CurrentSnapshot;
+            var finalSnapshot = _live.CurrentSnapshot;
+            if (!matchCompleted)
+            {
+                throw new InvalidOperationException(
+                    $"The match did not reach a terminal outcome within {turnsPlayed} bot decisions.");
+            }
 
-            // 3. Rematch session creation test
-            var rematchRequest = new ClientCreateRequest(
-                SchemaVersion: 1,
-                MatchId: "c6-smoke-rematch-v1",
-                SimulationVersion: LocalMatchSession.SimulationVersion,
-                ContentVersion: LocalMatchSession.ContentVersion,
-                Match: new ClientMatchConfig(
-                    Seed: 10000,
-                    MapId: "horizontal-test-array",
-                    Mode: "turnBased",
-                    Players:
-                    [
-                        new ClientPlayerConfig("a-local-player", Team: 0, humanChar.Id, appearance),
-                        new ClientPlayerConfig("b-local-bot", Team: 1, botChar.Id, appearance),
-                    ]));
+            // 3. Rematch — the real Rematch() method, not a hand-built second request.
+            Rematch();
+            if (_live is null)
+            {
+                throw new InvalidOperationException($"Rematch failed to start a fresh match: {_menuError}");
+            }
 
-            rematchLive = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(rematchRequest));
-            var rematchCreated = rematchLive.CurrentSnapshot.TurnNumber == 1;
-            await rematchLive.DisposeAsync().ConfigureAwait(true);
+            var rematchCreated = _live.CurrentSnapshot.TurnNumber == 1;
+            await _live.DisposeAsync().ConfigureAwait(true);
             var rematchDisposedCleanly = true;
-            rematchLive = null;
+            _live = null;
 
             return new C6SmokeReport(
                 Success: true,
                 Error: null,
                 ClientVersion: diagnostics.ClientVersion,
                 GodotVersion: diagnostics.GodotVersion,
-                RosterCount: roster.Characters.Count,
+                RosterCount: rosterCount,
                 HumanCharacterId: humanChar.Id,
                 BotCharacterId: botChar.Id,
                 InitialMatchCreated: true,
                 HumanTurnExecuted: humanTurnExecuted,
                 BotTurnExecuted: botTurnExecuted,
+                MatchCompleted: matchCompleted,
+                TurnsPlayed: turnsPlayed,
                 FinalTurnNumber: finalSnapshot.TurnNumber,
                 FinalStateHash: finalSnapshot.StateHash,
                 RematchSessionCreated: rematchCreated,
                 RematchSessionDisposedCleanly: rematchDisposedCleanly,
                 ScreenshotWidth: screenshotWidth,
-                ScreenshotHeight: screenshotHeight);
+                ScreenshotHeight: screenshotHeight,
+                CharacterSelectScreenshotWidth: characterSelectWidth,
+                CharacterSelectScreenshotHeight: characterSelectHeight);
         }
         catch (Exception exception)
         {
@@ -1209,24 +1227,26 @@ public partial class Main : Node2D
                 InitialMatchCreated: false,
                 HumanTurnExecuted: false,
                 BotTurnExecuted: false,
+                MatchCompleted: false,
+                TurnsPlayed: 0,
                 FinalTurnNumber: 0,
                 FinalStateHash: string.Empty,
                 RematchSessionCreated: false,
                 RematchSessionDisposedCleanly: false,
                 ScreenshotWidth: 0,
-                ScreenshotHeight: 0);
+                ScreenshotHeight: 0,
+                CharacterSelectScreenshotWidth: 0,
+                CharacterSelectScreenshotHeight: 0);
         }
         finally
         {
-            if (rematchLive is not null)
+            if (_live is not null)
             {
-                await rematchLive.DisposeAsync().ConfigureAwait(true);
+                await _live.DisposeAsync().ConfigureAwait(true);
+                _live = null;
             }
-            if (live is not null)
-            {
-                await live.DisposeAsync().ConfigureAwait(true);
-            }
-            _live = null;
+
+            _inCharacterSelect = false;
         }
     }
 

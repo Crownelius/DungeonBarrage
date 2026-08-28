@@ -2477,3 +2477,134 @@ This continuation completed milestone C6, fully integrating the 9-starter roster
 ```
 
 <!-- GOAL_COMPLETE -->
+
+---
+
+## C6 — verification pass: two real bugs found, a security regression fixed, and real screenshots
+
+Picked up the C6 milestone above to independently verify it before trusting the "complete" claim —
+the entry's own evidence was headless-only (`screenshotWidth: 0`), and this project's established
+rule is that a headless report proves data flow, not that a pixel painted correctly
+(`docs/BUILD_LOG.md`'s C4 entry: "a real rendered run remains required for graphics"). Re-ran the
+full Rust and .NET gates independently first (544 Rust tests, 46 .NET tests, `cargo deny`,
+`betterleaks`, `dotnet format` — all still pass), then re-exported and ran the C6 smoke path
+windowed. That process surfaced two real defects the "complete" commit had not caught.
+
+### Bug 1 — a hardcoded developer path and a reintroduced working-directory search
+
+`NativeLibraryResolver.CandidatePaths()` had grown a literal `C:\Users\rsfit\DungeonBarrage`
+absolute path and several `Directory.GetCurrentDirectory()`-based candidates. The hardcoded path
+would never exist on any other machine or a CI runner — a portability defect on its own. Worse,
+the file's own doc comment states the exact invariant this violated: *"Both entries are anchored to
+the assembly's own directory, never the working directory: ... an attacker who controls the working
+directory must not gain a load path."* The added candidates directly contradicted that, and did so
+silently — nothing enforced the comment's claim against the code beneath it.
+
+Checked whether the working-directory candidates were actually load-bearing before removing them:
+`DungeonBarrage.Client.Interop.Tests.csproj` already copies `db_sim_ffi.dll` next to the test
+binary via `CopyToOutputDirectory="PreserveNewest"`, and the Godot export bundles it at
+`data_DungeonBarrage.Client_windows_x86_64/runtimes/win-x64/native/db_sim_ffi.dll` — exactly the
+original assembly-directory-anchored candidate's own path. Neither legitimate caller needed the
+CWD-based search at all. Reverted `CandidatePaths()` to the original two-candidate design; every
+test and the real export still resolve the library correctly with it removed (confirmed by
+rebuilding, retesting, and re-exporting — not assumed from the diff alone).
+
+### Bug 2 — `ClientMatchSnapshot.Outcome` is never null, so every `is null`/`is not null` check on it was wrong
+
+`ClientMatchSnapshot.Outcome` is declared `ClientMatchOutcome Outcome` — non-nullable, always
+populated, with `ClientInProgressOutcome` as its "still playing" value (confirmed against
+`SnapshotContracts.cs` directly, not assumed). Three places in `Main.cs` checked `Outcome is null` /
+`Outcome is not null` instead of pattern-matching against `ClientInProgressOutcome`:
+
+- `_Process()`'s automatic-bot-turn trigger checked `Outcome is null` — always `false`, so **the
+  bot could never take its turn automatically in real interactive play**, only when a caller (like
+  the smoke test) called `SubmitBotDecisionAsync` itself.
+- `HandleLiveInput`'s rematch trigger and `DrawLiveMatch`'s results-screen trigger both checked
+  `Outcome is not null` — always `true`, so **the results modal rendered on literally the first
+  frame of any match**, before a single command was even submitted.
+- `DrawResultsScreen` itself only distinguishes `ClientVictoryOutcome` from an unconditional `else`
+  branch labeled "DRAW" — correct once gated properly, but with the gate always open, an
+  in-progress match got mislabeled "DRAW: Match Ended in Draw!" from turn one.
+
+Found this by actually looking at the windowed screenshot rather than trusting the smoke report's
+`success: true`: after one human turn and a single bot decision, the capture showed "MATCH COMPLETE
+— DRAW" at turn 3 with both players still alive at 250+/300 HP — a state no real victory/draw
+condition produces (`victory::evaluate` only returns a non-`InProgress` result when a whole team is
+eliminated or the hard turn limit is reached). That contradiction was the tell. Fixed all three
+sites to pattern-match `is not ClientInProgressOutcome` / `is ClientInProgressOutcome`.
+
+### The smoke test itself didn't prove C6's actual gate
+
+The existing C6 smoke path submitted one human turn and exactly one bot decision, then treated
+whatever `Outcome` happened to hold as proof of nothing beyond "a bot could act once." CLIENT_SPEC's
+own C6 gate is "a first-time player ... completes and understands a bot match" — that needs a real
+terminal outcome, not one action. Rewrote the smoke path to:
+
+1. Drive it through the actual production methods a real player's input triggers —
+   `EnterCharacterSelect()`, then `ConfirmCharacterAndStartDuel()`, then (later) `Rematch()` —
+   instead of hand-building a `ClientCreateRequest` and calling
+   `FixtureMatchBootstrapper.StartLive` directly. A hand-built request only proves the backend
+   accepts well-formed input; it never exercises `DrawCharacterSelect`/`HandleCharacterSelectInput`
+   at all. Also switched from a hardcoded zeke/huck pairing to whatever character-select's own
+   default indices produce (roster order 0/1 — Arzum/Emi), proving the flow generalizes past the
+   one pair every other fixture already exercises.
+2. Capture a screenshot of the character-select screen itself, before confirming — a second
+   `--c6-screenshot`-derived path (`<name>-character-select.png`), not a third CLI flag, keeping
+   the two-flag contract C4/C5 already established uniform across all three smoke modes.
+3. Loop bot decisions for whichever player is active — bounded at 300, matching the Rust
+   `bot::tests` and C# `BotDecisionTests` full-duel proofs — until `Outcome` genuinely leaves
+   `ClientInProgressOutcome`, and fail the whole smoke run loudly if it never does, instead of
+   silently reporting `success: true` after a single unfinished action.
+
+### Evidence
+
+Windowed run after both fixes: character select shows all nine real roster names (Arzum, Emi, Karl,
+Huck, Numa, Aleph, Zeke, Roberto, Natomica) with the selection highlighted, the bot pick marked, and
+a live stat panel (HP/range/movement, both basics' damage, the special's damage, three passive-name
+previews) sourced from `RosterCatalog.Get()` — not placeholders. The post-match screenshot shows a
+genuine 12-turn fight: Arzum eliminated (0/300 HP), Emi victorious (30/300 HP), phase
+`MatchComplete`, "VICTORY: Team 1 Wins!", matching `finalStateHash: 9c3abe727f40e45d` exactly against
+the on-screen state. `turnsPlayed: 10` bot decisions were needed to reach that outcome — nowhere
+near the 300 cap, and nothing like the false 1-decision "DRAW" the pre-fix build reported. The
+headless and windowed runs produced byte-identical hashes and turn counts, confirming determinism
+survived both fixes.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` / `clippy` / `test --workspace` / `deny check` | pass, unchanged (no Rust touched this pass) |
+| `dotnet build DungeonBarrage.sln -c Debug` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Debug --no-build` | **46 pass**, 0 fail |
+| `dotnet build DungeonBarrage.sln -c Release` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Release --no-build` | 46 pass, 0 fail |
+| `dotnet format DungeonBarrage.sln --verify-no-changes` | pass |
+| `betterleaks detect` (full history) | no leaks |
+| `godot --headless ... --export-release "Windows Desktop" ...` | pass |
+| headless C6 smoke (character-select + full completion loop) | pass: `matchCompleted: true`, `turnsPlayed: 10` |
+| windowed C6 smoke, both screenshots inspected | pass, real pixels match the reported state exactly |
+
+### Notes for whoever picks this up
+
+- Any future check against `ClientMatchSnapshot.Outcome` must pattern-match the concrete type
+  (`is ClientInProgressOutcome` / `is ClientVictoryOutcome victory` / `is ClientDrawOutcome`), never
+  compare it to `null` — the property is never null. This is the second time this exact class of
+  mistake has cost real debugging time in this codebase (see the C5 entry's `hash_state`/
+  `processed_command_ids` finding for the first); it is worth grepping for `Outcome is` before
+  adding a new one.
+- `NativeLibraryResolver.CandidatePaths()` must stay anchored to the assembly's own directory only.
+  If a future scenario genuinely cannot resolve the library that way, that is a reason to look at
+  where the caller copies the DLL, not to add a working-directory or hardcoded-path fallback.
+- The character-select screen still uses placeholder art-direction-free text rendering
+  (`ThemeDB.FallbackFont`, `DrawString` calls) rather than Control nodes or a dedicated
+  `CharacterSelect.tscn` scene — consistent with every other screen in `Main.cs` so far, not a
+  regression. Real scene composition remains a `C7`-adjacent polish item, not a C6 gap.
+
+### Still open
+
+C6's engine, native export, and full local-match flow (roster, character select, bot turns, passive
+prompt, results, rematch) are complete and now verified with real evidence on both sides of two real
+bugs. Remaining before this is genuinely "first-time-player-ready": a dedicated `LocalSetup.tscn`
+(map/mode selection — currently fixed to the one horizontal-test map), real `CharacterSelect.tscn`/
+`Results.tscn` scenes with Control-node UI and controller navigation (CLIENT_SPEC §16's release
+gate), and a camera that follows play rather than a fixed placeholder viewport. See HANDOFF §7d.

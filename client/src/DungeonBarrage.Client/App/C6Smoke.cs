@@ -11,6 +11,16 @@ internal sealed record C6SmokeOptions(string ReportPath, string ScreenshotPath)
     private const string ReportArgument = "--c6-smoke-report";
     private const string ScreenshotArgument = "--c6-screenshot";
 
+    /// <summary>
+    /// Where the character-select screen's own screenshot is written: derived from
+    /// <see cref="ScreenshotPath"/> rather than a third CLI argument, so the two-flag contract
+    /// C4 and C5's smoke modes already established stays uniform across all three.
+    /// </summary>
+    internal string CharacterSelectScreenshotPath =>
+        Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-character-select" + Path.GetExtension(ScreenshotPath));
+
     internal static C6SmokeOptions? Parse(IReadOnlyList<string> arguments)
     {
         var argsList = arguments.Count > 0 ? arguments : Godot.OS.GetCmdlineArgs();
@@ -60,12 +70,16 @@ internal sealed record C6SmokeReport(
     bool InitialMatchCreated,
     bool HumanTurnExecuted,
     bool BotTurnExecuted,
+    bool MatchCompleted,
+    int TurnsPlayed,
     uint FinalTurnNumber,
     string FinalStateHash,
     bool RematchSessionCreated,
     bool RematchSessionDisposedCleanly,
     int ScreenshotWidth,
-    int ScreenshotHeight)
+    int ScreenshotHeight,
+    int CharacterSelectScreenshotWidth,
+    int CharacterSelectScreenshotHeight)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerOptions.Default)
     {
