@@ -16,7 +16,26 @@ internal static class FixtureMatchBootstrapper
         var requestBytes = ReadEmbedded(CreateRequestResource);
         var request = JsonSerializer.Deserialize<ClientCreateRequest>(requestBytes, ClientEnvelope.Options)
             ?? throw new InvalidDataException("The fixture creation request decoded to null.");
+        return StartFromRequest(request, requestBytes);
+    }
 
+    /// <summary>
+    /// Starts a match from a request built at runtime — the character-select path — rather than
+    /// the frozen fixture <see cref="Start"/> reads. <see cref="Start"/> stays untouched: the C4
+    /// and C5 smoke paths depend on its exact fixture bytes reaching
+    /// <see cref="LocalMatchSession.Create"/> unmodified, and this is a sibling entry point, not
+    /// a replacement.
+    /// </summary>
+    /// <param name="request">A fully populated creation request.</param>
+    /// <returns>The started match and its initial frame.</returns>
+    internal static MatchBootstrapResult StartLive(ClientCreateRequest request)
+    {
+        var requestBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
+        return StartFromRequest(request, requestBytes);
+    }
+
+    private static MatchBootstrapResult StartFromRequest(ClientCreateRequest request, byte[] requestBytes)
+    {
         _ = PresentationManifest.LoadAndValidate(request, LocalMatchSession.ContentVersion);
 
         LocalMatchSession? session = null;

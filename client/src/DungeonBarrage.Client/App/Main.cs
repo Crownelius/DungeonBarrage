@@ -7,26 +7,9 @@ using Godot;
 namespace DungeonBarrage.Client.App;
 
 /// <summary>
-/// The scene root: a menu with build diagnostics, and one playable authoritative turn of the real
-/// horizontal-test duel using placeholder shapes.
+/// The scene root: menu with build diagnostics, character selection across the full 9-starter roster,
+/// playable authoritative match with human & bot turns, passive prompts, results, and rematch.
 /// </summary>
-/// <remarks>
-/// <para>
-/// C4's gate was a static render of one snapshot; this is C5's gate — CLIENT_SPEC §20.5 step 5:
-/// move, fire one real shot, play its transition, and reconcile to the post-snapshot, with input
-/// locked during playback. The control scheme (arrow keys to move, click-drag-release to aim and
-/// fire) is a placeholder choice, not a claimed final one — CLIENT_SPEC §22 leaves input feel
-/// open, and both phases accept every command kind (<see cref="ClientMatchPhase.Movement"/> and
-/// <see cref="ClientMatchPhase.AimingAndSelection"/> both pass
-/// <c>MatchPhase::accepts_ability_command</c> in the authoritative core), so there is no separate
-/// "confirm movement" step to model.
-/// </para>
-/// <para>
-/// Placeholder pixels-per-cell: art direction is an explicitly open decision (CLIENT_SPEC §22.1).
-/// <see cref="PixelsPerCell"/> is a placeholder chosen only to fit the fixture map in the window;
-/// it is not a claimed final value.
-/// </para>
-/// </remarks>
 public partial class Main : Node2D
 {
     private const int PixelsPerCell = 12;
@@ -59,30 +42,43 @@ public partial class Main : Node2D
         "CA2213:Disposable fields should be disposed",
         Justification =
             "This is a Godot Node2D, not a .NET IDisposable type: its teardown lifecycle is "
-            + "_ExitTree, which does dispose this field (see the override below), not a Dispose "
-            + "method the analyzer recognizes.")]
+            + "_ExitTree, which does dispose this field, not a Dispose method the analyzer recognizes.")]
     private LiveMatch? _live;
     private string? _menuError;
     private string? _liveError;
     private bool _started;
 
+    private IReadOnlyList<ClientCharacterDefinition>? _roster;
+    private int _selectedCharacterIndex;
+    private int _selectedBotCharacterIndex = 1;
+    private bool _inCharacterSelect;
+
+    private ClientAbilitySlot _selectedAbilitySlot = ClientAbilitySlot.Basic;
+    private int _selectedPassiveIndex;
+
     private bool _isAiming;
     private Vector2 _aimOrigin;
     private Vector2 _aimCurrent;
+    private Vector2 _cameraOffset = Vector2.Zero;
 
     private ulong _inputLockedUntilMsec;
+    private bool _isProcessingBotTurn;
+    private ulong _lastBotDecisionSeed = 1000uL;
+    private uint _matchSeed = 12345;
 
     /// <inheritdoc />
-    // `async void` rather than `async Task`: `_Ready` is an engine-invoked override with a
-    // fixed `void` signature Godot itself calls, not something this code calls and can await.
-    // This is the documented Godot C# pattern for a lifecycle callback that needs to yield to a
-    // later frame; the alternative is blocking the thread instead of yielding, and screenshotting
-    // a genuine engine frame requires yielding to the frame loop that produces one.
-#pragma warning disable CA1849 // no synchronous alternative exists for waiting on a frame
+#pragma warning disable CA1849
     public override async void _Ready()
 #pragma warning restore CA1849
     {
         _diagnostics = BuildDiagnostics.Capture();
+
+        var c6SmokeOptions = C6SmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c6SmokeOptions is not null)
+        {
+            await RunC6SmokeAndQuitAsync(c6SmokeOptions).ConfigureAwait(true);
+            return;
+        }
 
         var smokeOptions = C4SmokeOptions.Parse(OS.GetCmdlineUserArgs());
         if (smokeOptions is not null)
@@ -104,10 +100,6 @@ public partial class Main : Node2D
     /// <inheritdoc />
     public override void _Process(double delta)
     {
-        // Input unlocking has no visible effect on its own — the state it gates already
-        // reconciled the instant the command was accepted (see LiveMatch). This redraw is only
-        // so the "locked" hint in the HUD disappears the frame the lock actually lifts, instead
-        // of lagging one click behind.
         if (_live is not null && IsInputLocked() != _wasLockedLastFrame)
         {
             _wasLockedLastFrame = IsInputLocked();
@@ -116,6 +108,50 @@ public partial class Main : Node2D
 
         if (_isAiming)
         {
+            QueueRedraw();
+        }
+
+        // Automatic bot turn processing when active player is bot-controlled
+        if (_live is not null && !IsInputLocked() && !_isProcessingBotTurn && _live.CurrentSnapshot.Outcome is null)
+        {
+            var activeId = _live.CurrentSnapshot.ActivePlayerId;
+            if (activeId is "b-local-bot" || IsBotPlayer(activeId))
+            {
+                _ = ProcessBotTurnAsync();
+            }
+        }
+    }
+
+    private bool IsBotPlayer(string? playerId) =>
+        _live?.CurrentSnapshot.Players.FirstOrDefault(p => p.PlayerId == playerId)?.Team == 1;
+
+    private async Task ProcessBotTurnAsync()
+    {
+        if (_live is null || _isProcessingBotTurn)
+        {
+            return;
+        }
+
+        _isProcessingBotTurn = true;
+        try
+        {
+            _lastBotDecisionSeed++;
+            var transition = await SubmitAndRedrawAsync(
+                () => _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, _lastBotDecisionSeed))
+                .ConfigureAwait(true);
+
+            if (transition is not null)
+            {
+                await WaitTicksAsync(transition.InputLockTicks, transition.PresentationTickRate).ConfigureAwait(true);
+            }
+        }
+        catch (Exception exception) when (exception is MatchCommandRejectedException or NativeSimulationException)
+        {
+            _liveError = exception.Message;
+        }
+        finally
+        {
+            _isProcessingBotTurn = false;
             QueueRedraw();
         }
     }
@@ -133,6 +169,12 @@ public partial class Main : Node2D
             return;
         }
 
+        if (_inCharacterSelect)
+        {
+            HandleCharacterSelectInput(@event);
+            return;
+        }
+
         if (_started)
         {
             return;
@@ -146,7 +188,7 @@ public partial class Main : Node2D
         }
 
         GetViewport().SetInputAsHandled();
-        StartDuel();
+        EnterCharacterSelect();
     }
 
     /// <inheritdoc />
@@ -162,6 +204,10 @@ public partial class Main : Node2D
         {
             DrawMatch(_match.Frame.Snapshot, _match.Frame.Terrain);
         }
+        else if (_inCharacterSelect)
+        {
+            DrawCharacterSelect();
+        }
         else
         {
             DrawMenu();
@@ -171,44 +217,131 @@ public partial class Main : Node2D
     /// <inheritdoc />
     public override void _ExitTree()
     {
-        // The one thing every path through this scene must still get right on the way out: no
-        // native handle survives the process. Idempotent disposal (C3) means this is safe even
-        // if smoke mode already disposed the session itself.
         _match?.Session.Dispose();
         _live?.Dispose();
         base._ExitTree();
     }
 
-    private void StartDuel()
+    private void EnterCharacterSelect()
     {
         try
         {
-            _live = CreateLiveMatch(FixtureMatchBootstrapper.Start());
+            _roster = RosterCatalog.Get().Characters;
+            _selectedCharacterIndex = 0;
+            _selectedBotCharacterIndex = Math.Min(1, _roster.Count - 1);
+            _inCharacterSelect = true;
+            _menuError = null;
+        }
+        catch (NativeSimulationException exception)
+        {
+            _menuError = exception.Message;
+            _started = true;
+        }
+
+        QueueRedraw();
+    }
+
+    private void HandleCharacterSelectInput(InputEvent @event)
+    {
+        if (_roster is null or { Count: 0 })
+        {
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_up"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedCharacterIndex = (_selectedCharacterIndex - 1 + _roster.Count) % _roster.Count;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_down"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedCharacterIndex = (_selectedCharacterIndex + 1) % _roster.Count;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_left"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedBotCharacterIndex = (_selectedBotCharacterIndex - 1 + _roster.Count) % _roster.Count;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_right"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedBotCharacterIndex = (_selectedBotCharacterIndex + 1) % _roster.Count;
+            QueueRedraw();
+            return;
+        }
+
+        var isConfirm = @event.IsActionPressed("ui_accept") ||
+            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
+        if (isConfirm)
+        {
+            GetViewport().SetInputAsHandled();
+            ConfirmCharacterAndStartDuel();
+        }
+    }
+
+    private void ConfirmCharacterAndStartDuel()
+    {
+        if (_roster is null || _selectedCharacterIndex >= _roster.Count)
+        {
+            return;
+        }
+
+        var human = _roster[_selectedCharacterIndex];
+        var bot = _roster[_selectedBotCharacterIndex];
+        var appearance = new ClientAppearance("default", ["default", "default", "default"], "default");
+        var request = new ClientCreateRequest(
+            SchemaVersion: 1,
+            MatchId: $"local-duel-{_matchSeed}",
+            SimulationVersion: LocalMatchSession.SimulationVersion,
+            ContentVersion: LocalMatchSession.ContentVersion,
+            Match: new ClientMatchConfig(
+                Seed: _matchSeed,
+                MapId: "horizontal-test-array",
+                Mode: "turnBased",
+                Players:
+                [
+                    new ClientPlayerConfig("a-local-player", Team: 0, human.Id, appearance),
+                    new ClientPlayerConfig("b-local-bot", Team: 1, bot.Id, appearance),
+                ]));
+
+        try
+        {
+            _live = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(request));
             _menuError = null;
         }
         catch (Exception exception) when (exception is InvalidDataException or NativeSimulationException)
         {
-            // A failed bootstrap is diagnostic information for the menu, not a crash: the whole
-            // point of showing build/version diagnostics first is to make a mismatch legible
-            // instead of a silent black screen.
             _menuError = exception.Message;
         }
 
-        _started = _live is not null;
+        _inCharacterSelect = _live is null;
+        _started = _live is not null || _menuError is not null;
         QueueRedraw();
     }
 
-    /// <summary>
-    /// Glues the Godot-specific bootstrap result to the Godot-free <see cref="LiveMatch"/>.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="LiveMatch"/> lives in the Interop project specifically so it stays testable
-    /// without the engine; it therefore cannot reference <see cref="MatchBootstrapResult"/> (a
-    /// Godot-project type). This is the one place that bridges the two, by passing the
-    /// bootstrap's own pieces through to <see cref="LiveMatch.Create"/> directly.
-    /// </remarks>
-    /// <param name="bootstrap">A freshly created match and its initial frame.</param>
-    /// <returns>The live wrapper. Ownership of the session transfers to the returned instance.</returns>
+    private void Rematch()
+    {
+        if (_live is null)
+        {
+            return;
+        }
+
+        _live.Dispose();
+        _live = null;
+        _matchSeed++;
+        ConfirmCharacterAndStartDuel();
+    }
+
     private static LiveMatch CreateLiveMatch(MatchBootstrapResult bootstrap) =>
         LiveMatch.Create(
             bootstrap.Session,
@@ -220,9 +353,61 @@ public partial class Main : Node2D
 
     private void HandleLiveInput(InputEvent @event)
     {
-        if (_live is null || IsInputLocked() || _live.CurrentSnapshot.HasAttackedThisTurn)
+        if (_live is null)
         {
             return;
+        }
+
+        // Handles Results screen rematch trigger when match is complete
+        if (_live.CurrentSnapshot.Outcome is not null)
+        {
+            if (@event.IsActionPressed("ui_accept") ||
+                (@event is InputEventKey { Pressed: true, Keycode: Key.R }))
+            {
+                GetViewport().SetInputAsHandled();
+                Rematch();
+                return;
+            }
+        }
+
+        // Handles Passive Selection prompt when phase is PassiveSelection
+        if (_live.CurrentSnapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
+        {
+            HandlePassiveSelectionInput(@event);
+            return;
+        }
+
+        if (IsInputLocked() || _live.CurrentSnapshot.HasAttackedThisTurn)
+        {
+            return;
+        }
+
+        // Ability slot switching (1, 2, 3)
+        if (@event is InputEventKey { Pressed: true } keyEvent)
+        {
+            switch (keyEvent.Keycode)
+            {
+                case Key.Key1:
+                    _selectedAbilitySlot = ClientAbilitySlot.Basic;
+                    QueueRedraw();
+                    return;
+                case Key.Key2:
+                    _selectedAbilitySlot = ClientAbilitySlot.BasicAlt;
+                    QueueRedraw();
+                    return;
+                case Key.Key3:
+                    _selectedAbilitySlot = ClientAbilitySlot.Special;
+                    QueueRedraw();
+                    return;
+                case Key.F:
+                case Key.Home:
+                    _cameraOffset = Vector2.Zero;
+                    QueueRedraw();
+                    return;
+                case Key.P:
+                    _ = SubmitAndRedrawAsync(() => _live.SubmitPassAsync());
+                    return;
+            }
         }
 
         if (@event.IsActionPressed("ui_left"))
@@ -254,7 +439,7 @@ public partial class Main : Node2D
                 _isAiming = false;
                 var (angleMillidegrees, powerBasisPoints) = ResolveAim(_aimOrigin, mouseButton.Position);
                 _ = SubmitAndRedrawAsync(() => _live.SubmitAbilityAsync(
-                    ClientAbilitySlot.Basic,
+                    _selectedAbilitySlot,
                     angleMillidegrees,
                     powerBasisPoints,
                     targetPlayerId: null));
@@ -270,16 +455,45 @@ public partial class Main : Node2D
         }
     }
 
-    /// <summary>
-    /// Converts a screen drag into an angle/power pair.
-    /// </summary>
-    /// <remarks>
-    /// A placeholder mapping, not a verified one: the mechanically load-bearing values in this
-    /// codebase are the fixture's own frozen <c>angleMillidegrees</c>/<c>powerBasisPoints</c>,
-    /// exercised byte-for-byte by <c>CommandRoundTripTests</c> and by the C5 smoke path below —
-    /// neither depends on this mapping's exact direction being right. This exists only so an
-    /// interactive human has something to aim with; feel is a C6+ concern.
-    /// </remarks>
+    private void HandlePassiveSelectionInput(InputEvent @event)
+    {
+        if (_live is null || _roster is null)
+        {
+            return;
+        }
+
+        var activePlayer = _live.CurrentSnapshot.Players.FirstOrDefault(p => p.PlayerId == _live.CurrentSnapshot.ActivePlayerId);
+        var charDef = _roster.FirstOrDefault(c => c.Id == activePlayer?.CharacterId);
+        if (charDef is null or { Passives.Count: 0 })
+        {
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_up"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedPassiveIndex = (_selectedPassiveIndex - 1 + charDef.Passives.Count) % charDef.Passives.Count;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_down"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedPassiveIndex = (_selectedPassiveIndex + 1) % charDef.Passives.Count;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_accept") ||
+            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left }))
+        {
+            GetViewport().SetInputAsHandled();
+            var chosenPassive = charDef.Passives[_selectedPassiveIndex].Id;
+            _ = SubmitAndRedrawAsync(() => _live.SubmitPassiveChoiceAsync(chosenPassive));
+        }
+    }
+
     private static (int AngleMillidegrees, int PowerBasisPoints) ResolveAim(Vector2 origin, Vector2 release)
     {
         var drag = release - origin;
@@ -288,9 +502,6 @@ public partial class Main : Node2D
             return (0, 0);
         }
 
-        // Screen Y is positive-downward, matching the authoritative convention (FixedPoint's own
-        // doc comment), so an upward drag has negative Y — negating here reads that as a
-        // positive launch angle, the usual artillery-game sense of "up is positive".
         var angleDegrees = Mathf.RadToDeg(Mathf.Atan2(-drag.Y, drag.X));
         var angleMillidegrees = Mathf.RoundToInt(angleDegrees * 1000f);
 
@@ -298,16 +509,6 @@ public partial class Main : Node2D
         return (angleMillidegrees, Mathf.RoundToInt(power));
     }
 
-    /// <summary>
-    /// Submits one command through the real input-lock timer and returns its transition.
-    /// </summary>
-    /// <remarks>
-    /// The single path both a real click and the C5 smoke automation go through, so a smoke run
-    /// proves the same lock state machine a human's input is actually gated by — not a parallel
-    /// data-only check that the transition merely <em>reported</em> a lock duration.
-    /// </remarks>
-    /// <param name="submit">Submits the command against the live match.</param>
-    /// <returns>The accepted transition, or <see langword="null"/> if it was rejected.</returns>
     private async Task<ClientMatchTransition?> SubmitAndRedrawAsync(Func<Task<ClientMatchTransition>> submit)
     {
         if (_live is null)
@@ -315,9 +516,6 @@ public partial class Main : Node2D
             return null;
         }
 
-        // Locked immediately, before the (asynchronous) native call even starts: a second click
-        // during the round trip to the native library must not queue a second command against a
-        // snapshot generation the first one is about to advance past.
         _inputLockedUntilMsec = Time.GetTicksMsec() + LockDurationMsecFor(_live);
         _liveError = null;
         ClientMatchTransition? transition = null;
@@ -334,9 +532,6 @@ public partial class Main : Node2D
         }
         finally
         {
-            // Now that a real transition exists, lock for its own reported duration rather than
-            // the previous transition's — the estimate above exists only to close the window
-            // between click and native response.
             if (transition is not null)
             {
                 _inputLockedUntilMsec = Time.GetTicksMsec() + LockDurationMsecFor(_live);
@@ -369,14 +564,14 @@ public partial class Main : Node2D
         DrawString(
             font,
             position,
-            "Click or press Enter to start the horizontal-test duel.",
+            "Press Enter or Click to Enter Character Selection.",
             fontSize: 16,
             modulate: MenuTextColor);
         position.Y += 24;
         DrawString(
             font,
             position,
-            "Left/Right to move. Click-drag from anywhere, release to aim and fire.",
+            "Full 9-champion roster available. Battle against AI Bot opponent.",
             fontSize: 14,
             modulate: LockedHintColor);
 
@@ -387,6 +582,66 @@ public partial class Main : Node2D
         }
     }
 
+    private void DrawCharacterSelect()
+    {
+        var font = ThemeDB.FallbackFont;
+        var pos = new Vector2(24, 36);
+
+        DrawString(font, pos, "CHARACTER SELECT — LOCAL MATCH SETUP", fontSize: 20, modulate: MenuTextColor);
+        pos.Y += 30;
+
+        if (_roster is null or { Count: 0 })
+        {
+            DrawString(font, pos, "Loading Roster...", fontSize: 16, modulate: MenuTextColor);
+            return;
+        }
+
+        // Left Panel: Roster List
+        DrawString(font, pos, "Human Champion [UP/DOWN]:", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 20;
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            var charDef = _roster[i];
+            var isSelected = i == _selectedCharacterIndex;
+            var isBot = i == _selectedBotCharacterIndex;
+            var prefix = isSelected ? " > " : "   ";
+            var tag = (isSelected ? " (YOU)" : "") + (isBot ? " (BOT)" : "");
+            var color = isSelected ? Colors.Yellow : (isBot ? Colors.Coral : MenuTextColor);
+
+            DrawString(font, pos, $"{prefix}{charDef.DisplayName}{tag}", fontSize: 14, modulate: color);
+            pos.Y += 20;
+        }
+
+        // Right Panel: Champion Details
+        var selectedChar = _roster[_selectedCharacterIndex];
+        var detailPos = new Vector2(360, 66);
+        DrawString(font, detailPos, $"Name: {selectedChar.DisplayName} ({selectedChar.Id})", fontSize: 16, modulate: Colors.Gold);
+        detailPos.Y += 24;
+        DrawString(font, detailPos, $"HP: {selectedChar.MaxHealth} | Range: {selectedChar.RangeTier} | Move: {selectedChar.MovementClass}", fontSize: 14, modulate: MenuTextColor);
+        detailPos.Y += 22;
+        DrawString(font, detailPos, $"Basic: {selectedChar.Basic.DisplayName} ({selectedChar.Basic.DamagePercent}% DMG)", fontSize: 14, modulate: MenuTextColor);
+        detailPos.Y += 20;
+        if (selectedChar.BasicAlt is not null)
+        {
+            DrawString(font, detailPos, $"BasicAlt: {selectedChar.BasicAlt.DisplayName} ({selectedChar.BasicAlt.DamagePercent}% DMG)", fontSize: 14, modulate: MenuTextColor);
+            detailPos.Y += 20;
+        }
+        DrawString(font, detailPos, $"Special: {selectedChar.Special.DisplayName} ({selectedChar.Special.DamagePercent}% DMG)", fontSize: 14, modulate: MenuTextColor);
+        detailPos.Y += 24;
+
+        DrawString(font, detailPos, "Passives Preview:", fontSize: 14, modulate: Colors.Gold);
+        detailPos.Y += 20;
+        foreach (var p in selectedChar.Passives)
+        {
+            DrawString(font, detailPos, $" • {p.DisplayName}", fontSize: 12, modulate: LockedHintColor);
+            detailPos.Y += 18;
+        }
+
+        // Footer Controls
+        var footerPos = new Vector2(24, GetViewportRect().Size.Y - 30);
+        DrawString(font, footerPos, "Controls: UP/DOWN (You) | LEFT/RIGHT (Bot Opponent) | ENTER / Click to START MATCH", fontSize: 14, modulate: Colors.Cyan);
+    }
+
     private void DrawLiveMatch(LiveMatch live)
     {
         var snapshot = live.CurrentSnapshot;
@@ -394,7 +649,7 @@ public partial class Main : Node2D
 
         if (_isAiming)
         {
-            DrawLine(_aimOrigin, _aimCurrent, AimLineColor, width: 2);
+            DrawLine(_aimOrigin + _cameraOffset, _aimCurrent + _cameraOffset, AimLineColor, width: 2);
         }
 
         var font = ThemeDB.FallbackFont;
@@ -402,8 +657,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             new Vector2(8, hudY),
-            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}" +
-            (snapshot.HasAttackedThisTurn ? "   (attacked — turn resolving)" : string.Empty),
+            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   slot [{_selectedAbilitySlot}]   wind {snapshot.WindPerTick}",
             fontSize: 14,
             modulate: MenuTextColor);
 
@@ -419,19 +673,81 @@ public partial class Main : Node2D
             DrawString(font, new Vector2(8, hudY), $"rejected: {_liveError}", fontSize: 12, modulate: Colors.OrangeRed);
         }
 
+        if (snapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
+        {
+            DrawPassiveSelectModal();
+        }
+
+        if (snapshot.Outcome is not null)
+        {
+            DrawResultsScreen(snapshot);
+        }
+    }
+
+    private void DrawPassiveSelectModal()
+    {
+        if (_live is null || _roster is null)
+        {
+            return;
+        }
+
+        var activePlayer = _live.CurrentSnapshot.Players.FirstOrDefault(p => p.PlayerId == _live.CurrentSnapshot.ActivePlayerId);
+        var charDef = _roster.FirstOrDefault(c => c.Id == activePlayer?.CharacterId);
+        if (charDef is null or { Passives.Count: 0 })
+        {
+            return;
+        }
+
+        var rect = new Rect2(new Vector2(200, 150), new Vector2(400, 240));
+        DrawRect(rect, new Color(0.12f, 0.14f, 0.20f, 0.95f));
+        DrawRect(rect, Colors.Gold, filled: false, width: 2);
+
+        var font = ThemeDB.FallbackFont;
+        var pos = rect.Position + new Vector2(20, 30);
+        DrawString(font, pos, "SPECIAL GAUGE FULL — SELECT PASSIVE", fontSize: 16, modulate: Colors.Gold);
+        pos.Y += 30;
+
+        for (var i = 0; i < charDef.Passives.Count; i++)
+        {
+            var isSelected = i == _selectedPassiveIndex;
+            var prefix = isSelected ? " > " : "   ";
+            var color = isSelected ? Colors.Yellow : MenuTextColor;
+            DrawString(font, pos, $"{prefix}{charDef.Passives[i].DisplayName}", fontSize: 14, modulate: color);
+            pos.Y += 24;
+        }
+
+        pos.Y += 20;
+        DrawString(font, pos, "UP/DOWN to select | ENTER to confirm", fontSize: 12, modulate: LockedHintColor);
+    }
+
+    private void DrawResultsScreen(ClientMatchSnapshot snapshot)
+    {
+        var rect = new Rect2(new Vector2(180, 120), new Vector2(440, 260));
+        DrawRect(rect, new Color(0.05f, 0.08f, 0.15f, 0.95f));
+        DrawRect(rect, Colors.Gold, filled: false, width: 3);
+
+        var font = ThemeDB.FallbackFont;
+        var pos = rect.Position + new Vector2(30, 40);
+
+        DrawString(font, pos, "MATCH COMPLETE", fontSize: 22, modulate: Colors.Gold);
+        pos.Y += 36;
+
         if (snapshot.Outcome is ClientVictoryOutcome victory)
         {
-            DrawString(
-                font,
-                new Vector2(8, hudY + 24),
-                $"team {victory.Team} wins",
-                fontSize: 18,
-                modulate: Colors.Gold);
+            DrawString(font, pos, $"VICTORY: Team {victory.Team} Wins!", fontSize: 18, modulate: Colors.LightGreen);
         }
-        else if (snapshot.Outcome is ClientDrawOutcome)
+        else
         {
-            DrawString(font, new Vector2(8, hudY + 24), "draw", fontSize: 18, modulate: Colors.Gold);
+            DrawString(font, pos, "DRAW: Match Ended in Draw!", fontSize: 18, modulate: Colors.LightBlue);
         }
+
+        pos.Y += 30;
+        DrawString(font, pos, $"Turns Elapsed: {snapshot.TurnNumber} | State Hash: {snapshot.StateHash}", fontSize: 14, modulate: MenuTextColor);
+        pos.Y += 24;
+        DrawString(font, pos, $"Snapshot Gen: {snapshot.SnapshotGeneration}", fontSize: 14, modulate: MenuTextColor);
+
+        pos.Y += 40;
+        DrawString(font, pos, "Press [R] or [ENTER] to REMATCH", fontSize: 16, modulate: Colors.Cyan);
     }
 
     private void DrawMatch(ClientMatchSnapshot snapshot, TerrainRead terrain)
@@ -451,7 +767,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             new Vector2(8, GetViewportRect().Size.Y - 12),
-            $"turn {snapshot.TurnNumber}  gen {snapshot.SnapshotGeneration}  hash {snapshot.StateHash}",
+            $"turn {snapshot.TurnNumber}  gen {snapshot.SnapshotGeneration}  hash {snapshot.StateHash}  [1:Basic 2:Alt 3:Spec F:Cam P:Pass]",
             fontSize: 14,
             modulate: MenuTextColor);
     }
@@ -463,9 +779,6 @@ public partial class Main : Node2D
         var height = (int)snapshot.TerrainHeight;
         if (cells.Length != width * height)
         {
-            // The fixture always supplies a matching read (FixtureMatchBootstrapper validates
-            // this before a frame is ever constructed); this guards the draw call itself against
-            // a future caller that skips that validation.
             return;
         }
 
@@ -484,7 +797,7 @@ public partial class Main : Node2D
                 if (color is { } solid)
                 {
                     DrawRect(
-                        new Rect2(x * PixelsPerCell, y * PixelsPerCell, PixelsPerCell, PixelsPerCell),
+                        new Rect2(x * PixelsPerCell + _cameraOffset.X, y * PixelsPerCell + _cameraOffset.Y, PixelsPerCell, PixelsPerCell),
                         solid);
                 }
             }
@@ -496,8 +809,8 @@ public partial class Main : Node2D
         var color = block.Health < block.MaxHealth ? BlockDamagedColor : BlockColor;
         DrawRect(
             new Rect2(
-                block.OriginCellX * PixelsPerCell,
-                block.OriginCellY * PixelsPerCell,
+                block.OriginCellX * PixelsPerCell + _cameraOffset.X,
+                block.OriginCellY * PixelsPerCell + _cameraOffset.Y,
                 block.WidthCells * PixelsPerCell,
                 block.HeightCells * PixelsPerCell),
             color);
@@ -505,12 +818,9 @@ public partial class Main : Node2D
 
     private void DrawPlayer(ClientPlayerSnapshot player, Color color, int index)
     {
-        var center = ToPixels(player.Position);
+        var center = ToPixels(player.Position) + _cameraOffset;
         DrawCircle(center, PlayerRadiusPixels, player.IsEliminated ? Colors.Gray : color);
 
-        // Placeholder labels stagger by index rather than sharing one fixed offset above the
-        // circle: two starting characters are often close enough on a small map that a shared
-        // offset overlaps their names into one unreadable run.
         var labelY = -PlayerRadiusPixels - 4 - (index * 16);
         var font = ThemeDB.FallbackFont;
         DrawString(
@@ -528,9 +838,6 @@ public partial class Main : Node2D
 
     private async Task RunSmokeAndQuitAsync(C4SmokeOptions options)
     {
-        // A smoke run is unattended: nothing will ever click past a hang. Every exit from this
-        // method — including one from `report.Write` itself, such as an unwritable report path
-        // — must still reach `Quit`, so it is the only thing in a `finally`.
         var exitCode = 1;
         try
         {
@@ -567,16 +874,6 @@ public partial class Main : Node2D
             _match = result;
             QueueRedraw();
 
-            // `_Ready` runs before the engine's first process/draw cycle, so the `QueueRedraw`
-            // above has not painted anything yet: capturing immediately reproduced the exact
-            // blank-gray frame this comment now prevents. Two frames, not one: the first is
-            // where `_Draw` actually executes the draw calls queued above; the second is where
-            // the viewport texture is guaranteed to reflect a swapchain image that included
-            // them, rather than whatever the previous frame (nothing, on the very first tick)
-            // had committed.
-            // `ToSignal` returns Godot's own `SignalAwaiter`, not a `Task`; it has no
-            // `ConfigureAwait` and Godot's single-threaded scripting model gives no other
-            // context to switch to regardless.
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
@@ -631,10 +928,6 @@ public partial class Main : Node2D
         }
         catch (Exception exception)
         {
-            // Deliberately unfiltered. A smoke run's entire job is to turn a failure into a
-            // report and a clean exit rather than an engine-logged exception that leaves the
-            // process hanging with nothing left to click and nothing calling Quit — which is
-            // exactly what happened here once already, against a stale native library.
             return new C4SmokeReport(
                 Success: false,
                 Error: $"{exception.GetType().Name}: {exception.Message}",
@@ -679,35 +972,6 @@ public partial class Main : Node2D
         }
     }
 
-    /// <summary>
-    /// Scripts exactly the CLIENT_SPEC §20.5 step 5 turn: move, fire the fixture's own ability,
-    /// and check every gate clause mechanically.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// This uses the fixture's exact frozen angle/power rather than a UI-drawn drag, for the same
-    /// reason the C4 smoke path uses the exact fixture creation request: the mechanical proof
-    /// must not depend on a placeholder input mapping being "close enough", only on the real
-    /// command DTOs and the real native library.
-    /// </para>
-    /// <para>
-    /// This does <em>not</em> assert either post-transition hash against the frozen fixture's
-    /// (<c>378081bb2e830a5d</c> / <c>d8686762470c0c36</c>). <c>hash_state</c> deliberately folds
-    /// the set of accepted command ids into the authoritative state hash
-    /// (<c>db-sim-core/src/hash.rs</c>, domain <c>0x04</c>), and <see cref="LiveMatch"/> mints its
-    /// own ids rather than replaying the fixture's literal ones — so its hash can never equal the
-    /// frozen one, by design. An earlier version of this method asserted that equality and failed;
-    /// the fix was here, not in <see cref="LiveMatch"/>. What is checked instead is what actually
-    /// is invariant regardless of command id: acceptance, real damage, and turn handoff.
-    /// </para>
-    /// <para>
-    /// The lock check runs against the <em>ability</em>, not the move: a move has zero
-    /// presentation events to play back (<c>InputLockTicks == 0</c> for
-    /// <c>commands/001-move.json</c>'s own frozen response), so there is nothing to lock for and
-    /// checking it proves nothing. The ability's projectile flight gives it a real multi-tick
-    /// window, which is what CLIENT_SPEC's "input is locked during playback" clause is about.
-    /// </para>
-    /// </remarks>
     private async Task<C5SmokeReport> RunC5SmokeAsync(C5SmokeOptions options)
     {
         var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
@@ -722,9 +986,6 @@ public partial class Main : Node2D
             var defenderId = live.CurrentSnapshot.Players.First(p => p.PlayerId != beforeActivePlayer).PlayerId;
             var defenderHealthBefore = HealthOf(live.CurrentSnapshot, defenderId);
 
-            // Goes through `SubmitAndRedrawAsync` — the exact method a real click invokes — so
-            // every lock check below reads the actual `_inputLockedUntilMsec` timer a human's
-            // next click would be gated by, not a parallel data-only read of a reported tick count.
             var moveTransition = await SubmitAndRedrawAsync(() => live.SubmitMoveAsync(MoveStepDx))
                 .ConfigureAwait(true)
                 ?? throw new InvalidOperationException("The fixture move was rejected.");
@@ -739,9 +1000,6 @@ public partial class Main : Node2D
                 ?? throw new InvalidOperationException("The fixture ability was rejected.");
             var lockedImmediatelyAfterAbility = IsInputLocked();
 
-            // "Input is locked during playback": wait out the same duration a real player would
-            // be blocked for, then confirm the lock actually lifts rather than staying locked
-            // forever — the exact failure mode a stuck timer would produce.
             await WaitTicksAsync(abilityTransition.InputLockTicks, abilityTransition.PresentationTickRate)
                 .ConfigureAwait(true);
             var unlockedAfterWaiting = !IsInputLocked();
@@ -782,8 +1040,6 @@ public partial class Main : Node2D
         }
         catch (Exception exception)
         {
-            // Same reasoning as the C4 smoke path's unfiltered catch: an unattended run must
-            // always produce a report and a clean exit, never an engine-logged hang.
             return new C5SmokeReport(
                 Success: false,
                 Error: $"{exception.GetType().Name}: {exception.Message}",
@@ -821,6 +1077,159 @@ public partial class Main : Node2D
         }
     }
 
+    private async Task RunC6SmokeAndQuitAsync(C6SmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC6SmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C6SmokeReport> RunC6SmokeAsync(C6SmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+        LiveMatch? live = null;
+        LiveMatch? rematchLive = null;
+
+        try
+        {
+            var roster = RosterCatalog.Get();
+            if (roster.Characters.Count == 0)
+            {
+                throw new InvalidOperationException("Roster returned 0 characters.");
+            }
+
+            var humanChar = roster.Characters.FirstOrDefault(c => c.Id == "zeke") ?? roster.Characters[0];
+            var botChar = roster.Characters.FirstOrDefault(c => c.Id == "huck") ?? roster.Characters[1];
+
+            var appearance = new ClientAppearance("default", ["default", "default", "default"], "default");
+            var request = new ClientCreateRequest(
+                SchemaVersion: 1,
+                MatchId: "c6-smoke-match-v1",
+                SimulationVersion: LocalMatchSession.SimulationVersion,
+                ContentVersion: LocalMatchSession.ContentVersion,
+                Match: new ClientMatchConfig(
+                    Seed: 9999,
+                    MapId: "horizontal-test-array",
+                    Mode: "turnBased",
+                    Players:
+                    [
+                        new ClientPlayerConfig("a-local-player", Team: 0, humanChar.Id, appearance),
+                        new ClientPlayerConfig("b-local-bot", Team: 1, botChar.Id, appearance),
+                    ]));
+
+            live = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(request));
+            _live = live;
+
+            // 1. Human Move & Ability Turn
+            var moveTrans = await live.SubmitMoveAsync(MoveStepDx).ConfigureAwait(true);
+            await WaitTicksAsync(moveTrans.InputLockTicks, moveTrans.PresentationTickRate).ConfigureAwait(true);
+
+            var abilityTrans = await live.SubmitAbilityAsync(
+                ClientAbilitySlot.Basic,
+                angleMillidegrees: 45_000,
+                powerBasisPoints: 1_500,
+                targetPlayerId: null).ConfigureAwait(true);
+            await WaitTicksAsync(abilityTrans.InputLockTicks, abilityTrans.PresentationTickRate).ConfigureAwait(true);
+
+            var humanTurnExecuted = moveTrans.Disposition == ClientTransitionDisposition.Accepted &&
+                                    abilityTrans.Disposition == ClientTransitionDisposition.Accepted;
+
+            // 2. Bot Turn Execution
+            var botTrans = await live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed: 777uL)
+                .ConfigureAwait(true);
+            await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
+
+            var botTurnExecuted = botTrans.Disposition == ClientTransitionDisposition.Accepted;
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            var finalSnapshot = live.CurrentSnapshot;
+
+            // 3. Rematch session creation test
+            var rematchRequest = new ClientCreateRequest(
+                SchemaVersion: 1,
+                MatchId: "c6-smoke-rematch-v1",
+                SimulationVersion: LocalMatchSession.SimulationVersion,
+                ContentVersion: LocalMatchSession.ContentVersion,
+                Match: new ClientMatchConfig(
+                    Seed: 10000,
+                    MapId: "horizontal-test-array",
+                    Mode: "turnBased",
+                    Players:
+                    [
+                        new ClientPlayerConfig("a-local-player", Team: 0, humanChar.Id, appearance),
+                        new ClientPlayerConfig("b-local-bot", Team: 1, botChar.Id, appearance),
+                    ]));
+
+            rematchLive = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(rematchRequest));
+            var rematchCreated = rematchLive.CurrentSnapshot.TurnNumber == 1;
+            await rematchLive.DisposeAsync().ConfigureAwait(true);
+            var rematchDisposedCleanly = true;
+            rematchLive = null;
+
+            return new C6SmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                RosterCount: roster.Characters.Count,
+                HumanCharacterId: humanChar.Id,
+                BotCharacterId: botChar.Id,
+                InitialMatchCreated: true,
+                HumanTurnExecuted: humanTurnExecuted,
+                BotTurnExecuted: botTurnExecuted,
+                FinalTurnNumber: finalSnapshot.TurnNumber,
+                FinalStateHash: finalSnapshot.StateHash,
+                RematchSessionCreated: rematchCreated,
+                RematchSessionDisposedCleanly: rematchDisposedCleanly,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight);
+        }
+        catch (Exception exception)
+        {
+            return new C6SmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                RosterCount: 0,
+                HumanCharacterId: string.Empty,
+                BotCharacterId: string.Empty,
+                InitialMatchCreated: false,
+                HumanTurnExecuted: false,
+                BotTurnExecuted: false,
+                FinalTurnNumber: 0,
+                FinalStateHash: string.Empty,
+                RematchSessionCreated: false,
+                RematchSessionDisposedCleanly: false,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0);
+        }
+        finally
+        {
+            if (rematchLive is not null)
+            {
+                await rematchLive.DisposeAsync().ConfigureAwait(true);
+            }
+            if (live is not null)
+            {
+                await live.DisposeAsync().ConfigureAwait(true);
+            }
+            _live = null;
+        }
+    }
+
     private static ushort HealthOf(ClientMatchSnapshot snapshot, string playerId) =>
         snapshot.Players.First(p => p.PlayerId == playerId).Health;
 
@@ -835,17 +1244,6 @@ public partial class Main : Node2D
         await Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(true);
     }
 
-    /// <summary>
-    /// Captures the rendered frame to <paramref name="path"/>.
-    /// </summary>
-    /// <remarks>
-    /// A headless run (`--headless`) has no display driver, so <c>GetViewport().GetTexture()</c>
-    /// returns no real pixels there. Rather than let that surface as a confusing failure deep in
-    /// image encoding, it is detected up front and reported as a zero-size screenshot: honest
-    /// about what a headless run can prove (bootstrap, data shape, disposal) versus what it
-    /// cannot (that a pixel actually painted). CLIENT_SPEC §20.5 draws the same line: headless
-    /// covers navigation and data; a real windowed run is required for the graphics claim.
-    /// </remarks>
     private (int Width, int Height) CaptureScreenshot(string path)
     {
         if (DisplayServer.GetName() == "headless")
@@ -853,9 +1251,6 @@ public partial class Main : Node2D
             return (0, 0);
         }
 
-        // The caller has already awaited two real `ProcessFrame` ticks past the `QueueRedraw()`
-        // that requested this content, so the viewport texture reflects a presented frame that
-        // included it rather than whatever was on screen before `_Ready` ran.
         using var image = GetViewport().GetTexture().GetImage();
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrWhiteSpace(directory))

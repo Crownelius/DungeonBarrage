@@ -3,13 +3,55 @@
   "contentVersion": 1,
   "characters": [
     {
+      "characterId": "arzum",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "emi",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "karl",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
       "characterId": "huck",
       "skinIds": ["default"],
       "abilitySkinIds": ["default"],
       "victoryPoseIds": ["default"]
     },
     {
+      "characterId": "numa",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "aleph",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
       "characterId": "zeke",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "roberto",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "natomica",
       "skinIds": ["default"],
       "abilitySkinIds": ["default"],
       "victoryPoseIds": ["default"]

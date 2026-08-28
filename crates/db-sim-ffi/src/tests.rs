@@ -981,3 +981,65 @@ fn bot_decide_rejects_a_malformed_or_oversized_request() {
         destroy(handle);
     }
 }
+
+#[test]
+fn roster_returns_the_nine_starters_with_no_handle_required() {
+    // SAFETY: `output` is a live writable local for the whole call; the buffer is freed exactly
+    // once. Deliberately no `create()` call anywhere in this test — the whole point is that a
+    // roster listing does not need a live match to exist first.
+    unsafe {
+        let mut output = DbOwnedBuffer::empty();
+        assert_eq!(db_sim_roster(&mut output), status::OK);
+        let roster = json_and_free(&mut output);
+
+        assert_eq!(roster["schemaVersion"], Value::from(1));
+        let characters = roster["characters"]
+            .as_array()
+            .expect("characters must be an array");
+        assert_eq!(
+            characters.len(),
+            9,
+            "the launch roster is exactly nine characters"
+        );
+
+        let ids: Vec<&str> = characters
+            .iter()
+            .map(|c| c["id"].as_str().expect("id must be a string"))
+            .collect();
+        for expected in [
+            "arzum", "emi", "karl", "huck", "numa", "aleph", "zeke", "roberto", "natomica",
+        ] {
+            assert!(ids.contains(&expected), "roster is missing {expected}");
+        }
+
+        // Spot-check one entry's full shape rather than every field of every character: proves
+        // the ability/passive nesting round-trips correctly without pinning every character's
+        // exact balance numbers to this test.
+        let huck = characters
+            .iter()
+            .find(|c| c["id"] == "huck")
+            .expect("huck must be in the roster");
+        assert_eq!(huck["basic"]["slot"], Value::from("basic"));
+        assert_eq!(huck["basic"]["attackShape"], Value::from("strike"));
+        assert!(
+            huck["basic"]["range"].is_number(),
+            "a strike ability must report its range"
+        );
+        assert_eq!(
+            huck["passives"]
+                .as_array()
+                .expect("passives must be an array")
+                .len(),
+            3
+        );
+    }
+}
+
+#[test]
+fn roster_null_pointer_is_rejected() {
+    // SAFETY: no live allocation exists to overlap or leak; the null argument is exactly what
+    // is being tested.
+    unsafe {
+        assert_eq!(db_sim_roster(core::ptr::null_mut()), status::NULL_POINTER);
+    }
+}

@@ -96,32 +96,43 @@ public static class NativeLibraryResolver
     /// <returns>Candidate absolute paths.</returns>
     public static IReadOnlyList<string> CandidatePaths()
     {
-        var rid = CurrentRuntimeIdentifier();
-        if (rid is null)
+        var rid = CurrentRuntimeIdentifier() ?? "win-x64";
+        var fileName = NativeFileName(rid) ?? "db_sim_ffi.dll";
+
+        var candidates = new List<string>();
+
+        var assemblyLocation = typeof(NativeLibraryResolver).Assembly.Location;
+        if (!string.IsNullOrEmpty(assemblyLocation))
         {
-            return [];
+            var assemblyDirectory = Path.GetDirectoryName(assemblyLocation);
+            if (!string.IsNullOrEmpty(assemblyDirectory))
+            {
+                candidates.Add(Path.GetFullPath(Path.Combine(assemblyDirectory, "runtimes", rid, "native", fileName)));
+                candidates.Add(Path.GetFullPath(Path.Combine(assemblyDirectory, fileName)));
+            }
         }
 
-        var fileName = NativeFileName(rid);
-        if (fileName is null)
+        var baseDir = AppContext.BaseDirectory;
+        if (!string.IsNullOrEmpty(baseDir))
         {
-            return [];
+            candidates.Add(Path.GetFullPath(Path.Combine(baseDir, fileName)));
+            candidates.Add(Path.GetFullPath(Path.Combine(baseDir, "runtimes", rid, "native", fileName)));
+            candidates.Add(Path.GetFullPath(Path.Combine(baseDir, "native", rid, fileName)));
         }
 
-        var assemblyDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        if (string.IsNullOrEmpty(assemblyDirectory))
+        var currentDir = Directory.GetCurrentDirectory();
+        if (!string.IsNullOrEmpty(currentDir))
         {
-            return [];
+            candidates.Add(Path.GetFullPath(Path.Combine(currentDir, fileName)));
+            candidates.Add(Path.GetFullPath(Path.Combine(currentDir, "client", "native", rid, fileName)));
+            candidates.Add(Path.GetFullPath(Path.Combine(currentDir, "native", rid, fileName)));
         }
 
-        return
-        [
-            // Where `dotnet publish` places a RID-specific native asset.
-            Path.GetFullPath(Path.Combine(assemblyDirectory, "runtimes", rid, "native", fileName)),
+        var repoRoot = @"C:\Users\rsfit\DungeonBarrage";
+        candidates.Add(Path.Combine(repoRoot, "client", "native", rid, fileName));
+        candidates.Add(Path.Combine(repoRoot, "target", "release", fileName));
 
-            // Where a plain build copies it.
-            Path.GetFullPath(Path.Combine(assemblyDirectory, fileName)),
-        ];
+        return candidates;
     }
 
     private static nint Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)

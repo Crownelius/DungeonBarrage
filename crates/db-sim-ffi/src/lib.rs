@@ -29,11 +29,12 @@ mod wire;
 
 /// Native calling convention and buffer-ownership version.
 ///
-/// Version 2 adds the eleventh export, [`db_sim_match_bot_decide`] — an addition to the
-/// function set, which `docs/CLIENT_SPEC.md` §8 requires bumping this for even though no
-/// existing export's signature or envelope decoding changed. Version 1 exposed exactly the
-/// ten version/create/apply/snapshot/terrain/preview/disposal symbols.
-pub const ABI_VERSION: u32 = 2;
+/// Version 3 adds the twelfth export, [`db_sim_roster`] — another function-set addition, per
+/// `docs/CLIENT_SPEC.md` §6's versioning rule (not §8 as an earlier comment here claimed; §8 is
+/// just the — now stale — export-surface listing, §6 states the actual bump rule). Version 2
+/// added the eleventh export, [`db_sim_match_bot_decide`]. Version 1 exposed exactly the ten
+/// version/create/apply/snapshot/terrain/preview/disposal symbols.
+pub const ABI_VERSION: u32 = 3;
 /// Maximum accepted JSON request size: 256 KiB.
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
 /// Maximum serialized transition/snapshot/preview size: 8 MiB.
@@ -292,6 +293,35 @@ pub extern "C" fn db_sim_simulation_version() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn db_sim_content_version() -> u32 {
     db_sim_core::CONTENT_VERSION
+}
+
+/// Serializes the full launch roster.
+///
+/// Static content, not match state: takes no handle, and never fails except the two ways any
+/// output pointer can (`NULL_POINTER`, or `INTERNAL_PANIC` on a serialization failure this
+/// crate would treat as a defect rather than a caller error, exactly like every other export's
+/// serialization step).
+///
+/// # Safety
+///
+/// `roster_out` may be null and then follows the documented status precedence. A non-null
+/// `roster_out` must be a writable, allocation-free slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sim_roster(roster_out: *mut DbOwnedBuffer) -> c_int {
+    if roster_out.is_null() {
+        return status::NULL_POINTER;
+    }
+    // SAFETY: checked non-null and writable.
+    unsafe { *roster_out = DbOwnedBuffer::empty() };
+    guard(None, || {
+        let output = match serialize_status(None, wire::serialize_roster()) {
+            Ok(output) => output,
+            Err(code) => return code,
+        };
+        // SAFETY: checked non-null and writable; serialization and allocation already succeeded.
+        unsafe { *roster_out = output };
+        status::OK
+    })
 }
 
 /// Creates a real match session from a strict UTF-8 JSON request.

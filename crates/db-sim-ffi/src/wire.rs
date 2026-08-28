@@ -7,6 +7,7 @@
 
 use core::fmt;
 use db_sim_core::bot::BotDifficulty;
+use db_sim_core::character;
 use db_sim_core::client_contract::{
     AppearanceSnapshot, BlockSnapshot, ClientErosionAxis, ClientMatchOutcome, ClientMatchPhase,
     ClientMaterial, ClientObjectKind, ClientStatusKind, ClientTurnEndReason, MatchSnapshot,
@@ -20,8 +21,9 @@ use db_sim_core::match_session::{
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig};
 use db_sim_core::types::{
-    AbilitySlot, Appearance, CommandRejection, CritRoll, EffectKind, PersistentObjectRemovalCause,
-    RandomOutcome, StatusTransition, StrikeDelivery, StrikeResolution,
+    AbilityDefinition, AbilitySlot, Appearance, Attack, CharacterDefinition, CommandRejection,
+    CritRoll, EffectKind, PassiveDefinition, PersistentObjectRemovalCause, RandomOutcome,
+    StatusTransition, StrikeDelivery, StrikeResolution,
 };
 
 use serde::de::{Error as _, SeqAccess, Visitor};
@@ -1536,6 +1538,120 @@ impl WireBotAction {
             MatchCommandKind::Pass => Self::Pass,
         }
     }
+}
+
+/// The full launch roster, for a character-select screen. Static content, not match state —
+/// callable without a live handle.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireRoster {
+    schema_version: u32,
+    characters: Vec<WireCharacter>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireCharacter {
+    id: &'static str,
+    display_name: &'static str,
+    max_health: u16,
+    range_tier: &'static str,
+    movement_class: &'static str,
+    basic: WireAbility,
+    basic_alt: Option<WireAbility>,
+    special: WireAbility,
+    passives: Vec<WirePassivePreview>,
+}
+
+impl WireCharacter {
+    fn from_core(character: &'static CharacterDefinition) -> Self {
+        Self {
+            id: character.id,
+            display_name: character.display_name,
+            max_health: character.max_health,
+            range_tier: character.range_tier.wire_name(),
+            movement_class: character.movement.wire_name(),
+            basic: WireAbility::from_core(&character.basic),
+            basic_alt: character.basic_alt.as_ref().map(WireAbility::from_core),
+            special: WireAbility::from_core(&character.special),
+            passives: character
+                .passives
+                .iter()
+                .map(WirePassivePreview::from_core)
+                .collect(),
+        }
+    }
+}
+
+/// An ability's selection-relevant shape. Deliberately excludes resolution internals
+/// (projectile speed/gravity/wind, terrain effects, strikes-per-turn breakdown beyond the
+/// count) that mean nothing to a player picking a character — those live in match transitions,
+/// not this roster listing.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireAbility {
+    id: &'static str,
+    display_name: &'static str,
+    slot: &'static str,
+    damage_percent: u16,
+    crit_damage_percent: u16,
+    crit_chance_basis_points: u16,
+    strikes_per_turn: u8,
+    attack_shape: &'static str,
+    /// Reach, fixed-point. Present only for a [`Attack::Strike`] — a projectile's effective
+    /// range depends on the player's own aim and power, not a fixed number worth showing here.
+    range: Option<i32>,
+}
+
+impl WireAbility {
+    fn from_core(ability: &AbilityDefinition) -> Self {
+        let (attack_shape, range) = match &ability.attack {
+            Attack::Projectile(_) => ("projectile", None),
+            Attack::Strike(strike) => ("strike", Some(strike.range)),
+        };
+        Self {
+            id: ability.id,
+            display_name: ability.display_name,
+            slot: ability.slot.wire_name(),
+            damage_percent: ability.damage_percent,
+            crit_damage_percent: ability.crit_damage_percent,
+            crit_chance_basis_points: ability.crit_chance_basis_points,
+            strikes_per_turn: ability.strikes_per_turn,
+            attack_shape,
+            range,
+        }
+    }
+}
+
+/// A passive's name only. The choice itself happens mid-match on first gauge fill
+/// (`CHARACTERS.md`'s passive-choice section), never at character select, so the magnitude and
+/// closed-vocabulary `PassiveKind` this preview deliberately omits are not yet relevant to a
+/// selection decision.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WirePassivePreview {
+    id: &'static str,
+    display_name: &'static str,
+}
+
+impl WirePassivePreview {
+    fn from_core(passive: &PassiveDefinition) -> Self {
+        Self {
+            id: passive.id,
+            display_name: passive.display_name,
+        }
+    }
+}
+
+pub(crate) fn serialize_roster() -> Result<Vec<u8>, serde_json::Error> {
+    let roster = WireRoster {
+        schema_version: db_sim_core::client_contract::CLIENT_CONTRACT_VERSION,
+        characters: character::LAUNCH_ROSTER
+            .iter()
+            .map(WireCharacter::from_core)
+            .collect(),
+    };
+    serialize_line(&roster)
 }
 
 #[derive(Debug, Serialize)]

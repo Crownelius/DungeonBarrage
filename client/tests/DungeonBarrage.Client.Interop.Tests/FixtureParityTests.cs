@@ -113,8 +113,8 @@ public sealed class FixtureParityTests
         // downstream diffs; naming it here fails with the actual cause instead.
         Assert.Equal(root.GetProperty("simulationVersion").GetUInt32(), LocalMatchSession.SimulationVersion);
         Assert.Equal(root.GetProperty("contentVersion").GetUInt32(), LocalMatchSession.ContentVersion);
-        // ABI version 2: db_sim_match_bot_decide's addition (docs/BUILD_LOG.md's C6 entry).
-        Assert.Equal(2u, LocalMatchSession.AbiVersion);
+        // ABI version 3: db_sim_roster's addition (docs/BUILD_LOG.md's C6 entry).
+        Assert.Equal(3u, LocalMatchSession.AbiVersion);
     }
 
     private static void AssertBytesEqual(ReadOnlyMemory<byte> expected, ReadOnlyMemory<byte> actual, string label)

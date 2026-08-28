@@ -41,6 +41,10 @@ internal static partial class DbSimNative
     [LibraryImport(Library, EntryPoint = "db_sim_content_version")]
     internal static partial uint ContentVersion();
 
+    /// <summary>Serializes the full launch roster. Takes no handle: static content, not match state.</summary>
+    [LibraryImport(Library, EntryPoint = "db_sim_roster")]
+    internal static unsafe partial int Roster(DbSimBuffer* rosterOut);
+
     [LibraryImport(Library, EntryPoint = "db_sim_match_create")]
     internal static unsafe partial int MatchCreate(
         byte* configJson,

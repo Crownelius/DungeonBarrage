@@ -4,10 +4,11 @@
 
 **Audience:** the next implementation agent, especially Claude Opus
 
-**State:** C0 through C5 are implemented — authority-only turn timeout, the coarse C ABI, the
-headless .NET interop/session layer, the Godot render/export spike, and one full playable
-authoritative turn (move, aim/fire, input lock, HUD, reconciliation), each verified with real
-evidence including a genuine windowed screenshot. All local Rust, release, supply-chain, toolchain,
+**State:** C0 through C6 are implemented — authority-only turn timeout, the coarse C ABI, the
+headless .NET interop/session layer, the Godot render/export spike, playable turn execution
+(move, aim/fire, input lock, HUD, reconciliation), and full 9-starter roster selection with automated
+bot opponent turn execution, passive selection modal, terminal match results screen, rematch system,
+and automated C6 smoke verification suite. All local Rust, release, supply-chain, toolchain,
 fixture-byte, export-surface, Valgrind, and secret-scan gates pass. The commit containing this file
 is the landing checkpoint; verify its exact ID and upstream state rather than trusting a chat
 summary.

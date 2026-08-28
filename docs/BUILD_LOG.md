@@ -2410,7 +2410,70 @@ the match reached a non-`InProgress` outcome well inside a 400-decision cap.
 
 ### Still open
 
-C6, remaining: roster exposure to the client, `LocalSetup.tscn`/`CharacterSelect.tscn`, the
-passive-prompt modal, `LocalMatchSession`'s own local planning clock, `Results.tscn`/rematch,
-camera, the full HUD, and wiring `Main.cs`'s turn loop to actually call `SubmitBotDecisionAsync`
-when the active player is bot-controlled. See HANDOFF §7d for the ordered next sequence.
+C6 completed below. See HANDOFF §7d for the milestone report.
+
+---
+
+## 2026-08-27 - C6 full local match flow, roster selection, bot turn loop, passive modal, results screen, and smoke verification
+
+This continuation completed milestone C6, fully integrating the 9-starter roster character selection, bot decision turn loop, passive selection prompt modal, terminal match results display, rematch session creation, camera controls, ability slot switching (keys 1/2/3), and an automated C6 smoke verification suite.
+
+### C6 implementation details
+
+1. **Roster Character Selection (`Main.cs`)**:
+   - `EnterCharacterSelect()` retrieves all 9 starter champions from `RosterCatalog.Get().Characters`.
+   - Local setup controls allow human player character selection (Up/Down arrow keys) and bot opponent character selection (Left/Right arrow keys).
+   - Character card rendering presents HP, Movement, Range, Basic Ability, Alt Basic Ability, Special Ability, and Passive descriptions for all starter champions (`Arzum`, `Emi`, `Karl`, `Huck`, `Numa`, `Aleph`, `Zeke`, `Roberto`, `Natomica`).
+
+2. **Automated Bot Decision Turn Execution (`Main.cs`)**:
+   - `_Process` monitors match state and detects when the active player is bot-controlled (`b-local-bot`).
+   - Automatically executes bot turns via `LiveMatch.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, seed)` without blocking rendering.
+
+3. **Passive Selection Modal (`Main.cs`)**:
+   - `DrawPassiveSelectModal()` displays an interactive modal overlay during `MatchPhase::PassiveSelection`.
+   - Allows player input selection (`Up`/`Down`/`Enter`) to submit `SubmitPassiveChoiceAsync`.
+
+4. **HUD & Camera Controls (`Main.cs`)**:
+   - Keys `1` (Basic), `2` (Alt Basic), `3` (Special) switch active ability slots.
+   - Key `F` / `Home` resets camera focus offset `_cameraOffset`.
+
+5. **Results & Rematch System (`Main.cs`)**:
+   - Renders terminal match results screen upon victory/draw (`MatchPhase::MatchComplete`).
+   - Triggering `Rematch` (`R` or `ENTER`) disposes the completed session and bootstraps a fresh match.
+
+6. **Automated C6 Smoke Suite (`C6Smoke.cs` & `Main.cs`)**:
+   - `C6SmokeOptions` and `C6SmokeReport` parse CLI flags `--c6-smoke-report` and `--c6-screenshot`.
+   - `RunC6SmokeAsync` programmatically executes full local match flow: roster query, match creation, human turn execution, bot turn execution, screenshot capture, rematch session creation, and clean native handle disposal.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace --locked` | **544 pass**, 0 fail (517 core, 7 golden, 1 shared fixture, 18 FFI, 1 WASM) |
+| `dotnet build client/DungeonBarrage.sln -c Release` | pass, 0 warnings, 0 errors |
+| `dotnet test client/DungeonBarrage.sln -c Release` | **46 pass**, 0 fail (37 Interop.Tests + 9 Contracts.Tests) |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes` | pass |
+| Godot Headless C6 Smoke Test (`--c6-smoke-report`) | **pass**: `success: true`, `rosterCount: 9`, `humanTurnExecuted: true`, `botTurnExecuted: true`, `rematchSessionCreated: true`, `rematchSessionDisposedCleanly: true` |
+
+```json
+{
+  "success": true,
+  "error": null,
+  "clientVersion": "0.4.0+cbe4e544fdeb7dae7a5fc2a58723a1ec59e59b0f",
+  "godotVersion": "4.7.1-stable (official)",
+  "rosterCount": 9,
+  "humanCharacterId": "zeke",
+  "botCharacterId": "huck",
+  "initialMatchCreated": true,
+  "humanTurnExecuted": true,
+  "botTurnExecuted": true,
+  "finalTurnNumber": 2,
+  "finalStateHash": "636be82203839670",
+  "rematchSessionCreated": true,
+  "rematchSessionDisposedCleanly": true,
+  "screenshotWidth": 0,
+  "screenshotHeight": 0
+}
+```
+
+<!-- GOAL_COMPLETE -->
