@@ -483,14 +483,30 @@ success regardless).
 Windowed screenshots confirm both the character-select screen and a real 12-turn victory
 (`finalStateHash: 9c3abe727f40e45d`) render correctly.
 
+**Done — `LocalSetup` screen and a Smash-Bros-style character-select redesign.** A read-only
+`LocalSetup` screen (`EnterLocalSetup`/`HandleLocalSetupInput`/`DrawLocalSetup`) now sits between the
+main menu and character select, showing the one map/mode/slot pairing that exists today and saying so
+explicitly rather than faking selectable options. Character select was rebuilt around a reference
+Super Smash Bros Ultimate "Solo Battle" screenshot: a 5-wide grid of 76×76 tiles, a per-tile
+non-interruptible hover-float animation (a tile only ever reads its latest desired hover state once
+its current motion fully completes — never mid-flight), a detail panel, and P1/CPU selection cards.
+Portrait art is deliberately placeholder (colored tiles with a monogram letter) — the user-supplied
+image folder was missing 4 of 10 requested files and 3 of the remaining 6 depicted a real public
+figure in AI-generated satirical scenarios, which was flagged rather than used silently; the user
+chose placeholders over either substitute. Two more real bugs were found and fixed verifying this
+pass — a screenshot capture missing the established two-`ProcessFrame`-await pattern, and a genuine
+concurrency race between the smoke test's manual match-driving and `Main._Process`'s own automatic
+bot-turn handler (confirmed via nondeterministic `finalStateHash` across runs before the fix, and
+byte-identical hashes after) — see `docs/BUILD_LOG.md`'s follow-up C6 entry for the full trace.
+
 **Still open — deliberately narrowed, not a full C7 UI pass:**
 
-1. `LocalSetup.tscn` (map/mode selection) does not exist; the map is still fixed to
-   `horizontal-test-array`.
-2. Character select, passive prompt, and results remain hand-drawn text in `Main.cs`'s existing
-   `_Draw()`/`_UnhandledInput` state machine, consistent with every other screen so far — not
-   dedicated `.tscn` scenes with `Control` nodes or the controller-only navigation CLIENT_SPEC §16
-   eventually requires as a release gate. That is real scene-composition work, not a C6 gap.
+1. Character select, LocalSetup, passive prompt, and results remain hand-drawn text in `Main.cs`'s
+   existing `_Draw()`/`_UnhandledInput` state machine, consistent with every other screen so far —
+   not dedicated `.tscn` scenes with `Control` nodes or the controller-only navigation CLIENT_SPEC
+   §16 eventually requires as a release gate. That is real scene-composition work, not a C6 gap.
+2. Real character portrait art does not exist yet; character select uses placeholder colored tiles
+   by explicit user choice (see above), pending art direction.
 3. `LocalMatchSession`'s own client-owned local planning clock (CLIENT_SPEC §9.1, distinct from the
    already-complete C1 authority-only timeout) is not implemented — a human or bot never times out
    locally, only the authority-side timeout (unused by local play) exists.

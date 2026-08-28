@@ -21,6 +21,29 @@ internal sealed record C6SmokeOptions(string ReportPath, string ScreenshotPath)
             Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
             Path.GetFileNameWithoutExtension(ScreenshotPath) + "-character-select" + Path.GetExtension(ScreenshotPath));
 
+    /// <summary>Where the mid-hover-float frame is written, derived the same way.</summary>
+    internal string CharacterSelectHoverScreenshotPath =>
+        Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-character-select-hover" + Path.GetExtension(ScreenshotPath));
+
+    /// <summary>Where the LocalSetup screen's own screenshot is written, derived the same way.</summary>
+    internal string LocalSetupScreenshotPath =>
+        Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-local-setup" + Path.GetExtension(ScreenshotPath));
+
+    /// <summary>
+    /// Where the passive-selection modal's screenshot is written, if the human's own gauge
+    /// fills during the run — derived the same way. Whether this happens at all depends on the
+    /// match's real combat outcome, not something this smoke path forces, so its absence alone
+    /// is not a failure.
+    /// </summary>
+    internal string PassivePromptScreenshotPath =>
+        Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-passive-prompt" + Path.GetExtension(ScreenshotPath));
+
     internal static C6SmokeOptions? Parse(IReadOnlyList<string> arguments)
     {
         var argsList = arguments.Count > 0 ? arguments : Godot.OS.GetCmdlineArgs();
@@ -68,8 +91,11 @@ internal sealed record C6SmokeReport(
     string HumanCharacterId,
     string BotCharacterId,
     bool InitialMatchCreated,
+    bool HoverAnimationInterruptionTestPassed,
     bool HumanTurnExecuted,
     bool BotTurnExecuted,
+    bool PassivePromptShownForHuman,
+    bool PassivePromptConfirmedThroughRealInput,
     bool MatchCompleted,
     int TurnsPlayed,
     uint FinalTurnNumber,
@@ -79,7 +105,9 @@ internal sealed record C6SmokeReport(
     int ScreenshotWidth,
     int ScreenshotHeight,
     int CharacterSelectScreenshotWidth,
-    int CharacterSelectScreenshotHeight)
+    int CharacterSelectScreenshotHeight,
+    int LocalSetupScreenshotWidth,
+    int LocalSetupScreenshotHeight)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerOptions.Default)
     {

@@ -48,10 +48,46 @@ public partial class Main : Node2D
     private string? _liveError;
     private bool _started;
 
+    private bool _inLocalSetup;
     private IReadOnlyList<ClientCharacterDefinition>? _roster;
     private int _selectedCharacterIndex;
     private int _selectedBotCharacterIndex = 1;
     private bool _inCharacterSelect;
+    private CharacterTileAnimation[]? _tileAnimations;
+    private int _hoveredCharacterIndex = -1;
+
+    private const float TileSize = 76f;
+    private const float TileGap = 12f;
+    private const int TileColumns = 5;
+    private const float TileFloatHeight = 14f;
+    private const float TileFloatUpSeconds = 0.16f;
+    private const float TileFloatDownSeconds = 0.24f;
+    private static readonly Vector2 TileGridOrigin = new(40, 108);
+
+    /// <summary>
+    /// One character tile's float animation: a small non-interruptible state machine, not a
+    /// Godot <c>Tween</c>. <see cref="Main"/> has no scene-graph nodes to attach one to — every
+    /// screen so far is hand-drawn from a single <see cref="_Draw"/> — so the float/land motion
+    /// is advanced manually each frame in <see cref="UpdateCharacterTileAnimations"/> instead.
+    /// </summary>
+    private sealed class CharacterTileAnimation
+    {
+        /// <summary>Current vertical offset in pixels; negative is floated upward.</summary>
+        internal float YOffset;
+
+        /// <summary>Whether a float-up or land motion is currently playing.</summary>
+        internal bool IsAnimating;
+
+        /// <summary>
+        /// Whether the motion in progress moves toward the floated position (<see langword="true"/>)
+        /// or back to rest (<see langword="false"/>). Only consulted once the motion finishes —
+        /// this is what makes it non-interruptible: a hover change mid-flight changes what happens
+        /// <em>next</em>, never the motion already playing.
+        /// </summary>
+        internal bool AnimatingTowardFloated;
+
+        internal float ElapsedSeconds;
+    }
 
     private ClientAbilitySlot _selectedAbilitySlot = ClientAbilitySlot.Basic;
     private int _selectedPassiveIndex;
@@ -109,6 +145,11 @@ public partial class Main : Node2D
         if (_isAiming)
         {
             QueueRedraw();
+        }
+
+        if (_inCharacterSelect)
+        {
+            UpdateCharacterTileAnimations((float)delta);
         }
 
         // Automatic bot turn processing when active player is bot-controlled. Outcome is never
@@ -178,6 +219,12 @@ public partial class Main : Node2D
             return;
         }
 
+        if (_inLocalSetup)
+        {
+            HandleLocalSetupInput(@event);
+            return;
+        }
+
         if (_started)
         {
             return;
@@ -191,7 +238,7 @@ public partial class Main : Node2D
         }
 
         GetViewport().SetInputAsHandled();
-        EnterCharacterSelect();
+        EnterLocalSetup();
     }
 
     /// <inheritdoc />
@@ -211,6 +258,10 @@ public partial class Main : Node2D
         {
             DrawCharacterSelect();
         }
+        else if (_inLocalSetup)
+        {
+            DrawLocalSetup();
+        }
         else
         {
             DrawMenu();
@@ -225,6 +276,85 @@ public partial class Main : Node2D
         base._ExitTree();
     }
 
+    /// <summary>
+    /// Enters the map/mode/slots screen between the main menu and character select
+    /// (CLIENT_SPEC §11's own flow: Boot → MainMenu → LocalSetup → CharacterSelect → Match).
+    /// </summary>
+    /// <remarks>
+    /// Only one map and one mode exist today, so this deliberately shows them as read-only
+    /// information rather than building a selection widget for options that do not exist yet —
+    /// the structural value here is the screen itself, and back-navigation, not a chooser with
+    /// one disabled option in it.
+    /// </remarks>
+    private void EnterLocalSetup()
+    {
+        _inLocalSetup = true;
+        _menuError = null;
+        QueueRedraw();
+    }
+
+    private void HandleLocalSetupInput(InputEvent @event)
+    {
+        if (@event.IsActionPressed("ui_cancel"))
+        {
+            GetViewport().SetInputAsHandled();
+            _inLocalSetup = false;
+            _started = false;
+            QueueRedraw();
+            return;
+        }
+
+        var isConfirm = @event.IsActionPressed("ui_accept") ||
+            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
+        if (isConfirm)
+        {
+            GetViewport().SetInputAsHandled();
+            _inLocalSetup = false;
+            EnterCharacterSelect();
+        }
+    }
+
+    private void DrawLocalSetup()
+    {
+        var font = ThemeDB.FallbackFont;
+
+        DrawRect(new Rect2(0, 0, GetViewportRect().Size.X, 64), new Color(0.55f, 0.10f, 0.12f));
+        DrawString(font, new Vector2(24, 40), "LOCAL MATCH SETUP", fontSize: 24, modulate: Colors.White);
+
+        var pos = new Vector2(24, 110);
+        DrawString(font, pos, "Map", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 22;
+        DrawString(font, pos, "Horizontal Test Array", fontSize: 18, modulate: MenuTextColor);
+        pos.Y += 40;
+
+        DrawString(font, pos, "Mode", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 22;
+        DrawString(font, pos, "Turn-Based Duel", fontSize: 18, modulate: MenuTextColor);
+        pos.Y += 40;
+
+        DrawString(font, pos, "Slots", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 22;
+        DrawString(font, pos, "Player 1: Human   ·   Player 2: CPU (Bot)", fontSize: 18, modulate: MenuTextColor);
+        pos.Y += 40;
+
+        DrawString(
+            font,
+            pos,
+            "More maps and modes are not built yet — this screen exists so the flow and its",
+            fontSize: 13,
+            modulate: LockedHintColor);
+        pos.Y += 18;
+        DrawString(
+            font,
+            pos,
+            "controls are real now, ready to grow once there is more than one option to pick.",
+            fontSize: 13,
+            modulate: LockedHintColor);
+
+        var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
+        DrawString(font, footerPos, "ENTER / Click to continue to Character Select · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
+    }
+
     private void EnterCharacterSelect()
     {
         try
@@ -234,6 +364,12 @@ public partial class Main : Node2D
             _selectedBotCharacterIndex = Math.Min(1, _roster.Count - 1);
             _inCharacterSelect = true;
             _menuError = null;
+            _hoveredCharacterIndex = -1;
+            _tileAnimations = new CharacterTileAnimation[_roster.Count];
+            for (var i = 0; i < _tileAnimations.Length; i++)
+            {
+                _tileAnimations[i] = new CharacterTileAnimation();
+            }
         }
         catch (NativeSimulationException exception)
         {
@@ -244,10 +380,130 @@ public partial class Main : Node2D
         QueueRedraw();
     }
 
+    /// <summary>A tile's resting position — never affected by its own float animation.</summary>
+    /// <remarks>
+    /// Hit-testing (mouse hover/click) always uses this rest rectangle, not the animated draw
+    /// position: if hovering were computed against a tile that is itself moving because of
+    /// hover, a tile could float just far enough to leave the cursor, be judged un-hovered, and
+    /// begin landing back under the cursor — an oscillation with no stable resting state.
+    /// </remarks>
+    private static Rect2 CharacterTileRestRect(int index)
+    {
+        var column = index % TileColumns;
+        var row = index / TileColumns;
+        var position = TileGridOrigin + new Vector2(column * (TileSize + TileGap), row * (TileSize + TileGap));
+        return new Rect2(position, new Vector2(TileSize, TileSize));
+    }
+
+    private int? HitTestCharacterTile(Vector2 point)
+    {
+        if (_roster is null)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            if (CharacterTileRestRect(i).HasPoint(point))
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Advances every tile's float/land motion by one frame.
+    /// </summary>
+    /// <remarks>
+    /// A tile floats while hovered by the mouse or currently the keyboard-selected human pick,
+    /// and lands otherwise. The rule that makes this feel deliberate rather than jittery: a
+    /// hover change is only ever read once the motion currently playing reaches its end — never
+    /// mid-flight. A tile whose hover state flickers on and off rapidly finishes whatever
+    /// direction it already committed to before the next one begins, so it always completes at
+    /// least one full float or one full land before reversing, matching the fixture's own
+    /// vocabulary: "it won't immediately restart the animation... it cannot be interrupted."
+    /// </remarks>
+    private void UpdateCharacterTileAnimations(float delta)
+    {
+        if (_tileAnimations is null)
+        {
+            return;
+        }
+
+        var anyAnimating = false;
+        for (var i = 0; i < _tileAnimations.Length; i++)
+        {
+            var tile = _tileAnimations[i];
+            var hoverDesired = i == _hoveredCharacterIndex || i == _selectedCharacterIndex;
+
+            if (tile.IsAnimating)
+            {
+                tile.ElapsedSeconds += delta;
+                var duration = tile.AnimatingTowardFloated ? TileFloatUpSeconds : TileFloatDownSeconds;
+                var t = duration <= 0f ? 1f : Mathf.Clamp(tile.ElapsedSeconds / duration, 0f, 1f);
+                var eased = 1f - Mathf.Pow(1f - t, 3f);
+                tile.YOffset = tile.AnimatingTowardFloated
+                    ? Mathf.Lerp(0f, -TileFloatHeight, eased)
+                    : Mathf.Lerp(-TileFloatHeight, 0f, eased);
+
+                if (t >= 1f)
+                {
+                    tile.IsAnimating = false;
+                    tile.YOffset = tile.AnimatingTowardFloated ? -TileFloatHeight : 0f;
+
+                    // Only now — motion finished, tile at a stable rest — is it safe to read
+                    // the latest desired state and, if it changed while this was playing,
+                    // queue the next motion.
+                    if (hoverDesired != tile.AnimatingTowardFloated)
+                    {
+                        tile.IsAnimating = true;
+                        tile.AnimatingTowardFloated = hoverDesired;
+                        tile.ElapsedSeconds = 0f;
+                    }
+                }
+
+                anyAnimating = true;
+            }
+            else
+            {
+                var isFloated = tile.YOffset < -0.01f;
+                if (hoverDesired != isFloated)
+                {
+                    tile.IsAnimating = true;
+                    tile.AnimatingTowardFloated = hoverDesired;
+                    tile.ElapsedSeconds = 0f;
+                    anyAnimating = true;
+                }
+            }
+        }
+
+        if (anyAnimating)
+        {
+            QueueRedraw();
+        }
+    }
+
     private void HandleCharacterSelectInput(InputEvent @event)
     {
         if (_roster is null or { Count: 0 })
         {
+            return;
+        }
+
+        if (@event is InputEventMouseMotion motion)
+        {
+            _hoveredCharacterIndex = HitTestCharacterTile(motion.Position) ?? -1;
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_cancel"))
+        {
+            GetViewport().SetInputAsHandled();
+            _inCharacterSelect = false;
+            _inLocalSetup = true;
+            QueueRedraw();
             return;
         }
 
@@ -283,9 +539,22 @@ public partial class Main : Node2D
             return;
         }
 
-        var isConfirm = @event.IsActionPressed("ui_accept") ||
-            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
-        if (isConfirm)
+        // A click on a tile picks it as the human champion; ENTER alone starts the match — a
+        // click can no longer do double duty as "confirm," now that clicking has its own,
+        // different meaning on this screen.
+        if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left } mouseButton)
+        {
+            if (HitTestCharacterTile(mouseButton.Position) is int clickedIndex)
+            {
+                GetViewport().SetInputAsHandled();
+                _selectedCharacterIndex = clickedIndex;
+                QueueRedraw();
+            }
+
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_accept"))
         {
             GetViewport().SetInputAsHandled();
             ConfirmCharacterAndStartDuel();
@@ -569,7 +838,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             position,
-            "Press Enter or Click to Enter Character Selection.",
+            "Press Enter or Click to Enter Local Match Setup.",
             fontSize: 16,
             modulate: MenuTextColor);
         position.Y += 24;
@@ -587,64 +856,126 @@ public partial class Main : Node2D
         }
     }
 
+    private static Color CharacterTileColor(int index, int count) =>
+        Color.FromHsv(count <= 0 ? 0f : (float)index / count, 0.55f, 0.5f);
+
     private void DrawCharacterSelect()
     {
         var font = ThemeDB.FallbackFont;
-        var pos = new Vector2(24, 36);
 
-        DrawString(font, pos, "CHARACTER SELECT — LOCAL MATCH SETUP", fontSize: 20, modulate: MenuTextColor);
-        pos.Y += 30;
+        DrawRect(new Rect2(0, 0, GetViewportRect().Size.X, 64), new Color(0.55f, 0.10f, 0.12f));
+        DrawString(font, new Vector2(24, 40), "CHARACTER SELECT", fontSize: 24, modulate: Colors.White);
 
         if (_roster is null or { Count: 0 })
         {
-            DrawString(font, pos, "Loading Roster...", fontSize: 16, modulate: MenuTextColor);
+            DrawString(font, new Vector2(24, 100), "Loading roster…", fontSize: 16, modulate: MenuTextColor);
             return;
         }
 
-        // Left Panel: Roster List
-        DrawString(font, pos, "Human Champion [UP/DOWN]:", fontSize: 14, modulate: Colors.Gold);
-        pos.Y += 20;
+        // The grid: one 76x76 tile per roster champion, floating on hover or when it is the
+        // current human pick. Draw order matters here — later calls paint over earlier ones —
+        // so the label goes on top of the tile, and every tile before its own float offset is
+        // applied means a floated tile visually overlaps the row above it, matching the
+        // reference image's own slight overlap when a character lifts off the grid line.
         for (var i = 0; i < _roster.Count; i++)
         {
             var charDef = _roster[i];
-            var isSelected = i == _selectedCharacterIndex;
-            var isBot = i == _selectedBotCharacterIndex;
-            var prefix = isSelected ? " > " : "   ";
-            var tag = (isSelected ? " (YOU)" : "") + (isBot ? " (BOT)" : "");
-            var color = isSelected ? Colors.Yellow : (isBot ? Colors.Coral : MenuTextColor);
+            var restRect = CharacterTileRestRect(i);
+            var yOffset = _tileAnimations?[i].YOffset ?? 0f;
+            var tileRect = new Rect2(restRect.Position + new Vector2(0, yOffset), restRect.Size);
 
-            DrawString(font, pos, $"{prefix}{charDef.DisplayName}{tag}", fontSize: 14, modulate: color);
-            pos.Y += 20;
+            var isHuman = i == _selectedCharacterIndex;
+            var isBot = i == _selectedBotCharacterIndex;
+
+            DrawRect(tileRect, CharacterTileColor(i, _roster.Count));
+
+            var borderColor = isHuman ? Colors.Yellow : isBot ? Colors.Coral : new Color(1, 1, 1, 0.25f);
+            DrawRect(tileRect, borderColor, filled: false, width: isHuman || isBot ? 3f : 1f);
+
+            var letter = char.ToUpperInvariant(charDef.DisplayName.Length > 0 ? charDef.DisplayName[0] : '?').ToString();
+            var letterSize = font.GetStringSize(letter, fontSize: 30);
+            var letterPos = tileRect.Position +
+                new Vector2((tileRect.Size.X - letterSize.X) / 2f, (tileRect.Size.Y + letterSize.Y * 0.7f) / 2f);
+            DrawString(font, letterPos, letter, fontSize: 30, modulate: Colors.White);
+
+            if (isHuman)
+            {
+                var tagSize = font.GetStringSize("YOU", fontSize: 11);
+                DrawString(font, tileRect.Position + new Vector2((tileRect.Size.X - tagSize.X) / 2f, -6), "YOU", fontSize: 11, modulate: Colors.Yellow);
+            }
+            else if (isBot)
+            {
+                var tagSize = font.GetStringSize("BOT", fontSize: 11);
+                DrawString(font, tileRect.Position + new Vector2((tileRect.Size.X - tagSize.X) / 2f, -6), "BOT", fontSize: 11, modulate: Colors.Coral);
+            }
         }
 
-        // Right Panel: Champion Details
-        var selectedChar = _roster[_selectedCharacterIndex];
-        var detailPos = new Vector2(360, 66);
-        DrawString(font, detailPos, $"Name: {selectedChar.DisplayName} ({selectedChar.Id})", fontSize: 16, modulate: Colors.Gold);
+        // Detail panel: whatever is under the mouse takes priority over the keyboard pick, the
+        // same way a real player expects hovering to preview before committing.
+        var detailIndex = _hoveredCharacterIndex >= 0 ? _hoveredCharacterIndex : _selectedCharacterIndex;
+        var detailChar = _roster[detailIndex];
+        var detailPos = new Vector2(TileGridOrigin.X + (TileColumns * (TileSize + TileGap)) + 20, TileGridOrigin.Y);
+        DrawString(font, detailPos, $"{detailChar.DisplayName} ({detailChar.Id})", fontSize: 18, modulate: Colors.Gold);
+        detailPos.Y += 26;
+        DrawString(font, detailPos, $"HP {detailChar.MaxHealth}   Range {detailChar.RangeTier}   Move {detailChar.MovementClass}", fontSize: 14, modulate: MenuTextColor);
         detailPos.Y += 24;
-        DrawString(font, detailPos, $"HP: {selectedChar.MaxHealth} | Range: {selectedChar.RangeTier} | Move: {selectedChar.MovementClass}", fontSize: 14, modulate: MenuTextColor);
-        detailPos.Y += 22;
-        DrawString(font, detailPos, $"Basic: {selectedChar.Basic.DisplayName} ({selectedChar.Basic.DamagePercent}% DMG)", fontSize: 14, modulate: MenuTextColor);
+        DrawString(font, detailPos, $"Basic: {detailChar.Basic.DisplayName} ({detailChar.Basic.DamagePercent}% dmg, {detailChar.Basic.AttackShape})", fontSize: 14, modulate: MenuTextColor);
         detailPos.Y += 20;
-        if (selectedChar.BasicAlt is not null)
+        if (detailChar.BasicAlt is not null)
         {
-            DrawString(font, detailPos, $"BasicAlt: {selectedChar.BasicAlt.DisplayName} ({selectedChar.BasicAlt.DamagePercent}% DMG)", fontSize: 14, modulate: MenuTextColor);
+            DrawString(font, detailPos, $"Basic Alt: {detailChar.BasicAlt.DisplayName} ({detailChar.BasicAlt.DamagePercent}% dmg, {detailChar.BasicAlt.AttackShape})", fontSize: 14, modulate: MenuTextColor);
             detailPos.Y += 20;
         }
-        DrawString(font, detailPos, $"Special: {selectedChar.Special.DisplayName} ({selectedChar.Special.DamagePercent}% DMG)", fontSize: 14, modulate: MenuTextColor);
-        detailPos.Y += 24;
 
-        DrawString(font, detailPos, "Passives Preview:", fontSize: 14, modulate: Colors.Gold);
-        detailPos.Y += 20;
-        foreach (var p in selectedChar.Passives)
+        DrawString(font, detailPos, $"Special: {detailChar.Special.DisplayName} ({detailChar.Special.DamagePercent}% dmg, {detailChar.Special.AttackShape})", fontSize: 14, modulate: MenuTextColor);
+        detailPos.Y += 26;
+        DrawString(font, detailPos, "Passives (chosen mid-match):", fontSize: 13, modulate: Colors.Gold);
+        detailPos.Y += 18;
+        foreach (var passive in detailChar.Passives)
         {
-            DrawString(font, detailPos, $" • {p.DisplayName}", fontSize: 12, modulate: LockedHintColor);
-            detailPos.Y += 18;
+            DrawString(font, detailPos, $" • {passive.DisplayName}", fontSize: 12, modulate: LockedHintColor);
+            detailPos.Y += 17;
         }
 
-        // Footer Controls
-        var footerPos = new Vector2(24, GetViewportRect().Size.Y - 30);
-        DrawString(font, footerPos, "Controls: UP/DOWN (You) | LEFT/RIGHT (Bot Opponent) | ENTER / Click to START MATCH", fontSize: 14, modulate: Colors.Cyan);
+        // Bottom cards: the human's pick and the bot's pick side by side, mirroring the
+        // reference image's P1/CPU panels.
+        var cardTop = TileGridOrigin.Y + (2 * (TileSize + TileGap)) + 30;
+        var cardWidth = (GetViewportRect().Size.X - 72) / 2f;
+        DrawSelectionCard(new Rect2(24, cardTop, cardWidth, 190), "PLAYER 1", _selectedCharacterIndex, new Color(0.55f, 0.10f, 0.12f));
+        DrawSelectionCard(new Rect2(48 + cardWidth, cardTop, cardWidth, 190), "CPU OPPONENT", _selectedBotCharacterIndex, new Color(0.30f, 0.30f, 0.34f));
+
+        var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
+        DrawString(
+            font,
+            footerPos,
+            "UP/DOWN pick your champion · LEFT/RIGHT pick the bot's · hover or click a tile · ENTER to start · ESC to go back",
+            fontSize: 13,
+            modulate: Colors.Cyan);
+    }
+
+    private void DrawSelectionCard(Rect2 rect, string label, int characterIndex, Color background)
+    {
+        if (_roster is null || characterIndex >= _roster.Count)
+        {
+            return;
+        }
+
+        var font = ThemeDB.FallbackFont;
+        var character = _roster[characterIndex];
+
+        DrawRect(rect, background);
+        DrawRect(rect, new Color(1, 1, 1, 0.6f), filled: false, width: 2f);
+
+        var swatchRect = new Rect2(rect.Position + new Vector2(18, 18), new Vector2(TileSize, TileSize));
+        DrawRect(swatchRect, CharacterTileColor(characterIndex, _roster.Count));
+        DrawRect(swatchRect, Colors.White, filled: false, width: 2f);
+
+        var textPos = rect.Position + new Vector2(18 + TileSize + 18, 40);
+        DrawString(font, textPos, label, fontSize: 15, modulate: new Color(1, 1, 1, 0.85f));
+        textPos.Y += 30;
+        DrawString(font, textPos, character.DisplayName, fontSize: 22, modulate: Colors.White);
+        textPos.Y += 26;
+        DrawString(font, textPos, $"HP {character.MaxHealth}   {character.RangeTier} / {character.MovementClass}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
     }
 
     private void DrawLiveMatch(LiveMatch live)
@@ -1106,13 +1437,21 @@ public partial class Main : Node2D
 
         try
         {
-            // Drives the exact same methods a real player's input does — EnterCharacterSelect,
-            // then ConfirmCharacterAndStartDuel, then Rematch — rather than building requests by
-            // hand and calling FixtureMatchBootstrapper.StartLive directly. A hand-built request
-            // proves the backend accepts a well-formed request; it does not prove the interactive
-            // character-select screen itself (DrawCharacterSelect/HandleCharacterSelectInput) ever
-            // ran or rendered. This is the whole point of a C6 smoke test, per CLIENT_SPEC §20.5's
-            // own rule: a real pixel is the proof, not a claim that the code compiles.
+            // Drives the exact same methods a real player's input does — EnterLocalSetup,
+            // EnterCharacterSelect, ConfirmCharacterAndStartDuel, then Rematch — rather than
+            // building requests by hand and calling FixtureMatchBootstrapper.StartLive directly.
+            // A hand-built request proves the backend accepts well-formed input; it does not
+            // prove the interactive screens themselves (DrawLocalSetup, DrawCharacterSelect/
+            // HandleCharacterSelectInput) ever ran or rendered. This is the whole point of a C6
+            // smoke test, per CLIENT_SPEC §20.5's own rule: a real pixel is the proof, not a
+            // claim that the code compiles.
+            EnterLocalSetup();
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (localSetupWidth, localSetupHeight) = CaptureScreenshot(options.LocalSetupScreenshotPath);
+            _inLocalSetup = false;
+
             EnterCharacterSelect();
             if (_roster is null || _roster.Count == 0)
             {
@@ -1127,6 +1466,66 @@ public partial class Main : Node2D
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             var (characterSelectWidth, characterSelectHeight) = CaptureScreenshot(options.CharacterSelectScreenshotPath);
+
+            // Exercises the hover-float animation through the exact input path real mouse
+            // motion goes through, and proves the "cannot be interrupted" requirement: hover a
+            // tile, let its float-up motion start, move the hover away before that motion
+            // finishes, and confirm it still completes the float — never reverses mid-flight —
+            // before landing begins.
+            var hoverTileIndex = Math.Min(2, _roster.Count - 1);
+            var hoverPoint = CharacterTileRestRect(hoverTileIndex).GetCenter();
+            using (var hoverEvent = new InputEventMouseMotion { Position = hoverPoint })
+            {
+                HandleCharacterSelectInput(hoverEvent);
+            }
+
+            // The state transition into "animating toward floated" and the actual time-advance
+            // happen in separate branches of UpdateCharacterTileAnimations (a tile only starts
+            // consuming delta once IsAnimating is already true entering the call) — so this
+            // needs two calls: one to begin the motion, a second to actually move partway
+            // through it. A single call here would (incorrectly) start the animation without
+            // visibly moving it at all.
+            UpdateCharacterTileAnimations(0f);
+            UpdateCharacterTileAnimations(TileFloatUpSeconds * 0.5f);
+            var wasFloatingMidFlight = _tileAnimations![hoverTileIndex].IsAnimating &&
+                _tileAnimations[hoverTileIndex].AnimatingTowardFloated &&
+                _tileAnimations[hoverTileIndex].YOffset < -1f;
+
+            using (var awayEvent = new InputEventMouseMotion { Position = new Vector2(-100, -100) })
+            {
+                HandleCharacterSelectInput(awayEvent);
+            }
+
+            UpdateCharacterTileAnimations(0.001f);
+            var stillCompletingTheFloatAfterHoverLeft = _tileAnimations[hoverTileIndex].IsAnimating &&
+                _tileAnimations[hoverTileIndex].AnimatingTowardFloated;
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            _ = CaptureScreenshot(options.CharacterSelectHoverScreenshotPath);
+
+            UpdateCharacterTileAnimations(TileFloatUpSeconds);
+            UpdateCharacterTileAnimations(TileFloatDownSeconds);
+            var restedCleanlyAfterTheFullCycle = !_tileAnimations[hoverTileIndex].IsAnimating &&
+                Mathf.Abs(_tileAnimations[hoverTileIndex].YOffset) < 0.01f;
+
+            var hoverAnimationInterruptionTestPassed =
+                wasFloatingMidFlight && stillCompletingTheFloatAfterHoverLeft && restedCleanlyAfterTheFullCycle;
+            _hoveredCharacterIndex = -1;
+            if (!hoverAnimationInterruptionTestPassed)
+            {
+                throw new InvalidOperationException(
+                    "The character-select tile float animation was interrupted mid-flight instead of completing it.");
+            }
+
+            // Claims the same guard flag Main's own _Process loop checks before auto-firing a
+            // bot turn (see ProcessBotTurnAsync). Without this, the moment this method awaits
+            // anything below, _Process can race in and submit a SEPARATE bot decision through
+            // the production auto-play path while this method is also mid-way through driving
+            // its own turn — corrupting turn accounting and leaving stray input locks behind
+            // that make later screens (like the passive-select modal) appear not to render.
+            _isProcessingBotTurn = true;
 
             ConfirmCharacterAndStartDuel();
             if (_live is null)
@@ -1154,12 +1553,50 @@ public partial class Main : Node2D
             // Outcome actually leaves ClientInProgressOutcome. A single bot decision call proves
             // a bot CAN act; it does not prove C6's own gate — "completes... a bot match" — which
             // needs a real terminal outcome, not one action.
+            //
+            // One case is intercepted rather than left to the bot: if the human's own gauge
+            // fills and PassiveSelection comes up for them specifically, it is routed through
+            // the real HandlePassiveSelectionInput keyboard path (a synthetic Enter press) —
+            // the same method a real player's ENTER key goes through — instead of the bot's
+            // automatic handling. Letting the bot decide it would prove a decision gets made
+            // somehow; it would not prove DrawPassiveSelectModal/HandlePassiveSelectionInput
+            // themselves render and work.
             var decisionSeed = 777uL;
             var turnsPlayed = 0;
             var botTurnExecuted = false;
+            var passivePromptShownForHuman = false;
+            var passivePromptConfirmedThroughRealInput = false;
             while (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome && turnsPlayed < 300)
             {
                 turnsPlayed++;
+
+                if (_live.CurrentSnapshot.ActivePlayerId == "a-local-player" &&
+                    _live.CurrentSnapshot.Phase == ClientMatchPhase.PassiveSelection)
+                {
+                    passivePromptShownForHuman = true;
+                    QueueRedraw();
+                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                    _ = CaptureScreenshot(options.PassivePromptScreenshotPath);
+
+                    var beforeGeneration = _live.CurrentSnapshot.SnapshotGeneration;
+                    using (var confirmEvent = new InputEventKey { Keycode = Key.Enter, Pressed = true })
+                    {
+                        HandlePassiveSelectionInput(confirmEvent);
+                    }
+
+                    var pollAttempts = 0;
+                    while (_live.CurrentSnapshot.SnapshotGeneration == beforeGeneration && pollAttempts < 120)
+                    {
+                        pollAttempts++;
+                        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                    }
+
+                    passivePromptConfirmedThroughRealInput =
+                        _live.CurrentSnapshot.SnapshotGeneration != beforeGeneration;
+                    continue;
+                }
+
                 var botTrans = await _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed++)
                     .ConfigureAwait(true);
                 await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
@@ -1201,8 +1638,11 @@ public partial class Main : Node2D
                 HumanCharacterId: humanChar.Id,
                 BotCharacterId: botChar.Id,
                 InitialMatchCreated: true,
+                HoverAnimationInterruptionTestPassed: hoverAnimationInterruptionTestPassed,
                 HumanTurnExecuted: humanTurnExecuted,
                 BotTurnExecuted: botTurnExecuted,
+                PassivePromptShownForHuman: passivePromptShownForHuman,
+                PassivePromptConfirmedThroughRealInput: passivePromptConfirmedThroughRealInput,
                 MatchCompleted: matchCompleted,
                 TurnsPlayed: turnsPlayed,
                 FinalTurnNumber: finalSnapshot.TurnNumber,
@@ -1212,7 +1652,9 @@ public partial class Main : Node2D
                 ScreenshotWidth: screenshotWidth,
                 ScreenshotHeight: screenshotHeight,
                 CharacterSelectScreenshotWidth: characterSelectWidth,
-                CharacterSelectScreenshotHeight: characterSelectHeight);
+                CharacterSelectScreenshotHeight: characterSelectHeight,
+                LocalSetupScreenshotWidth: localSetupWidth,
+                LocalSetupScreenshotHeight: localSetupHeight);
         }
         catch (Exception exception)
         {
@@ -1225,8 +1667,11 @@ public partial class Main : Node2D
                 HumanCharacterId: string.Empty,
                 BotCharacterId: string.Empty,
                 InitialMatchCreated: false,
+                HoverAnimationInterruptionTestPassed: false,
                 HumanTurnExecuted: false,
                 BotTurnExecuted: false,
+                PassivePromptShownForHuman: false,
+                PassivePromptConfirmedThroughRealInput: false,
                 MatchCompleted: false,
                 TurnsPlayed: 0,
                 FinalTurnNumber: 0,
@@ -1236,7 +1681,9 @@ public partial class Main : Node2D
                 ScreenshotWidth: 0,
                 ScreenshotHeight: 0,
                 CharacterSelectScreenshotWidth: 0,
-                CharacterSelectScreenshotHeight: 0);
+                CharacterSelectScreenshotHeight: 0,
+                LocalSetupScreenshotWidth: 0,
+                LocalSetupScreenshotHeight: 0);
         }
         finally
         {
@@ -1247,6 +1694,7 @@ public partial class Main : Node2D
             }
 
             _inCharacterSelect = false;
+            _isProcessingBotTurn = false;
         }
     }
 

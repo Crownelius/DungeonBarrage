@@ -2608,3 +2608,158 @@ bugs. Remaining before this is genuinely "first-time-player-ready": a dedicated 
 (map/mode selection — currently fixed to the one horizontal-test map), real `CharacterSelect.tscn`/
 `Results.tscn` scenes with Control-node UI and controller navigation (CLIENT_SPEC §16's release
 gate), and a camera that follows play rather than a fixed placeholder viewport. See HANDOFF §7d.
+
+## C6 — LocalSetup screen, a Smash-Bros-style character-select redesign, and two more real bugs
+
+Continued C6 with two explicit user requests: a `LocalSetup` screen between the main menu and
+character select, and a visual redesign of character select modeled directly on a reference
+screenshot of Super Smash Bros Ultimate's "Solo Battle" picker — a grid of small square portraits
+that float on hover and land when hover moves elsewhere, "it won't immediately restart the
+animation, it will finish and it cannot be interrupted."
+
+### The placeholder-art decision
+
+The request named a specific folder (`C:\Users\rsfit\OneDrive\Pictures\Personal Art`) and asked for
+images 1 through 10 as tile portraits. Checking the folder before wiring anything up found two
+problems worth stopping for rather than silently working around: only six of the ten named files
+existed (`1,3,4,5,9,10.png`; `2,6,7,8.png` were missing), and three of the six that did exist
+(`5,9,10.png`) were AI-generated images of a real, identifiable public figure (Donald Trump) in
+satirical scenarios (boxing a bear, cyberpunk armor, sitting shirtless) — not game-original art.
+Baking a real person's likeness into persistent character-roster art without confirming that was
+actually intended felt like exactly the kind of thing to flag rather than assume. Asked the user
+directly; they chose placeholder colored-letter tiles (matching the flat-color-plus-monogram
+convention `Main.cs` already uses elsewhere) over either substituting different images or using the
+mismatched six anyway, with real portraits deferred to whenever art direction is actually settled.
+`CharacterTileColor(index, count)` generates a distinct hue per roster slot via `Color.FromHsv`, and
+each tile draws its character's first letter centered in white.
+
+### LocalSetup
+
+`EnterLocalSetup()`/`HandleLocalSetupInput`/`DrawLocalSetup()`, inserted into the existing
+`_UnhandledInput`/`_Draw` dispatch chains ahead of character select (menu → LocalSetup →
+CharacterSelect → match, matching CLIENT_SPEC's own flow). Read-only for now — one map
+("Horizontal Test Array"), one mode ("Turn-Based Duel"), one slot pairing (human vs. bot) — because
+that is genuinely all that exists yet; the screen's own on-screen copy says so ("More maps and modes
+are not built yet — this screen exists so the flow and its controls are real now"), rather than
+faking selectable options that go nowhere. `ui_cancel` returns to the menu; `ui_accept`/click
+advances to character select.
+
+### Character select: 76×76 tile grid with a non-interruptible hover-float animation
+
+Rebuilt `DrawCharacterSelect()` and `HandleCharacterSelectInput` around a `CharacterTileAnimation`
+struct per roster entry (`YOffset`, `IsAnimating`, `AnimatingTowardFloated`, `ElapsedSeconds`) driven
+each frame by `UpdateCharacterTileAnimations(delta)`. The rule that makes "cannot be interrupted"
+real rather than just a comment: a tile's desired hover state (`hoverDesired`) is only ever read once
+the motion currently playing reaches `t >= 1f` — never mid-flight. A tile whose hover flickers on and
+off rapidly still finishes whatever direction it already committed to before reversing. Motion itself
+is a cubic ease-out lerp between `0` and `-TileFloatHeight` (14px) over 0.16s up / 0.24s down.
+Hit-testing (`HitTestCharacterTile`, mouse-motion-driven) always uses each tile's rest rect, never its
+animated draw position, so a floating tile can't oscillate by hovering in and out of its own moved
+bounding box. A 5-wide grid of 76×76 tiles, "YOU"/"BOT" tags over the human/bot picks, a detail panel
+(hover takes priority over keyboard selection; shows HP/range/movement/basic+special ability data and
+passive-name previews from the real roster), and two bottom selection cards (P1 red, CPU gray) round
+out the screen. Mouse click on a tile now only *selects* it — `ui_accept` (Enter) is what confirms and
+starts the match, matching the reference screenshot's two-step P1-panel-then-confirm flow rather than
+the previous single-click-to-start behavior.
+
+### Bug 3 — the hover screenshot capture was one `ProcessFrame` short
+
+The other two new screenshot captures (LocalSetup, the character-select rest state) both call
+`QueueRedraw()` then `await ToSignal(..., ProcessFrame)` **twice** before reading
+`GetViewport().GetTexture().GetImage()` — an established pattern from earlier C4/C5 smoke work. The
+new hover-mid-flight capture was written with only one await. Result: the captured "hover" screenshot
+was pixel-identical to the rest-state screenshot, even though the animation-state assertions
+(`wasFloatingMidFlight`, checked directly against the `CharacterTileAnimation` struct, not the
+rendered image) correctly proved the tile really was floating at capture time — the viewport texture
+itself just hadn't caught up to that draw yet. Confirmed with a pixel diff (`PIL.ImageChops.difference`)
+before and after: before the fix, zero bounding box (no difference at all) between the rest and hover
+PNGs; after adding the second await, a real `(38, 92)-(292, 184)` difference region matching the
+hovered tile's floated bounding box exactly, and a cropped/upscaled side-by-side visually confirms the
+"K" tile sitting ~14px higher in the hover capture. Fixed by adding the second `await` to match the
+other two captures' pattern.
+
+### Bug 4 — the smoke test's own manual match-driving raced Main's automatic bot-turn processing
+
+A more consequential bug, found while investigating why the passive-prompt screenshot showed the
+underlying battle HUD with `"input locked — playing transition"` instead of
+`DrawPassiveSelectModal`. `Main._Process` has always auto-fired bot turns on its own
+(`_live is not null && !IsInputLocked() && !_isProcessingBotTurn && ...active player is a bot...` →
+`ProcessBotTurnAsync` → `SubmitAndRedrawAsync`, which sets `_inputLockedUntilMsec`). The C6 smoke
+test's own match-driving loop calls `_live.SubmitMoveAsync`/`SubmitAbilityAsync`/
+`SubmitBotDecisionAsync` **directly**, bypassing `SubmitAndRedrawAsync` entirely — so it never claims
+`_isProcessingBotTurn`. Every `await` point in the smoke test's loop (`WaitTicksAsync`,
+`ToSignal(ProcessFrame)`) is a window where the real `_Process` callback can also run, see a bot as
+the active player, and independently submit its *own* bot decision through the production auto-play
+path — racing the smoke test's own decision for the same turn.
+
+This was not a theoretical risk: two runs of the pre-fix build, using the identical fixed decision
+seed (777, incrementing), produced **different** results — `turnsPlayed: 10` /
+`finalStateHash: a7c0a3e337db7416` on one run, `turnsPlayed: 14` / `finalStateHash: 627dce294aa8fbeb`
+on another — nondeterminism that should not exist given a fixed seed and a deterministic core. Fixed
+by having the smoke test claim `_isProcessingBotTurn = true` for the entire span it drives the live
+match (from `ConfirmCharacterAndStartDuel()` through the final screenshot), releasing it in the
+method's existing `finally` cleanup alongside `_live = null`/`_inCharacterSelect = false` — the exact
+same coordination flag the production auto-handler already checks, not a new mechanism. Confirmed
+fixed by running the headless smoke test twice in a row after the change: both runs now produce the
+byte-identical `finalStateHash: 627dce294aa8fbeb` and `turnsPlayed: 14`.
+
+### Evidence
+
+Windowed run, all five screenshots visually inspected (not just the report's `success: true`):
+LocalSetup shows the read-only map/mode/slots copy and footer hint. Character-select rest state shows
+all nine placeholder tiles (colored squares with monogram letters), YOU/BOT tags, the detail panel for
+Arzum, and both selection cards. The hover capture shows the third tile ("K") visibly floated versus
+the rest-state capture — verified both by eye (cropped/upscaled comparison) and by pixel diff. The
+passive-prompt capture now genuinely shows `DrawPassiveSelectModal`'s "SPECIAL GAUGE FULL — SELECT
+PASSIVE" panel with three real passive names, a cursor on the first, and the confirm hint — not the
+bare HUD. The final screenshot shows a real 13-turn fight ending "VICTORY: Team 0 Wins!" with Emi at
+0/300 HP and Arzum at 50/300 HP, `finalStateHash: 627dce294aa8fbeb`, matching the report exactly.
+Headless and windowed runs, and two consecutive headless runs, all produced identical hashes and turn
+counts.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` / `clippy -D warnings` / `test --workspace` / `deny check` | pass, unchanged (no Rust touched this pass) |
+| `dotnet build DungeonBarrage.sln -c Debug` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Debug --no-build` | 46 pass, 0 fail |
+| `dotnet build DungeonBarrage.sln -c Release` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Release --no-build` | 46 pass, 0 fail |
+| `dotnet format DungeonBarrage.sln --verify-no-changes` | pass |
+| `gitleaks git --log-opts="--all"` (full history) | 44 commits scanned, no leaks — see tooling note below |
+| `godot --headless ... --export-release "Windows Desktop" ...` | pass |
+| headless C6 smoke | pass: all flags true, `matchCompleted: true`, `turnsPlayed: 14`, stable across reruns |
+| windowed C6 smoke, all five screenshots inspected | pass, real pixels match the reported state exactly |
+
+### Notes for whoever picks this up
+
+- **Tooling substitution:** earlier entries in this log ran `betterleaks detect` for the
+  full-history secret scan. That tool could not be located anywhere on this machine for this pass —
+  not on `PATH`, not installable via `pip`/`npm`/`cargo`/`pipx`/`dotnet tool`, and not present on the
+  npm registry under that name. Rather than silently skip the gate or claim a tool ran when it didn't,
+  this was flagged to the user directly; they chose to substitute `gitleaks`
+  (`go install github.com/zricethezav/gitleaks/v8@latest`) as the equivalent gate going forward.
+  Whoever finds a working `betterleaks` install should reconcile which tool is canonical for this
+  project rather than running both indefinitely.
+- Any future smoke-test code that manually drives a live match (calling `_live.Submit*Async` methods
+  directly rather than through `SubmitAndRedrawAsync`) must claim `_isProcessingBotTurn = true` for
+  the duration, or it will race `Main._Process`'s own automatic bot-turn handler and produce
+  nondeterministic results. This is worth grepping for (`_isProcessingBotTurn`) before adding another
+  manual-driving smoke path.
+- A screenshot capture must always await **two** `ProcessFrame` signals before calling
+  `GetViewport().GetTexture().GetImage()`, not one — the render is a frame behind `_Process`.
+- The character-select screen is still hand-drawn via `Main.cs`'s existing `_Draw()`/
+  `_UnhandledInput` state machine, not a dedicated `CharacterSelect.tscn` with Control nodes — that
+  remains C7-adjacent polish, unchanged from the previous entry's note. `LocalSetup` follows the same
+  pattern deliberately, for consistency with every other screen so far.
+- Placeholder art (colored tiles with monogram letters) is a deliberate, user-approved stand-in, not
+  a shortcut taken silently — see "The placeholder-art decision" above for why the originally-supplied
+  images weren't used as-is.
+
+### Still open
+
+Same gap as the previous C6 entry: `LocalSetup.tscn`/`CharacterSelect.tscn`/`Results.tscn` as real
+Control-node scenes with controller navigation (CLIENT_SPEC §16's release gate) remains deferred, now
+joined by real portrait art (currently placeholder tiles by user choice) and reconciling the
+`betterleaks`/`gitleaks` tooling question for future entries. See HANDOFF §7d.
