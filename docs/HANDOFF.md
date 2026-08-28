@@ -37,7 +37,7 @@ that can appear in desktop context. Do not copy or merge work into it.
 Landing branch: `feat/c1-outcome-provenance`, tracking
 `origin/feat/c1-outcome-provenance`.
 
-The reviewed predecessor was `0d60938`. The final checkpoint is
+The reviewed predecessor was `e8cbd47`. The final checkpoint is
 the newer commit containing this handoff; obtain it with `git rev-parse HEAD`.
 
 Do not run `git reset --hard`, `git checkout --`, `git clean`, broad staging, or a bulk line-ending
