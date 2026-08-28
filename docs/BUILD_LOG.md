@@ -2862,3 +2862,115 @@ next piece of this same gap, not a separate one.
 The clock itself (deadline duration, automatic local trigger, UI countdown) — see "Deliberately not
 done in this pass" above. Everything else from the previous two C6 entries' "Still open" sections is
 unchanged.
+
+## C6 — the local planning clock itself: `LiveMatch` wall-clock deadline, automatic trigger, UI countdown
+
+Closed out CLIENT_SPEC §9.1's local planning clock — the piece the previous entry's native export
+deliberately left undone. This is genuinely client policy, not an engine gap: the core has no
+opinion on how long a turn gets, only on how a timeout is applied once claimed
+(`client_contract.rs`'s "adapter-owned metadata" doc comment).
+
+### Why the deadline could not simply decorate `ClientMatchSnapshot.DeadlineAt`
+
+`ClientMatchSnapshot.DeadlineAt`/`InputOpensAt` already existed end-to-end in the wire contract but
+were permanently `null` — nothing ever set them. The obvious-looking fix, having `LiveMatch` write a
+locally computed value into them, would have broken the class's own stated invariant: "the view's
+state is exactly what the authority returned for this command, never a value this class predicted or
+interpolated" (`LiveMatch.cs`'s own doc comment, and the literal mechanism the C5 gate depends on).
+The deadline is genuinely local-only state with no authoritative counterpart, so it lives as its own
+property, `LiveMatch.PlanningDeadlineUtc`, alongside `CurrentSnapshot` rather than inside it.
+
+### The design
+
+- **Duration:** `LiveMatch.DefaultPlanningDeadline` = 30 seconds, a documented policy choice (nothing
+  in CLIENT_SPEC mandates a number).
+- **Arming:** `ArmOrClearDeadline()` runs after every reconciliation (and once at construction). It
+  is keyed on the `(ActivePlayerId, TurnNumber)` pair, not the phase alone, and only arms during
+  `Movement`/`AimingAndSelection` — the two phases where a decision is actually owed. A move
+  followed by an ability within the same turn shares one pair, so the deadline does not silently
+  reset between a turn's own sub-steps; a genuinely new turn (or a passive-selection interrupt
+  resolving back into an actionable phase) always gets a fresh full 30 seconds, never a leftover
+  partial one — matching `time_out_turn`'s own doc comment that local play "pauses its planning
+  clock" for a passive prompt, with "pause" resolved as the simplest defensible policy: the clock
+  just does not run during that phase at all.
+- **Automatic trigger:** `Main._Process` polls `_live.PlanningDeadlineUtc` against
+  `DateTimeOffset.UtcNow` every frame and calls the new `ProcessTimeoutAsync()` once it has passed —
+  the exact same shape as the pre-existing automatic bot-turn trigger (`ProcessBotTurnAsync`), reusing
+  its `SubmitAndRedrawAsync`/`WaitTicksAsync` plumbing rather than inventing a second mechanism. A
+  bot-controlled active player's own deadline is, in practice, never reached: the bot check runs
+  first and always decides within a frame or two, well inside 30 seconds.
+- **UI:** `DrawLiveMatch` gained a `"time to act: {n}s"` HUD line, switching to a warning color under
+  ten seconds remaining. `_Process` now force-redraws every frame while a deadline is armed and input
+  is unlocked, so the countdown is actually visible ticking down, not a static number.
+
+### The `LiveMatch` API
+
+`SubmitTimeoutAsync()` mirrors `SubmitBotDecisionAsync`'s shape: builds a `ClientAuthorityTimeout`
+from the current snapshot, submits it, and reconciles through the same path every other command uses.
+`SubmitAsync`'s reconciliation tail was factored into a shared `ReconcileAsync(byte[])` so both the
+ordinary command path and the timeout path go through identical state-update/terrain-refresh/deadline-
+rearm logic — one reconciliation implementation, not two copies that could drift.
+
+### A real windowed-vs-headless timing difference, found by the smoke test itself
+
+The new smoke path (`--c6t-smoke-report`/`--c6t-screenshot`, `C6TimeoutSmoke.cs`) boots a live match
+through the real production screens, then deliberately never acts for the active player — proving the
+turn ends on its own, through the real `Main._Process` trigger, not by calling `SubmitTimeoutAsync`
+directly (that path is already proven by `PlanningDeadlineTests.cs`). It passed headless immediately.
+Windowed, it failed outright: the poll loop exhausted its original fixed 300-`ProcessFrame` bound
+without ever observing the turn end, even though the start screenshot (captured and inspected despite
+the failure) showed the countdown rendering correctly at "time to act: 30s". Headless Godot appears to
+process frames far faster than an unfocused windowed export launched by an automated tool — 300 frames
+of headless time is a very different amount of *wall-clock* time than 300 frames of windowed time.
+Rewrote the poll bound to measure real elapsed time directly (`DateTimeOffset.UtcNow` against a 60-
+second ceiling) rather than a frame count sized for headless timing, and the windowed run then passed
+cleanly. This is the second time this project has hit a headless/windowed timing-assumption gap in a
+smoke test this session (the first was the hover-screenshot's missing second `ProcessFrame` await) —
+worth remembering as a category, not just a one-off fix.
+
+### Evidence
+
+Windowed run: the start screenshot shows "time to act: 30s" at turn 1. The final screenshot — captured
+after the automatic trigger genuinely fired with nothing this test submitted — shows turn 7, arzum
+(human) down to 150/300 HP from real bot attacks across several intervening turns, emi (bot) at full
+health with a built-up special gauge, and a **freshly re-armed** "time to act: 29s" on the new human
+turn — proving not just the one-shot timeout but that the match kept running correctly afterward and
+each new human turn re-arms its own full countdown. `timeoutTriggeredAutomatically: true` in both
+headless and windowed reports; the pre-existing C6 smoke path re-run alongside it shows zero regression
+(identical `finalStateHash`/`turnsPlayed` to before this change — the new trigger correctly never fires
+during a bot-paced match that always acts within the deadline).
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `dotnet build DungeonBarrage.sln -c Debug` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Debug --no-build` | **52 pass** (was 48), 0 fail |
+| `dotnet build DungeonBarrage.sln -c Release` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Release --no-build` | 52 pass, 0 fail |
+| `dotnet format DungeonBarrage.sln --verify-no-changes` | pass |
+| `gitleaks git --log-opts="--all"` (full history) | 46 commits scanned, no leaks |
+| `godot --headless ... --export-release "Windows Desktop" ...` | pass |
+| headless C6 smoke (regression check) | pass, unchanged `finalStateHash`/`turnsPlayed` |
+| headless C6-timeout smoke | pass: `timeoutTriggeredAutomatically: true` |
+| windowed C6-timeout smoke, both screenshots inspected | pass, real pixels match the reported state |
+
+### Notes for whoever picks this up
+
+- `LiveMatch.PlanningDeadlineUtc` is deliberately a separate property from `CurrentSnapshot`, not a
+  field inside it. Do not "simplify" this later by writing into `ClientMatchSnapshot.DeadlineAt` —
+  that would violate the class's own reconciliation invariant that every field of `CurrentSnapshot` is
+  exactly what the authority returned.
+- Any future smoke test that waits out a real-time interval before checking whether something
+  happened should bound its poll loop on elapsed wall-clock time, not a frame count — this project has
+  now hit that exact mistake twice in one session across two different smoke paths.
+- 30 seconds is a starting policy value, not a tuned one. If a future playtest says it is too generous
+  or too tight, it is a one-line change (`LiveMatch.DefaultPlanningDeadline`), not a design change.
+
+### Still open
+
+CLIENT_SPEC §9.1's local planning clock is now fully implemented and verified end to end — the native
+export, the C# consumer, the wall-clock deadline, the automatic trigger, and the UI countdown. Nothing
+from this specific gap remains open. Everything else from the previous C6 entries' "Still open"
+sections (Control-node scenes, real portrait art, camera follow, `betterleaks`/`gitleaks`
+reconciliation) is unchanged. See HANDOFF §7d.

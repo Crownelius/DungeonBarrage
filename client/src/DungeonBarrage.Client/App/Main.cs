@@ -99,6 +99,7 @@ public partial class Main : Node2D
 
     private ulong _inputLockedUntilMsec;
     private bool _isProcessingBotTurn;
+    private bool _isProcessingTimeout;
     private ulong _lastBotDecisionSeed = 1000uL;
     private uint _matchSeed = 12345;
 
@@ -113,6 +114,13 @@ public partial class Main : Node2D
         if (c6SmokeOptions is not null)
         {
             await RunC6SmokeAndQuitAsync(c6SmokeOptions).ConfigureAwait(true);
+            return;
+        }
+
+        var c6TimeoutSmokeOptions = C6TimeoutSmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c6TimeoutSmokeOptions is not null)
+        {
+            await RunC6TimeoutSmokeAndQuitAsync(c6TimeoutSmokeOptions).ConfigureAwait(true);
             return;
         }
 
@@ -152,16 +160,28 @@ public partial class Main : Node2D
             UpdateCharacterTileAnimations((float)delta);
         }
 
-        // Automatic bot turn processing when active player is bot-controlled. Outcome is never
-        // actually null — it is always populated, with ClientInProgressOutcome as its "nothing
-        // decided yet" value — so this must pattern-match the type, not check for null.
-        if (_live is not null && !IsInputLocked() && !_isProcessingBotTurn &&
+        // A visible countdown needs a redraw roughly every frame while it's ticking, not just on
+        // discrete state-change events like the lock-state check above.
+        if (_live is not null && !IsInputLocked() && _live.PlanningDeadlineUtc is not null)
+        {
+            QueueRedraw();
+        }
+
+        // Automatic bot turn processing when active player is bot-controlled, or an automatic
+        // local timeout once the active player's own planning deadline has passed. Outcome is
+        // never actually null — it is always populated, with ClientInProgressOutcome as its
+        // "nothing decided yet" value — so this must pattern-match the type, not check for null.
+        if (_live is not null && !IsInputLocked() && !_isProcessingBotTurn && !_isProcessingTimeout &&
             _live.CurrentSnapshot.Outcome is ClientInProgressOutcome)
         {
             var activeId = _live.CurrentSnapshot.ActivePlayerId;
             if (activeId is "b-local-bot" || IsBotPlayer(activeId))
             {
                 _ = ProcessBotTurnAsync();
+            }
+            else if (_live.PlanningDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+            {
+                _ = ProcessTimeoutAsync();
             }
         }
     }
@@ -196,6 +216,34 @@ public partial class Main : Node2D
         finally
         {
             _isProcessingBotTurn = false;
+            QueueRedraw();
+        }
+    }
+
+    private async Task ProcessTimeoutAsync()
+    {
+        if (_live is null || _isProcessingTimeout)
+        {
+            return;
+        }
+
+        _isProcessingTimeout = true;
+        try
+        {
+            var transition = await SubmitAndRedrawAsync(() => _live.SubmitTimeoutAsync()).ConfigureAwait(true);
+
+            if (transition is not null)
+            {
+                await WaitTicksAsync(transition.InputLockTicks, transition.PresentationTickRate).ConfigureAwait(true);
+            }
+        }
+        catch (Exception exception) when (exception is MatchCommandRejectedException or NativeSimulationException)
+        {
+            _liveError = exception.Message;
+        }
+        finally
+        {
+            _isProcessingTimeout = false;
             QueueRedraw();
         }
     }
@@ -997,6 +1045,14 @@ public partial class Main : Node2D
             fontSize: 14,
             modulate: MenuTextColor);
 
+        if (live.PlanningDeadlineUtc is { } planningDeadline)
+        {
+            hudY += 18;
+            var remainingSeconds = Math.Max(0.0, (planningDeadline - DateTimeOffset.UtcNow).TotalSeconds);
+            var timeColor = remainingSeconds <= 10.0 ? Colors.OrangeRed : MenuTextColor;
+            DrawString(font, new Vector2(8, hudY), $"time to act: {remainingSeconds:F0}s", fontSize: 12, modulate: timeColor);
+        }
+
         if (IsInputLocked())
         {
             hudY += 18;
@@ -1695,6 +1751,130 @@ public partial class Main : Node2D
 
             _inCharacterSelect = false;
             _isProcessingBotTurn = false;
+        }
+    }
+
+    private async Task RunC6TimeoutSmokeAndQuitAsync(C6TimeoutSmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC6TimeoutSmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C6TimeoutSmokeReport> RunC6TimeoutSmokeAsync(C6TimeoutSmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+
+        try
+        {
+            // A minimal boot to a live match — LocalSetup and character select's own screens are
+            // already proven pixel-for-pixel by the C6 smoke path; this test exists to prove one
+            // thing neither of those does: that an idle turn ends on its own, through the real
+            // Main._Process trigger, without this test ever calling SubmitTimeoutAsync itself.
+            EnterLocalSetup();
+            _inLocalSetup = false;
+            EnterCharacterSelect();
+            if (_roster is null || _roster.Count == 0)
+            {
+                throw new InvalidOperationException($"Character select failed to load a roster: {_menuError}");
+            }
+
+            ConfirmCharacterAndStartDuel();
+            if (_live is null)
+            {
+                throw new InvalidOperationException($"Character select confirmation failed to start a match: {_menuError}");
+            }
+
+            var deadline = _live.PlanningDeadlineUtc
+                ?? throw new InvalidOperationException("A freshly started match must arm a planning deadline.");
+            var configuredSeconds = (deadline - DateTimeOffset.UtcNow).TotalSeconds;
+            var turnNumberBeforeTimeout = _live.CurrentSnapshot.TurnNumber;
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (startWidth, startHeight) = CaptureScreenshot(options.StartScreenshotPath);
+            var countdownWasVisibleAtStart = _live.PlanningDeadlineUtc is not null;
+
+            // Deliberately never submits anything for this player — the whole point is proving
+            // the turn ends on its own once real wall-clock time passes the armed deadline.
+            await Task.Delay(LiveMatch.DefaultPlanningDeadline + TimeSpan.FromSeconds(2)).ConfigureAwait(true);
+
+            // Bounded by real elapsed time, not a fixed frame count: an unfocused windowed export
+            // can run its process loop far slower than headless does (observed well under 60fps
+            // here), so a frame-count bound sized for headless timing under-waits in that build.
+            // What actually matters is real wall-clock time elapsed, which this measures directly.
+            var pollDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(60);
+            while (_live.CurrentSnapshot.TurnNumber == turnNumberBeforeTimeout && DateTimeOffset.UtcNow < pollDeadline)
+            {
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            }
+
+            var timeoutTriggeredAutomatically = _live.CurrentSnapshot.TurnNumber != turnNumberBeforeTimeout;
+            if (!timeoutTriggeredAutomatically)
+            {
+                throw new InvalidOperationException(
+                    "The idle turn never ended automatically — Main._Process's local-timeout trigger did not fire.");
+            }
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            return new C6TimeoutSmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                ConfiguredDeadlineSeconds: configuredSeconds,
+                CountdownWasVisibleAtStart: countdownWasVisibleAtStart,
+                TimeoutTriggeredAutomatically: timeoutTriggeredAutomatically,
+                TurnNumberBeforeTimeout: turnNumberBeforeTimeout,
+                TurnNumberAfterTimeout: _live.CurrentSnapshot.TurnNumber,
+                ActivePlayerIdAfterTimeout: _live.CurrentSnapshot.ActivePlayerId,
+                StartScreenshotWidth: startWidth,
+                StartScreenshotHeight: startHeight,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight);
+        }
+        catch (Exception exception)
+        {
+            return new C6TimeoutSmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                ConfiguredDeadlineSeconds: 0,
+                CountdownWasVisibleAtStart: false,
+                TimeoutTriggeredAutomatically: false,
+                TurnNumberBeforeTimeout: 0,
+                TurnNumberAfterTimeout: 0,
+                ActivePlayerIdAfterTimeout: null,
+                StartScreenshotWidth: 0,
+                StartScreenshotHeight: 0,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0);
+        }
+        finally
+        {
+            if (_live is not null)
+            {
+                await _live.DisposeAsync().ConfigureAwait(true);
+                _live = null;
+            }
+
+            _inCharacterSelect = false;
+            _isProcessingBotTurn = false;
+            _isProcessingTimeout = false;
         }
     }
 

@@ -507,23 +507,30 @@ byte-identical hashes after) — see `docs/BUILD_LOG.md`'s follow-up C6 entry fo
    §16 eventually requires as a release gate. That is real scene-composition work, not a C6 gap.
 2. Real character portrait art does not exist yet; character select uses placeholder colored tiles
    by explicit user choice (see above), pending art direction.
-3. `LocalMatchSession`'s own client-owned local planning clock (CLIENT_SPEC §9.1) is still not
-   implemented — a human or bot never times out locally. **The native path now exists**: the core's
-   own `apply_authority_timeout` was already complete and tested (a distinct `AuthorityTimeout`
-   entry point, deliberately outside the client command union so no remote peer could ever reach
-   it), and it is now exposed as `db_sim_match_timeout` (`ABI_VERSION` 4, thirteenth export) with a
-   low-level C# consumer (`LocalMatchSession.TimeoutAsync`, `ClientAuthorityTimeout`). What remains
-   is purely client policy: a chosen deadline duration, `LiveMatch` decorating its own snapshot's
-   `DeadlineAt` when a turn opens, an automatic local trigger mirroring `Main._Process`'s existing
-   bot-turn auto-trigger, and a visible countdown. See `docs/BUILD_LOG.md`'s "the local-timeout
-   native export" entry.
-4. Camera is a fixed placeholder viewport (`_cameraOffset`, reset by `F`/`Home`), not the
+3. Camera is a fixed placeholder viewport (`_cameraOffset`, reset by `F`/`Home`), not the
    follow/frame/zoom behavior CLIENT_SPEC §15 describes.
+
+**Done — the local planning clock (CLIENT_SPEC §9.1), completing the item this section used to list
+as open.** The core's `apply_authority_timeout` (already complete and tested, a distinct
+`AuthorityTimeout` entry point deliberately kept outside the client command union) is now exposed as
+`db_sim_match_timeout` (`ABI_VERSION` 4, thirteenth export), with a full stack on top: a low-level C#
+consumer (`LocalMatchSession.TimeoutAsync`, `ClientAuthorityTimeout`), `LiveMatch.PlanningDeadlineUtc`
+— a client-local wall-clock deadline kept as its own property rather than written into
+`ClientMatchSnapshot.DeadlineAt`, which would have broken `LiveMatch`'s own "state is exactly what the
+authority returned" invariant — a 30-second default duration (documented client policy, not a
+CLIENT_SPEC mandate), an automatic trigger in `Main._Process` mirroring the pre-existing bot-turn
+auto-trigger exactly, and a `"time to act: {n}s"` HUD countdown. Proven end to end by a new smoke path
+(`--c6t-smoke-report`/`--c6t-screenshot`) that boots a real match and deliberately never acts, letting
+the real production trigger end the turn on its own — which also surfaced a genuine headless-vs-
+windowed timing gap (a windowed export's frame loop, launched unfocused by an automated tool, runs far
+slower than headless; a poll bound sized in frames rather than wall-clock time under-waited) fixed by
+bounding the wait on elapsed real time instead. See `docs/BUILD_LOG.md`'s "the local planning clock
+itself" entry for the full trace.
 
 **Gate:** a first-time player selects a character, completes and understands a bot match, and
 rematches without developer explanation — met, with real windowed-screenshot evidence, for the
-data/flow/mechanics half of that sentence. Controller-only play (§16) and dedicated scene files
-remain open, tracked above.
+data/flow/mechanics half of that sentence, now including a real local planning clock. Controller-only
+play (§16) and dedicated scene files remain open, tracked above.
 
 ---
 
@@ -590,7 +597,7 @@ Additional native gates passed:
 `core.autocrlf` LF-to-CRLF notices are non-failing warnings. Do not normalize the repository to
 silence them.
 
-.NET inventory: 48 passing tests — 39 `DungeonBarrage.Client.Interop.Tests`, 9
+.NET inventory: 52 passing tests — 43 `DungeonBarrage.Client.Interop.Tests`, 9
 `DungeonBarrage.Client.Contracts.Tests`. Godot gates: headless editor import, headless
 `--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c (C4) and §7d (C5/C6).
 Native library is `db_sim_ffi.dll` ABI version 4 (§7d).

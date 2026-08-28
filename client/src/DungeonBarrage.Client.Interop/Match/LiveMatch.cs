@@ -69,8 +69,23 @@ public sealed class MatchCommandRejectedException : Exception
 /// </remarks>
 public sealed class LiveMatch : IDisposable, IAsyncDisposable
 {
+    /// <summary>
+    /// How long a local turn gets before <see cref="PlanningDeadlineUtc"/> expires.
+    /// </summary>
+    /// <remarks>
+    /// CLIENT_SPEC.md §9.1 says a <c>LocalMatchSession</c> "calls authority-only timeout itself
+    /// when its planning deadline expires" but, deliberately, does not mandate a duration —
+    /// planning timestamps are adapter-owned metadata the simulation core has no opinion about
+    /// (`client_contract.rs`'s own doc comment). Thirty seconds is this client's own policy
+    /// choice: generous enough not to punish a first-time player reading their own stat panel,
+    /// long enough that reaching it during ordinary play means someone genuinely stepped away.
+    /// </remarks>
+    public static readonly TimeSpan DefaultPlanningDeadline = TimeSpan.FromSeconds(30);
+
     private readonly LocalMatchSession _session;
     private uint _nextCommandOrdinal;
+    private string? _deadlineArmedForPlayerId;
+    private uint _deadlineArmedForTurnNumber;
 
     private LiveMatch(
         LocalMatchSession session,
@@ -83,12 +98,25 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
         CurrentTerrain = terrain;
         _matchLocalPrefix = matchLocalPrefix;
         LastEvents = [];
+        ArmOrClearDeadline();
     }
 
     private readonly string _matchLocalPrefix;
 
     /// <summary>The most recently reconciled authoritative snapshot.</summary>
     public ClientMatchSnapshot CurrentSnapshot { get; private set; }
+
+    /// <summary>
+    /// The wall-clock instant a caller should submit <see cref="SubmitTimeoutAsync"/> by, or
+    /// <see langword="null"/> while no player currently owes a planning decision — the match is
+    /// complete, or a <see cref="ClientMatchPhase.PassiveSelection"/> interrupt is being resolved,
+    /// which "pauses" the clock exactly as the native session's own doc comment describes (see
+    /// <c>time_out_turn</c> in <c>match_host.rs</c>). Re-armed to a fresh full
+    /// <see cref="DefaultPlanningDeadline"/> — never a leftover partial one — whenever a player
+    /// resumes an actionable phase, whether that is the very next thing after a passive prompt
+    /// resolves or a genuinely new turn.
+    /// </summary>
+    public DateTimeOffset? PlanningDeadlineUtc { get; private set; }
 
     /// <summary>The most recently read terrain cells.</summary>
     public TerrainRead CurrentTerrain { get; private set; }
@@ -235,6 +263,32 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
         };
     }
 
+    /// <summary>
+    /// Ends the active player's turn because <see cref="PlanningDeadlineUtc"/> expired.
+    /// </summary>
+    /// <remarks>
+    /// The local-play counterpart to <see cref="SubmitBotDecisionAsync"/>'s auto-play trigger: a
+    /// caller (<c>Main._Process</c>) polls <see cref="PlanningDeadlineUtc"/> against its own clock
+    /// each frame and calls this once it has passed, exactly mirroring how the existing automatic
+    /// bot-turn trigger already polls <see cref="CurrentSnapshot"/> and calls
+    /// <see cref="SubmitBotDecisionAsync"/> — the same pattern, not a second polling mechanism.
+    /// </remarks>
+    /// <returns>The accepted transition.</returns>
+    /// <exception cref="MatchCommandRejectedException">The authority refused the timeout.</exception>
+    public async Task<ClientMatchTransition> SubmitTimeoutAsync()
+    {
+        var activePlayerId = CurrentSnapshot.ActivePlayerId
+            ?? throw new InvalidOperationException("No active player.");
+        var timeout = ClientAuthorityTimeout.Create(
+            CommandId(_nextCommandOrdinal++),
+            activePlayerId,
+            CurrentSnapshot.TurnNumber,
+            CurrentSnapshot.SnapshotGeneration);
+        var timeoutBytes = JsonSerializer.SerializeToUtf8Bytes(timeout, ClientEnvelope.Options);
+        var responseBytes = await _session.TimeoutAsync(timeoutBytes).ConfigureAwait(true);
+        return await ReconcileAsync(responseBytes).ConfigureAwait(true);
+    }
+
     /// <summary>Disposes the underlying session.</summary>
     public ValueTask DisposeAsync() => _session.DisposeAsync();
 
@@ -262,7 +316,11 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
         var command = build(_nextCommandOrdinal++);
         var requestBytes = JsonSerializer.SerializeToUtf8Bytes(command, ClientEnvelope.Options);
         var responseBytes = await _session.ApplyAsync(requestBytes).ConfigureAwait(true);
+        return await ReconcileAsync(responseBytes).ConfigureAwait(true);
+    }
 
+    private async Task<ClientMatchTransition> ReconcileAsync(byte[] responseBytes)
+    {
         var transition = JsonSerializer.Deserialize<ClientMatchTransition>(responseBytes, ClientEnvelope.Options)
             ?? throw new InvalidDataException("The native transition response decoded to null.");
 
@@ -283,6 +341,40 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
             CurrentTerrain = await _session.TerrainAsync(CurrentTerrain.Generation).ConfigureAwait(true);
         }
 
+        ArmOrClearDeadline();
         return transition;
+    }
+
+    /// <summary>
+    /// Re-derives <see cref="PlanningDeadlineUtc"/> from <see cref="CurrentSnapshot"/> after every
+    /// reconciliation. Armed with a fresh <see cref="DefaultPlanningDeadline"/> whenever the
+    /// (player, turn) pair owing a decision changes into an actionable phase; cleared while no
+    /// actionable phase is open at all. Keyed on the pair, not the phase alone, so it does not
+    /// reset between a move and a follow-up ability within the same still-active turn — one
+    /// deadline governs the whole turn, not each sub-step of it.
+    /// </summary>
+    private void ArmOrClearDeadline()
+    {
+        var snapshot = CurrentSnapshot;
+        var actionable = snapshot.Outcome is ClientInProgressOutcome
+            && snapshot.ActivePlayerId is not null
+            && snapshot.Phase is ClientMatchPhase.Movement or ClientMatchPhase.AimingAndSelection;
+
+        if (!actionable)
+        {
+            _deadlineArmedForPlayerId = null;
+            PlanningDeadlineUtc = null;
+            return;
+        }
+
+        if (_deadlineArmedForPlayerId == snapshot.ActivePlayerId
+            && _deadlineArmedForTurnNumber == snapshot.TurnNumber)
+        {
+            return;
+        }
+
+        _deadlineArmedForPlayerId = snapshot.ActivePlayerId;
+        _deadlineArmedForTurnNumber = snapshot.TurnNumber;
+        PlanningDeadlineUtc = DateTimeOffset.UtcNow + DefaultPlanningDeadline;
     }
 }
