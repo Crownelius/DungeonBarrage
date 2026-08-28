@@ -370,14 +370,47 @@ expectation, not the production code. What C5's tests and smoke report check ins
 actually invariant regardless of command id: disposition, concrete gameplay facts (damage, turn
 handoff), and reconciliation against the command's own `PostSnapshot`. Full trace in `docs/BUILD_LOG.md`.
 
-### Next: C6 — complete local match
+### C6 in progress — complete local match
 
-Do not reopen C1–C5 unless a gate regresses.
+**Already in place, discovered while scoping C6 (do not re-derive or redo):** all nine starter
+kits (`crates/db-sim-core/src/character.rs`'s `LAUNCH_ROSTER`, `validate_roster()` asserts exactly
+nine), the passive-selection phase and prompt-raising logic (`MatchHost::raise_passive_selection_if_due`),
+and victory/objects/statuses are fully modeled and resolver-complete in Rust — none of that is a C6
+gap. The actual C6 gaps are almost entirely client-side (character select, passive-prompt UI, a
+local planning clock, `Results.tscn`/rematch, camera, full HUD) plus one true engine gap: a bot.
 
-1. Add all nine starter kits — currently only the fixture's two placeholder kits exist.
-2. Add the passive prompt, a Rust-driven local bot opponent, and a local clock/timeout.
-3. Add victory/results/rematch flow, objects, statuses, and a camera.
-4. Build out the full HUD beyond C5's essentials (active player, phase, health, gauge).
+**Done — the Rust bot** (`crates/db-sim-core/src/bot.rs`, `pub mod bot;` in `lib.rs`). `bot::decide`
+observes a `SimulationState` exactly as a human client would and proposes one ordinary
+`MatchCommandKind`, holding no privileged access — the caller submits its result through the same
+`MatchHost` entry points a human command goes through, so a bot's shot is validated identically
+(`docs/PRODUCT_SPEC.md`: "Bot difficulty changes candidate search and aim error; it does not ignore
+wind, collision, ammunition, or hazards"). Two `BotDifficulty` presets (`Casual`/`Standard`) tune
+grid-search resolution and aim-error jitter; every candidate projectile is scored with the real
+`ballistics::integrate`, not an approximation. 9 tests, including two full `MatchHost`-driven duels
+(a melee Arzum and a projectile Zeke) that assert zero rejected commands and a real win. See
+`docs/BUILD_LOG.md`'s C6 entry for a real bug this found and fixed: the melee-closing heuristic
+originally walked the bot onto the target's exact tile, which then detonated Huck's own Crater
+terrain effect under both fighters simultaneously.
+
+**Still open, in the order to tackle them:**
+
+1. Bump `ABI_VERSION` and add a coarse `db_sim_bot_decide`-shaped export so a client can ask "what
+   would the bot do" without porting any gameplay rule to C# — the decision still gets submitted
+   through the ordinary `db_sim_apply` path, never a special mutation route. `bot::decide` itself
+   needs no changes; this is purely a new FFI/wire surface plus a `LocalMatchSession`-side caller
+   that drives one bot turn (Move-then-Ability, per `bot.rs`'s own doc comment on the calling
+   contract) whenever the local active player is bot-controlled.
+2. Expose `LAUNCH_ROSTER` through the client contract so `CharacterSelect.tscn` is backed by real
+   data instead of the fixture's two placeholder kits.
+3. Add `LocalSetup.tscn` (map/mode/human-bot slots) and `CharacterSelect.tscn`.
+4. Add the passive-prompt modal (non-dismissible, exactly the character's three passives) wired to
+   `MatchPhase::PassiveSelection`.
+5. Give `LocalMatchSession` (the C# class) its own local planning clock that calls the authority
+   timeout itself when the deadline expires, per CLIENT_SPEC §9.1 — this is a client-owned clock,
+   distinct from and in addition to the already-complete C1 authority-only turn timeout.
+6. Add `Results.tscn` (authoritative result + rematch, constructing a fresh session/seed — never
+   rewinding or reusing a completed host) and a camera per CLIENT_SPEC §15.
+7. Build out the full HUD beyond C5's essentials (active player, phase, health, gauge).
 
 **Gate:** a first-time player selects a character, completes and understands a bot match, and
 rematches without developer explanation. Controller-only play completes the whole flow.
@@ -424,9 +457,9 @@ $env:DUNGEON_BARRAGE_GODOT = [Environment]::GetEnvironmentVariable('DUNGEON_BARR
 git status --short --branch
 ```
 
-Latest inventory: 530 passing tests.
+Latest inventory: 539 passing tests.
 
-- 508 `db-sim-core` unit tests.
+- 517 `db-sim-core` unit tests (includes 9 for the C6 `bot` module).
 - 7 golden-vector tests.
 - 1 shared direct fixture test.
 - 13 real `db-sim-ffi` tests.

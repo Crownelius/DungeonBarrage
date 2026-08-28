@@ -38,6 +38,7 @@
 pub mod ballistics;
 pub mod block_ops;
 pub mod blocks;
+pub mod bot;
 pub mod canonical;
 pub mod character;
 pub mod client_contract;

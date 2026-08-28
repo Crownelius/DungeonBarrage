@@ -2143,3 +2143,117 @@ proof that the move and ability actually played and reconciled, not a claim base
 
 C6: all nine starter kits, passive prompt, Rust bot, local clock/timeout, victory/results/rematch,
 objects, statuses, camera, and the full HUD. See HANDOFF §7d for the ordered next sequence.
+
+---
+
+## C6 — scoping, and the Rust bot
+
+Before writing anything, surveyed what C6 actually still needs versus what the earlier C1–C5 work
+had already built without anyone re-checking the roadmap against it. Result: all nine starter kits
+(`character.rs`'s `LAUNCH_ROSTER`), the passive-selection phase, and victory/objects/statuses are
+already fully modeled and resolver-complete in Rust — none of that is a C6 gap, contrary to what
+HANDOFF's old C6 task list implied. The real gaps are almost entirely client-side scenes/UI, plus
+one genuine engine gap: nothing anywhere produces a bot's move. Built that first, since every other
+C6 piece (a completable bot match) depends on it.
+
+### The bot's shape
+
+`crates/db-sim-core/src/bot.rs`, wired into `lib.rs` as `pub mod bot;`. `bot::decide(state,
+player_id, difficulty, decision_seed) -> MatchCommandKind` observes the authoritative state exactly
+as a human client would and proposes one command. It never mutates anything and holds no privileged
+access: the caller submits the result through the same `MatchHost::submit_move`/`submit_ability`/
+`pass_turn`/`submit_passive_choice` entry points a human command goes through, so a bot's shot is
+validated identically to a person's. This is a direct reading of `docs/PRODUCT_SPEC.md`'s "Bot
+difficulty changes candidate search and aim error; it does not ignore wind, collision, ammunition,
+or hazards" — the module does a literal grid *candidate search* over launch angle and power for a
+projectile, scoring every candidate by forward-simulating it through the real `ballistics::integrate`
+(not an approximation), and applies "aim error" as a post-search jitter from the bot's own seeded
+`Rng`. Two difficulty presets (`Casual`/`Standard`) tune search resolution and jitter width — not a
+numeric slider, since C6 only asks for "a Rust bot," not a difficulty-select UI.
+
+The bot's `Rng` is seeded from a caller-supplied `decision_seed` and never reads or advances
+`state.rng_state`: consuming draws from the authoritative RNG here would desync the sequence a
+replay or the opposing client also depends on — the same class of reasoning as C5's `hash_state`/
+`processed_command_ids` finding, applied to the RNG state instead of the command-id ledger.
+
+A caller drives one bot turn with at most two `decide` calls: an optional first call that returns
+`Move` (closing melee range on a target currently out of every available strike ability's reach),
+then a second call against the post-move state that returns `Ability` or `Pass`. `decide` only ever
+recommends `Move` under that one narrow condition, so a second call — now either in range or out of
+`movement_remaining` — never recommends another `Move`. This keeps the calling contract simple
+without the module tracking its own turn-phase state across calls, mirroring how a human's own
+move-then-attack submissions already work (proven end to end by C5's `LiveMatch`).
+
+### The bug this found: walking onto the target and detonating a shared crater
+
+The first version of the melee-closing heuristic closed the *entire* horizontal gap to the target
+(clamped only by `movement_remaining`), rather than stopping at the ability's own range. Against
+Huck specifically, this meant the bot could walk directly onto the target's exact tile before
+attacking. Huck's basic, Haymaker, carries a `TerrainProfile::Crater` effect with an 8-cell radius
+(`RADIUS_2_0_BW`) centered on the impact point — with both characters standing on the same tile, the
+very first strike carved the ground out from under both of them simultaneously, and the "duel"
+ended in a `Draw` via a mutual unrecoverable fall on turn 2, not from combat damage at all.
+
+Found by writing the obvious end-to-end test — a full `MatchHost`-driven duel, a bot-controlled
+character against a passive opponent that only ever passes — and it not producing the win any
+reasonable person would expect. Traced with a temporary per-iteration trace (`eprintln!` of actor,
+positions, and health each loop) rather than guessing: it showed the bot moving to the *exact* same
+`FixedPoint` as its target on the move that preceded the fatal strike. Root cause confirmed by
+reading `HUCK_HAYMAKER`'s definition directly, not inferred from the crash.
+
+This was a real bug in the bot's movement heuristic, not a discovery about hash semantics like C5's
+two findings — Haymaker's crater is intentional design (matches Huck's "Immovable"/"Demolition"
+passive theming), but a competent opponent should never walk itself into detonating that crater
+under both fighters by accident. Fixed by computing how far to close only enough of the gap to bring
+it down to the ability's own `range`, never past it: `close_by = max(0, |gap| - range)`, capped by
+`movement_remaining`. Re-verified with a second, independent full-duel test using a clean melee kit
+(`Arzum`, whose Chain Strike carries no crater and no self-damage) to confirm the fix generalizes
+rather than merely papering over Huck's specific case, and kept the Huck/Haymaker case in mind as
+the reason the fix works the way it does, documented at the fix site.
+
+### Evidence
+
+9 tests in `bot.rs`'s inline `#[cfg(test)] mod tests`:
+
+- Five fast guard tests against a hand-built state (no `MatchHost`): passes for an unknown player,
+  an eliminated actor, a phase that does not accept ability commands, and after already attacking;
+  strikes immediately when already in melee range.
+- One hand-built-state test proving the melee-closing `Move` fires (and only fires) when genuinely
+  out of range.
+- Two full `MatchHost`-driven duels on the real horizontal test map, both asserting **zero rejected
+  commands** across every bot-submitted command: `an_arzum_duel_against_a_passive_opponent_ends_in_victory_with_no_rejections`
+  (melee closing, then a clean win) and `a_zeke_projectile_search_lands_real_hits_with_no_rejections`
+  (Zeke has no melee ability at all, so this exercises the grid search exclusively against a
+  stationary target — the same pairing already proven to connect in C5's own fixture evidence, 400
+  -> 359 HP via a Mending Bolt hit).
+- One determinism test: identical state and seed produce an identical decision.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass, no warnings (one `collapsible_if` finding fixed during development) |
+| `cargo test --workspace` | **539 pass**, 0 fail (517 `db-sim-core`, up from 508) |
+| `cargo test --release -p db-sim-core` | pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| `cargo deny check` | advisories, bans, licenses, sources ok (unused allow-list warnings only, unchanged) |
+| `betterleaks detect` (full history) | no leaks |
+
+### Notes for whoever picks this up
+
+- `bot::decide` returns `crate::match_session::MatchCommandKind` directly rather than a parallel
+  bot-specific type — it is pure data (no session bookkeeping fields), and reusing it avoids a
+  second gameplay-command shape to keep in sync, consistent with `match_host.rs`'s own module doc
+  warning about "a second resolution path."
+- Nothing outside `bot.rs` calls `bot::decide` yet. The FFI export, `ABI_VERSION` bump, and
+  `LocalMatchSession`-side turn-driving loop are still open — see HANDOFF §7d's ordered list.
+- Do not add a bot difficulty slider or additional presets without a concrete request; `Casual`/
+  `Standard` was a deliberate, narrow choice matching what C6's gate actually asks for.
+
+### Still open
+
+C6, remaining: the FFI bot-decision export and `ABI_VERSION` bump, roster exposure to the client,
+`LocalSetup.tscn`/`CharacterSelect.tscn`, the passive-prompt modal, `LocalMatchSession`'s own local
+planning clock, `Results.tscn`/rematch, camera, and the full HUD. See HANDOFF §7d for the ordered
+next sequence.
