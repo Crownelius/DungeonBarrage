@@ -188,6 +188,16 @@ public sealed class LocalMatchSession : IAsyncDisposable, IDisposable
     public Task<byte[]> PreviewAsync(ReadOnlyMemory<byte> requestJson, CancellationToken cancellationToken = default)
         => WithBytesAsync("db_sim_match_preview", requestJson, PreviewCore, cancellationToken);
 
+    /// <summary>
+    /// Asks the native bot coordinator what it would do for one player, without submitting or
+    /// mutating anything.
+    /// </summary>
+    /// <param name="requestJson">UTF-8 bytes of the bot-decision request, passed through unchanged.</param>
+    /// <param name="cancellationToken">Cancels waiting for the session to become free.</param>
+    /// <returns>The exact decision response bytes.</returns>
+    public Task<byte[]> DecideBotActionAsync(ReadOnlyMemory<byte> requestJson, CancellationToken cancellationToken = default)
+        => WithBytesAsync("db_sim_match_bot_decide", requestJson, BotDecideCore, cancellationToken);
+
     /// <summary>Reads the current authoritative snapshot.</summary>
     /// <param name="cancellationToken">Cancels waiting for the session to become free.</param>
     /// <returns>The exact snapshot response bytes.</returns>
@@ -266,6 +276,26 @@ public sealed class LocalMatchSession : IAsyncDisposable, IDisposable
             }
 
             Check("db_sim_match_preview", status);
+            return Copy(buffer);
+        }
+        finally
+        {
+            DbSimNative.BufferFree(&buffer);
+        }
+    }
+
+    private unsafe byte[] BotDecideCore(ReadOnlySpan<byte> json)
+    {
+        var buffer = default(DbSimBuffer);
+        try
+        {
+            int status;
+            fixed (byte* ptr = json)
+            {
+                status = DbSimNative.MatchBotDecide(_handle, ptr, (nuint)json.Length, &buffer);
+            }
+
+            Check("db_sim_match_bot_decide", status);
             return Copy(buffer);
         }
         finally
@@ -398,6 +428,8 @@ public sealed class LocalMatchSession : IAsyncDisposable, IDisposable
     private byte[] ApplyCore(ReadOnlyMemory<byte> json) => ApplyCore(json.Span);
 
     private byte[] PreviewCore(ReadOnlyMemory<byte> json) => PreviewCore(json.Span);
+
+    private byte[] BotDecideCore(ReadOnlyMemory<byte> json) => BotDecideCore(json.Span);
 
     /// <summary>Encodes text as UTF-8 for callers holding a JSON string rather than bytes.</summary>
     /// <param name="json">The envelope text.</param>

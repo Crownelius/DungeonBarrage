@@ -81,6 +81,27 @@ public abstract record ClientMatchCommand(
             targetPlayerId,
             secondaryTargetPlayerId);
 
+    /// <summary>Builds a passive-choice command.</summary>
+    /// <param name="commandId">Deterministic match-unique idempotency key.</param>
+    /// <param name="playerId">Claimed actor.</param>
+    /// <param name="expectedTurnNumber">Turn number observed when constructed.</param>
+    /// <param name="expectedSnapshotGeneration">Session generation observed when constructed.</param>
+    /// <param name="passiveId">Stable passive definition identifier.</param>
+    /// <returns>The command, base-typed so serialization always includes the discriminator.</returns>
+    public static ClientMatchCommand PassiveChoice(
+        string commandId,
+        string playerId,
+        uint expectedTurnNumber,
+        ulong expectedSnapshotGeneration,
+        string passiveId) =>
+        new ClientPassiveChoiceCommand(
+            1,
+            commandId,
+            playerId,
+            expectedTurnNumber,
+            expectedSnapshotGeneration,
+            passiveId);
+
     /// <summary>Builds a pass command.</summary>
     /// <param name="commandId">Deterministic match-unique idempotency key.</param>
     /// <param name="playerId">Claimed actor.</param>

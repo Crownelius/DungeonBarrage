@@ -165,6 +165,18 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
             targetPlayerId,
             secondaryTargetPlayerId: null));
 
+    /// <summary>Submits the one-time passive choice for the active player.</summary>
+    /// <param name="passiveId">Stable passive definition identifier.</param>
+    /// <returns>The accepted transition.</returns>
+    /// <exception cref="MatchCommandRejectedException">The authority refused the command.</exception>
+    public Task<ClientMatchTransition> SubmitPassiveChoiceAsync(string passiveId) =>
+        SubmitAsync(ordinal => ClientMatchCommand.PassiveChoice(
+            CommandId(ordinal),
+            CurrentSnapshot.ActivePlayerId ?? throw new InvalidOperationException("No active player."),
+            CurrentSnapshot.TurnNumber,
+            CurrentSnapshot.SnapshotGeneration,
+            passiveId));
+
     /// <summary>Submits a pass for the active player.</summary>
     /// <returns>The accepted transition.</returns>
     /// <exception cref="MatchCommandRejectedException">The authority refused the command.</exception>
@@ -174,6 +186,54 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
             CurrentSnapshot.ActivePlayerId ?? throw new InvalidOperationException("No active player."),
             CurrentSnapshot.TurnNumber,
             CurrentSnapshot.SnapshotGeneration));
+
+    /// <summary>
+    /// Asks the native bot coordinator what the active player would do, then submits that
+    /// decision through the same ordinary command path a human's own input goes through.
+    /// </summary>
+    /// <remarks>
+    /// One call drives exactly one action — a plain reposition, one ability, one passive
+    /// choice, or a pass — never a whole turn. The Rust bot's own calling contract
+    /// (<c>db_sim_core::bot::decide</c>'s doc comment) is that a full bot turn takes at most
+    /// two decisions: an optional move, then a follow-up ability or pass against the
+    /// post-move state. A caller drives that same two-call shape by invoking this method
+    /// again after the first result, exactly as a human's own move-then-fire submissions do.
+    /// </remarks>
+    /// <param name="difficulty">Search resolution and aim-error preset.</param>
+    /// <param name="decisionSeed">
+    /// Seeds only the bot's own aim-jitter/passive-tie-break RNG, never the match's
+    /// authoritative RNG — pass a fresh value per call so repeated decisions do not jitter
+    /// identically.
+    /// </param>
+    /// <returns>The accepted transition for whichever action the bot decided on.</returns>
+    /// <exception cref="MatchCommandRejectedException">The authority refused the command.</exception>
+    public async Task<ClientMatchTransition> SubmitBotDecisionAsync(ClientBotDifficulty difficulty, ulong decisionSeed)
+    {
+        var activePlayerId = CurrentSnapshot.ActivePlayerId
+            ?? throw new InvalidOperationException("No active player.");
+        var request = new ClientBotDecisionRequest(1, activePlayerId, difficulty, decisionSeed);
+        var requestBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
+        var responseBytes = await _session.DecideBotActionAsync(requestBytes).ConfigureAwait(true);
+        var decision = JsonSerializer.Deserialize<ClientBotDecision>(responseBytes, ClientEnvelope.Options)
+            ?? throw new InvalidDataException("The native bot decision response decoded to null.");
+
+        // SecondaryTargetPlayerId is never surfaced here: the bot never sets one today (its own
+        // Ability decisions always carry `null`), and SubmitAbilityAsync's own signature already
+        // omits it for the same reason human input never supplies one through this path.
+        return decision switch
+        {
+            ClientBotMoveDecision move =>
+                await SubmitMoveAsync(move.Dx).ConfigureAwait(true),
+            ClientBotAbilityDecision ability =>
+                await SubmitAbilityAsync(ability.Slot, ability.AngleMillidegrees, ability.PowerBasisPoints, ability.TargetPlayerId)
+                    .ConfigureAwait(true),
+            ClientBotPassiveChoiceDecision passive =>
+                await SubmitPassiveChoiceAsync(passive.PassiveId).ConfigureAwait(true),
+            ClientBotPassDecision =>
+                await SubmitPassAsync().ConfigureAwait(true),
+            _ => throw new InvalidDataException($"Unrecognized bot decision type: {decision.GetType()}"),
+        };
+    }
 
     /// <summary>Disposes the underlying session.</summary>
     public ValueTask DisposeAsync() => _session.DisposeAsync();

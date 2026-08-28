@@ -2331,3 +2331,86 @@ C6, remaining: rebuild/recopy the client's staged native DLL, bump the C# native
 `LocalSetup.tscn`/`CharacterSelect.tscn`, the passive-prompt modal, `LocalMatchSession`'s own local
 planning clock, `Results.tscn`/rematch, camera, and the full HUD. See HANDOFF §7d for the ordered
 next sequence.
+
+---
+
+## C6 — the C# bot-decide consumer
+
+Wired `db_sim_match_bot_decide` into the client: `DbSimNative.MatchBotDecide` (a `LibraryImport`
+matching `MatchPreview`'s exact shape), `LocalMatchSession.DecideBotActionAsync` (same
+`WithBytesAsync`/`Check`/`Copy` plumbing every other read-only call already uses), and
+`DungeonBarrage.Client.Contracts/BotContracts.cs` — `ClientBotDifficulty`,
+`ClientBotDecisionRequest`, and a polymorphic `ClientBotDecision` hierarchy that mirrors
+`WireBotDecision`/`WireBotAction` on the Rust side field for field. `LiveMatch` gained
+`SubmitBotDecisionAsync`: one decide-then-submit call, dispatching on the decision's runtime type
+to the matching existing `Submit*Async` method. Along the way, filled a real pre-existing gap —
+`ClientMatchCommand` had `Move`/`Ability`/`Pass` factories but no `PassiveChoice` one, and
+`LiveMatch` had no way to submit a passive choice at all, even though the record type and the
+native support for it have existed since C3/C5. Added both.
+
+### A compiler mystery that had a mundane answer
+
+`WithBytesAsync("db_sim_match_bot_decide", requestJson, BotDecideCore, cancellationToken)` failed
+to compile — "cannot convert from 'method group' to `Func<ReadOnlyMemory<byte>, byte[]>`" — even
+though `ApplyAsync`/`PreviewAsync` pass their own `ReadOnlySpan<byte>`-taking `*Core` methods to the
+exact same parameter without complaint. Spent a few minutes suspecting a C# 13 "first-class Span
+types" subtlety before checking for the obvious: `grep`-ing the file turned up
+`ApplyCore(ReadOnlyMemory<byte> json) => ApplyCore(json.Span);` and the same for `PreviewCore` —
+plain forwarding overloads a few hundred lines further down that are the actual method-group
+targets, no implicit Span/Memory conversion magic involved. Added the matching
+`BotDecideCore(ReadOnlyMemory<byte> json) => BotDecideCore(json.Span);` overload. A reminder that
+"the types don't obviously match" is worth one `grep` for a second overload before reasoning about
+language-spec edge cases.
+
+### Rebuilding the native DLL, and verifying the swap was safe
+
+Rebuilt `db-sim-ffi` in release and recopied it to `client/native/win-x64/db_sim_ffi.dll` (a staged,
+gitignored artifact — this is the manual step `docs/BUILD_LOG.md`'s C4 entry already warns never
+auto-refreshes). Updated the two test assertions that pinned the old ABI version
+(`FixtureParityTests.cs`, `FrozenResponseFixtureTests.cs`, both `1u` -> `2u`/`2U`) — the latter
+reads the value from the same frozen fixture JSON the Rust-side regeneration already updated, not a
+separate copy. Re-exported the Godot client with the new DLL and reran the exact C5 headless smoke
+report (move/ability/lock/reconciliation) to confirm nothing regressed from the swap: identical
+results to the pre-swap run, byte for byte.
+
+### Evidence
+
+3 new tests in `DungeonBarrage.Client.Interop.Tests/BotDecisionTests.cs`, against the real native
+library end to end (C# -> FFI -> Rust `bot::decide` -> FFI -> C#): a positive-path decision call
+asserting a well-formed `kind`; a non-mutation proof (five decisions bracketed by two identical
+`SnapshotAsync` reads); and the strongest evidence, a bot playing **both sides** of the real
+`horizontal-test-duel-v1` fixture to a real terminal outcome. Zeke has no melee ability at all
+(both his are ranged) and Huck has none but melee, so this one test exercises the grid-search path
+and the melee-closing path in a single run, asserting every submitted command was `Accepted` and
+the match reached a non-`InProgress` outcome well inside a 400-decision cap.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `dotnet build DungeonBarrage.sln -c Debug` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Debug --no-build` | **43 pass**, 0 fail (34 Interop.Tests + 9 Contracts.Tests) |
+| `dotnet build DungeonBarrage.sln -c Release` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Release --no-build` | 43 pass, 0 fail |
+| `dotnet format DungeonBarrage.sln --verify-no-changes` | pass |
+| `godot --headless ... --export-release "Windows Desktop" ...` (new DLL) | pass |
+| headless C5 smoke report against the re-export | pass, identical to the pre-swap run |
+| `betterleaks detect` (full history) | no leaks |
+
+### Notes for whoever picks this up
+
+- `SubmitBotDecisionAsync` drives exactly one action per call, same as every other `LiveMatch`
+  submit method. A full bot turn is up to two calls (move, then ability/pass), driven by the
+  caller — there is no turn-level loop inside `LiveMatch` itself, matching how a human's own
+  move-then-fire input is already two separate top-level calls from `Main.cs`, not one.
+- `SecondaryTargetPlayerId` on a bot's ability decision is not surfaced through
+  `SubmitBotDecisionAsync` — `bot::decide` never sets one today, and `SubmitAbilityAsync`'s own
+  signature already omits it for the same reason human input never supplies one through this path.
+  If the bot ever grows to use it, both would need to grow together.
+
+### Still open
+
+C6, remaining: roster exposure to the client, `LocalSetup.tscn`/`CharacterSelect.tscn`, the
+passive-prompt modal, `LocalMatchSession`'s own local planning clock, `Results.tscn`/rematch,
+camera, the full HUD, and wiring `Main.cs`'s turn loop to actually call `SubmitBotDecisionAsync`
+when the active player is bot-controlled. See HANDOFF §7d for the ordered next sequence.

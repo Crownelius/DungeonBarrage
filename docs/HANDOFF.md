@@ -411,31 +411,45 @@ that the release DLL exports exactly eleven `db_sim_*` symbols, the original ten
 `db-sim-ffi` tests, including one proving a decision call never mutates the session (two snapshots
 taken around several `bot_decide` calls are byte-identical).
 
-**Intentionally not yet done as part of this:** `client/native/win-x64/db_sim_ffi.dll` (the staged
-DLL the Godot client links) and the C# native resolver's expected-ABI-version check are both still
-on version 1 — left alone on purpose, so the existing C# test suite keeps exercising a
-version-matched pair. Bump both together with the C# consumer below, not separately; a stale DLL
-paired with an already-bumped C# expectation (or vice versa) would fail the version-mismatch gate
-by design, which is correct behavior, not a bug to route around.
+**Done — the C# bot-decide consumer.** `client/native/win-x64/db_sim_ffi.dll` is rebuilt and
+recopied (ABI version 2, verified with a re-export and a rerun of the C5 windowed/headless smoke
+report — identical results, no regression). `DbSimNative.MatchBotDecide` is the new
+`LibraryImport`; `LocalMatchSession.DecideBotActionAsync` mirrors `PreviewAsync` exactly (a
+read-only call, same `WithBytesAsync`/`Check`/`Copy` plumbing). `DungeonBarrage.Client.Contracts`
+gained `BotContracts.cs`: `ClientBotDifficulty`, `ClientBotDecisionRequest`, and the polymorphic
+`ClientBotDecision`/`ClientBotMoveDecision`/`ClientBotAbilityDecision`/
+`ClientBotPassiveChoiceDecision`/`ClientBotPassDecision` — the exact mirror of
+`WireBotDecision`/`WireBotAction` on the Rust side. `ClientMatchCommand` also gained the
+`PassiveChoice` factory it was previously missing, and `LiveMatch` gained
+`SubmitPassiveChoiceAsync` (filling the same gap) plus `SubmitBotDecisionAsync` — one
+decide-then-submit call, matching `bot::decide`'s own "at most two calls per turn" contract; the
+caller drives that shape by invoking it again after the first result, exactly as a human's own
+move-then-fire submissions already do.
+
+Two stale test assertions expecting ABI version 1 (`FixtureParityTests.cs`,
+`FrozenResponseFixtureTests.cs`) are updated to 2. 3 new `DungeonBarrage.Client.Interop.Tests`:
+a positive-path decision call, a non-mutation proof (five decisions bracketed by identical
+snapshots), and — the strongest evidence — a bot playing **both sides** of the real fixture
+(Zeke, ranged-only, versus Huck, melee-only) to a real terminal outcome with zero rejected
+submissions, exercising the grid-search and melee-closing paths in one run. 43 total client tests
+(9 Contracts.Tests + 34 Interop.Tests), all passing in both Debug and Release.
 
 **Still open, in the order to tackle them:**
 
-1. Rebuild and recopy `client/native/win-x64/db_sim_ffi.dll`, bump the C# native resolver's expected
-   `ABI_VERSION` to `2`, and add the `LocalMatchSession`-side caller that drives one bot turn
-   (Move-then-Ability, per `bot.rs`'s own doc comment on the calling contract) whenever the local
-   active player is bot-controlled — calling `db_sim_match_bot_decide`, then submitting the result
-   through the existing apply path exactly as a human command would be.
-2. Expose `LAUNCH_ROSTER` through the client contract so `CharacterSelect.tscn` is backed by real
+1. Expose `LAUNCH_ROSTER` through the client contract so `CharacterSelect.tscn` is backed by real
    data instead of the fixture's two placeholder kits.
-3. Add `LocalSetup.tscn` (map/mode/human-bot slots) and `CharacterSelect.tscn`.
-4. Add the passive-prompt modal (non-dismissible, exactly the character's three passives) wired to
-   `MatchPhase::PassiveSelection`.
-5. Give `LocalMatchSession` (the C# class) its own local planning clock that calls the authority
+2. Add `LocalSetup.tscn` (map/mode/human-bot slots) and `CharacterSelect.tscn`.
+3. Add the passive-prompt modal (non-dismissible, exactly the character's three passives) wired to
+   `MatchPhase::PassiveSelection` — the engine and command plumbing (`SubmitPassiveChoiceAsync`)
+   already exist; only the UI is missing.
+4. Give `LocalMatchSession` (the C# class) its own local planning clock that calls the authority
    timeout itself when the deadline expires, per CLIENT_SPEC §9.1 — this is a client-owned clock,
    distinct from and in addition to the already-complete C1 authority-only turn timeout.
-6. Add `Results.tscn` (authoritative result + rematch, constructing a fresh session/seed — never
+5. Add `Results.tscn` (authoritative result + rematch, constructing a fresh session/seed — never
    rewinding or reusing a completed host) and a camera per CLIENT_SPEC §15.
-7. Build out the full HUD beyond C5's essentials (active player, phase, health, gauge).
+6. Build out the full HUD beyond C5's essentials (active player, phase, health, gauge), and wire
+   `Main.cs`'s turn loop to call `LiveMatch.SubmitBotDecisionAsync` (up to twice per turn) whenever
+   the local active player is bot-controlled.
 
 **Gate:** a first-time player selects a character, completes and understands a bot match, and
 rematches without developer explanation. Controller-only play completes the whole flow.
@@ -503,9 +517,10 @@ Additional native gates passed:
 `core.autocrlf` LF-to-CRLF notices are non-failing warnings. Do not normalize the repository to
 silence them.
 
-.NET inventory: 40 passing tests — 31 `DungeonBarrage.Client.Interop.Tests`, 9
+.NET inventory: 43 passing tests — 34 `DungeonBarrage.Client.Interop.Tests`, 9
 `DungeonBarrage.Client.Contracts.Tests`. Godot gates: headless editor import, headless
-`--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c (C4) and §7d (C5).
+`--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c (C4) and §7d (C5/C6).
+Native library is `db_sim_ffi.dll` ABI version 2 (§7d).
 
 ---
 

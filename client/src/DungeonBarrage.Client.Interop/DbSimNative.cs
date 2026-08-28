@@ -76,6 +76,13 @@ internal static partial class DbSimNative
         nuint requestLen,
         DbSimBuffer* previewOut);
 
+    [LibraryImport(Library, EntryPoint = "db_sim_match_bot_decide")]
+    internal static unsafe partial int MatchBotDecide(
+        MatchSafeHandle handle,
+        byte* requestJson,
+        nuint requestLen,
+        DbSimBuffer* decisionOut);
+
     /// <summary>
     /// Destroys a handle. Takes a raw pointer because <see cref="SafeHandle.ReleaseHandle"/> runs
     /// when the wrapper is already being torn down and must not resurrect it.
