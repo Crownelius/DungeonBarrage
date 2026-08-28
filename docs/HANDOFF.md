@@ -598,9 +598,9 @@ Additional native gates passed:
 `core.autocrlf` LF-to-CRLF notices are non-failing warnings. Do not normalize the repository to
 silence them.
 
-.NET inventory: 52 passing tests — 43 `DungeonBarrage.Client.Interop.Tests`, 9
+.NET inventory: 61 passing tests — 49 `DungeonBarrage.Client.Interop.Tests`, 12
 `DungeonBarrage.Client.Contracts.Tests`. Godot gates: headless editor import, headless
-`--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c (C4) and §7d (C5/C6).
+`--export-release "Windows Desktop"`, and automated C4/C5/C6/C7 smoke suites all pass; see §7c (C4) and §7d (C5/C6/C7).
 Native library is `db_sim_ffi.dll` ABI version 4 (§7d).
 
 ---
