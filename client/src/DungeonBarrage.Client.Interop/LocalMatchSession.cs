@@ -181,6 +181,24 @@ public sealed class LocalMatchSession : IAsyncDisposable, IDisposable
     public Task<byte[]> ApplyAsync(ReadOnlyMemory<byte> commandJson, CancellationToken cancellationToken = default)
         => WithBytesAsync("db_sim_match_apply", commandJson, ApplyCore, cancellationToken);
 
+    /// <summary>
+    /// Ends the active player's turn because its own local planning deadline expired.
+    /// </summary>
+    /// <remarks>
+    /// This is the local-play counterpart to <see cref="ApplyAsync"/>, not an alternate route
+    /// to the same effect — the native export it calls,
+    /// <c>db_sim_match_timeout</c>, accepts a distinct request shape that no ordinary command
+    /// JSON can produce. Calling this at all is this session claiming authority over its own
+    /// clock, which is legitimate only because local play has no separate untrusted-client/
+    /// trusted-server split (`docs/CLIENT_SPEC.md` §9.1: "Calls authority-only timeout itself
+    /// when its planning deadline expires").
+    /// </remarks>
+    /// <param name="timeoutJson">UTF-8 bytes of the authority-timeout request, passed through unchanged.</param>
+    /// <param name="cancellationToken">Cancels waiting for the session to become free.</param>
+    /// <returns>The exact transition response bytes.</returns>
+    public Task<byte[]> TimeoutAsync(ReadOnlyMemory<byte> timeoutJson, CancellationToken cancellationToken = default)
+        => WithBytesAsync("db_sim_match_timeout", timeoutJson, TimeoutCore, cancellationToken);
+
     /// <summary>Requests a read-only preview and returns the preview bytes.</summary>
     /// <param name="requestJson">UTF-8 bytes of the preview request, passed through unchanged.</param>
     /// <param name="cancellationToken">Cancels waiting for the session to become free.</param>
@@ -256,6 +274,26 @@ public sealed class LocalMatchSession : IAsyncDisposable, IDisposable
             }
 
             Check("db_sim_match_apply", status);
+            return Copy(buffer);
+        }
+        finally
+        {
+            DbSimNative.BufferFree(&buffer);
+        }
+    }
+
+    private unsafe byte[] TimeoutCore(ReadOnlySpan<byte> json)
+    {
+        var buffer = default(DbSimBuffer);
+        try
+        {
+            int status;
+            fixed (byte* ptr = json)
+            {
+                status = DbSimNative.MatchTimeout(_handle, ptr, (nuint)json.Length, &buffer);
+            }
+
+            Check("db_sim_match_timeout", status);
             return Copy(buffer);
         }
         finally
@@ -426,6 +464,8 @@ public sealed class LocalMatchSession : IAsyncDisposable, IDisposable
     }
 
     private byte[] ApplyCore(ReadOnlyMemory<byte> json) => ApplyCore(json.Span);
+
+    private byte[] TimeoutCore(ReadOnlyMemory<byte> json) => TimeoutCore(json.Span);
 
     private byte[] PreviewCore(ReadOnlyMemory<byte> json) => PreviewCore(json.Span);
 

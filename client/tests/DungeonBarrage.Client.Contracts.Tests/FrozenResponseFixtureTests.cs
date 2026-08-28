@@ -30,8 +30,8 @@ public sealed class FrozenResponseFixtureTests
     {
         var snapshot = Deserialize<ClientMatchSnapshot>("snapshot-initial.json");
 
-        // ABI version 3: db_sim_roster's addition (docs/BUILD_LOG.md's C6 entry).
-        Assert.Equal(3U, snapshot.AbiVersion);
+        // ABI version 4: db_sim_match_timeout's addition (docs/BUILD_LOG.md's C6 entry).
+        Assert.Equal(4U, snapshot.AbiVersion);
         Assert.Equal(6U, snapshot.SimulationVersion);
         Assert.Equal(1U, snapshot.ContentVersion);
         Assert.Equal(1024, snapshot.PositionScale);

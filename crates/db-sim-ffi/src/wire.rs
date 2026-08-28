@@ -14,10 +14,11 @@ use db_sim_core::client_contract::{
     PersistentObjectSnapshot, PlayerSnapshot, PositionSnapshot, StatusSnapshot,
 };
 use db_sim_core::match_session::{
-    AbilityPreviewRequest, AbilityPreviewResponse, CellRectangle, ChangeProvenance,
-    ClientImpactCause, DamageBreakdown, EntityMovementCause, ImpactSnapshot, MatchCommand,
-    MatchCommandKind, MatchTransition, PresentationEvent, PresentationEventKind, PreviewRejection,
-    ProjectileSampleSnapshot, ProjectileTraceEvent, TransitionDisposition, TransitionRejection,
+    AbilityPreviewRequest, AbilityPreviewResponse, AuthorityTimeout, CellRectangle,
+    ChangeProvenance, ClientImpactCause, DamageBreakdown, EntityMovementCause, ImpactSnapshot,
+    MatchCommand, MatchCommandKind, MatchTransition, PresentationEvent, PresentationEventKind,
+    PreviewRejection, ProjectileSampleSnapshot, ProjectileTraceEvent, TransitionDisposition,
+    TransitionRejection,
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig};
 use db_sim_core::types::{
@@ -330,6 +331,36 @@ impl MatchCommandDto {
                 expected_snapshot_generation,
                 kind: MatchCommandKind::Pass,
             },
+        }
+    }
+}
+
+/// Wire shape for [`AuthorityTimeout`] — deliberately its own DTO rather than a
+/// `MatchCommandDto` variant, mirroring the core type's own separation: a client submits this
+/// to end its *own local* planning deadline, but no byte sequence for it can reach a remote
+/// authority's command-decode path, because that path only ever decodes `MatchCommandDto`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AuthorityTimeoutDto {
+    schema_version: u32,
+    action_id: String,
+    player_id: String,
+    expected_turn_number: u32,
+    expected_snapshot_generation: u64,
+}
+
+impl AuthorityTimeoutDto {
+    pub(crate) const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub(crate) fn into_core(self) -> AuthorityTimeout {
+        AuthorityTimeout {
+            schema_version: self.schema_version,
+            action_id: self.action_id,
+            player_id: self.player_id,
+            expected_turn_number: self.expected_turn_number,
+            expected_snapshot_generation: self.expected_snapshot_generation,
         }
     }
 }

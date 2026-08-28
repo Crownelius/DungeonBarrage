@@ -114,7 +114,7 @@ public sealed class FixtureParityTests
         Assert.Equal(root.GetProperty("simulationVersion").GetUInt32(), LocalMatchSession.SimulationVersion);
         Assert.Equal(root.GetProperty("contentVersion").GetUInt32(), LocalMatchSession.ContentVersion);
         // ABI version 3: db_sim_roster's addition (docs/BUILD_LOG.md's C6 entry).
-        Assert.Equal(3u, LocalMatchSession.AbiVersion);
+        Assert.Equal(4u, LocalMatchSession.AbiVersion);
     }
 
     private static void AssertBytesEqual(ReadOnlyMemory<byte> expected, ReadOnlyMemory<byte> actual, string label)

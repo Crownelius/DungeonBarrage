@@ -507,9 +507,16 @@ byte-identical hashes after) — see `docs/BUILD_LOG.md`'s follow-up C6 entry fo
    §16 eventually requires as a release gate. That is real scene-composition work, not a C6 gap.
 2. Real character portrait art does not exist yet; character select uses placeholder colored tiles
    by explicit user choice (see above), pending art direction.
-3. `LocalMatchSession`'s own client-owned local planning clock (CLIENT_SPEC §9.1, distinct from the
-   already-complete C1 authority-only timeout) is not implemented — a human or bot never times out
-   locally, only the authority-side timeout (unused by local play) exists.
+3. `LocalMatchSession`'s own client-owned local planning clock (CLIENT_SPEC §9.1) is still not
+   implemented — a human or bot never times out locally. **The native path now exists**: the core's
+   own `apply_authority_timeout` was already complete and tested (a distinct `AuthorityTimeout`
+   entry point, deliberately outside the client command union so no remote peer could ever reach
+   it), and it is now exposed as `db_sim_match_timeout` (`ABI_VERSION` 4, thirteenth export) with a
+   low-level C# consumer (`LocalMatchSession.TimeoutAsync`, `ClientAuthorityTimeout`). What remains
+   is purely client policy: a chosen deadline duration, `LiveMatch` decorating its own snapshot's
+   `DeadlineAt` when a turn opens, an automatic local trigger mirroring `Main._Process`'s existing
+   bot-turn auto-trigger, and a visible countdown. See `docs/BUILD_LOG.md`'s "the local-timeout
+   native export" entry.
 4. Camera is a fixed placeholder viewport (`_cameraOffset`, reset by `F`/`Home`), not the
    follow/frame/zoom behavior CLIENT_SPEC §15 describes.
 
@@ -560,20 +567,21 @@ $env:DUNGEON_BARRAGE_GODOT = [Environment]::GetEnvironmentVariable('DUNGEON_BARR
 git status --short --branch
 ```
 
-Latest inventory: 544 passing tests.
+Latest inventory: 547 passing tests.
 
 - 517 `db-sim-core` unit tests (includes 9 for the C6 `bot` module).
 - 7 golden-vector tests.
 - 1 shared direct fixture test.
-- 18 real `db-sim-ffi` tests (includes 3 for `db_sim_match_bot_decide`, 2 for `db_sim_roster`).
+- 21 real `db-sim-ffi` tests (includes 3 for `db_sim_match_bot_decide`, 2 for `db_sim_roster`, 3 for
+  `db_sim_match_timeout`).
 - 1 dormant `db-sim-wasm` test.
 
 Additional native gates passed:
 
-- release FFI test: 18 pass (historical figure at C2 landing was 13; see §7d for the current
-  12-export/ABI-version-3 surface);
+- release FFI test: 21 pass (historical figure at C2 landing was 13; see §7d for the current
+  13-export/ABI-version-4 surface);
 - Windows release DLL build: pass;
-- Windows/Linux exact export surface: 10 expected symbols at C2 landing, now 12 (§5, §7d);
+- Windows/Linux exact export surface: 10 expected symbols at C2 landing, now 13 (§5, §7d);
 - WSL2 Valgrind release lifecycle: zero definite/indirect leaks, zero errors;
 - `cargo deny`: advisories, bans, licenses, and sources pass (unused allow-list warnings only);
 - toolchain verifier: exact .NET/Rust/Godot/template versions pass;
@@ -582,10 +590,10 @@ Additional native gates passed:
 `core.autocrlf` LF-to-CRLF notices are non-failing warnings. Do not normalize the repository to
 silence them.
 
-.NET inventory: 46 passing tests — 37 `DungeonBarrage.Client.Interop.Tests`, 9
+.NET inventory: 48 passing tests — 39 `DungeonBarrage.Client.Interop.Tests`, 9
 `DungeonBarrage.Client.Contracts.Tests`. Godot gates: headless editor import, headless
 `--export-release "Windows Desktop"`, and a real windowed run all pass; see §7c (C4) and §7d (C5/C6).
-Native library is `db_sim_ffi.dll` ABI version 3 (§7d).
+Native library is `db_sim_ffi.dll` ABI version 4 (§7d).
 
 ---
 

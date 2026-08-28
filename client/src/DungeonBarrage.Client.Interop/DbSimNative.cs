@@ -59,6 +59,13 @@ internal static partial class DbSimNative
         nuint commandLen,
         DbSimBuffer* transitionOut);
 
+    [LibraryImport(Library, EntryPoint = "db_sim_match_timeout")]
+    internal static unsafe partial int MatchTimeout(
+        MatchSafeHandle handle,
+        byte* timeoutJson,
+        nuint timeoutLen,
+        DbSimBuffer* transitionOut);
+
     [LibraryImport(Library, EntryPoint = "db_sim_match_snapshot")]
     internal static unsafe partial int MatchSnapshot(
         MatchSafeHandle handle,

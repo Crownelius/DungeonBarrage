@@ -29,12 +29,12 @@ mod wire;
 
 /// Native calling convention and buffer-ownership version.
 ///
-/// Version 3 adds the twelfth export, [`db_sim_roster`] — another function-set addition, per
-/// `docs/CLIENT_SPEC.md` §6's versioning rule (not §8 as an earlier comment here claimed; §8 is
-/// just the — now stale — export-surface listing, §6 states the actual bump rule). Version 2
-/// added the eleventh export, [`db_sim_match_bot_decide`]. Version 1 exposed exactly the ten
+/// Version 4 adds the thirteenth export, [`db_sim_match_timeout`] — another function-set
+/// addition, per `docs/CLIENT_SPEC.md` §6's versioning rule. Version 3 added the twelfth
+/// export, [`db_sim_roster`]. Version 2 added the eleventh export,
+/// [`db_sim_match_bot_decide`]. Version 1 exposed exactly the ten
 /// version/create/apply/snapshot/terrain/preview/disposal symbols.
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 /// Maximum accepted JSON request size: 256 KiB.
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
 /// Maximum serialized transition/snapshot/preview size: 8 MiB.
@@ -277,6 +277,30 @@ fn apply_serialized(
     Ok(output)
 }
 
+/// Mirrors [`apply_serialized`], but ends the turn via [`db_sim_core::match_session::MatchSessionHost::apply_authority_timeout`]
+/// instead of an ordinary command — see [`db_sim_match_timeout`].
+fn apply_timeout_serialized(
+    handle: &SimHandle,
+    inner: &mut HandleInner,
+    timeout: db_sim_core::match_session::AuthorityTimeout,
+    output_limit: usize,
+) -> Result<DbOwnedBuffer, c_int> {
+    let mut working = inner.session.clone();
+    let transition = working
+        .apply_authority_timeout(timeout)
+        .map_err(|fault| session_fault_status(handle, &fault))?;
+    let bytes =
+        wire::serialize_transition(&transition, &inner.match_id, &inner.map_id).map_err(|_| {
+            handle.poisoned.store(true, Ordering::Release);
+            status::INTERNAL_PANIC
+        })?;
+    let output = boxed_buffer_with_limit(bytes, output_limit)?;
+    // No fallible work follows this point: session replacement and buffer publication are the
+    // atomic success boundary owned by the caller, matching apply_serialized.
+    inner.session = working;
+    Ok(output)
+}
+
 /// Returns the exact native ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn db_sim_abi_version() -> u32 {
@@ -485,6 +509,75 @@ pub unsafe extern "C" fn db_sim_match_apply(
             Ok(output) => output,
             Err(code) => return code,
         };
+        // SAFETY: checked non-null and writable; serialization and allocation already succeeded.
+        unsafe { *transition_out = output };
+        status::OK
+    })
+}
+
+/// Ends the active player's turn because their own local planning deadline expired.
+///
+/// This is the local-play counterpart to [`db_sim_match_apply`], not an alternate route to the
+/// same effect: `db_sim_core::match_session::AuthorityTimeout` is deliberately not part of the
+/// `MatchCommandDto` union a command JSON payload decodes into, so no client command can reach
+/// this behavior through [`db_sim_match_apply`]. Calling this export at all is the caller
+/// (`LocalMatchSession`) claiming authority over its own clock — legitimate only because local
+/// play has no separate untrusted-client/trusted-server split; a future networked session must
+/// never expose this to a remote peer (`docs/SECURITY_BASELINE.md` §2: the server owns the
+/// clock).
+///
+/// # Safety
+///
+/// Every pointer may be null, then follows the documented status precedence. A non-null `handle`
+/// must be live. A non-null `timeout_json` must name `timeout_len` readable bytes. A non-null
+/// `transition_out` must be a writable, allocation-free slot that does not overlap the handle or
+/// input range. A live handle must not be destroyed concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sim_match_timeout(
+    handle: *mut SimHandle,
+    timeout_json: *const u8,
+    timeout_len: usize,
+    transition_out: *mut DbOwnedBuffer,
+) -> c_int {
+    if transition_out.is_null() {
+        return status::NULL_POINTER;
+    }
+    // SAFETY: checked non-null and writable by contract.
+    unsafe { *transition_out = DbOwnedBuffer::empty() };
+    if handle.is_null() {
+        return status::NULL_POINTER;
+    }
+    // SAFETY: caller guarantees this is a live handle for the duration of the call.
+    let handle_ref = unsafe { &*handle };
+    guard(Some(handle_ref), || {
+        // A poisoned live handle is terminal. Check it before inspecting request bytes so
+        // malformed, unsupported, and oversized follow-up calls cannot obscure that terminal
+        // state.
+        let mut inner = match lock_handle(handle_ref) {
+            Ok(inner) => inner,
+            Err(code) => return code,
+        };
+        if timeout_json.is_null() {
+            return status::NULL_POINTER;
+        }
+        if timeout_len > MAX_INPUT_BYTES {
+            return status::MALFORMED_ENVELOPE;
+        }
+        // SAFETY: caller promises exactly `timeout_len` readable bytes.
+        let bytes = unsafe { core::slice::from_raw_parts(timeout_json, timeout_len) };
+        let request: wire::AuthorityTimeoutDto = match decode_json(bytes) {
+            Ok(request) => request,
+            Err(code) => return code,
+        };
+        if request.schema_version() != CLIENT_CONTRACT_VERSION {
+            return status::UNSUPPORTED_VERSION;
+        }
+        let timeout = request.into_core();
+        let output =
+            match apply_timeout_serialized(handle_ref, &mut inner, timeout, MAX_OUTPUT_BYTES) {
+                Ok(output) => output,
+                Err(code) => return code,
+            };
         // SAFETY: checked non-null and writable; serialization and allocation already succeeded.
         unsafe { *transition_out = output };
         status::OK

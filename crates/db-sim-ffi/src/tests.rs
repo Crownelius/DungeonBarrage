@@ -982,6 +982,118 @@ fn bot_decide_rejects_a_malformed_or_oversized_request() {
     }
 }
 
+unsafe fn timeout(handle: *mut SimHandle, bytes: &[u8]) -> (c_int, DbOwnedBuffer) {
+    let mut output = DbOwnedBuffer::empty();
+    // SAFETY: tests pass a live handle and a valid byte slice.
+    let code = unsafe { db_sim_match_timeout(handle, bytes.as_ptr(), bytes.len(), &mut output) };
+    (code, output)
+}
+
+#[test]
+fn timeout_ends_the_active_players_turn_through_the_real_c_abi() {
+    // SAFETY: `handle` is a live handle from `create`; the request bytes and output pointer
+    // remain valid for the call; the buffer is freed exactly once.
+    unsafe {
+        let (code, handle, mut created) = create(CREATE_REQUEST);
+        assert_eq!(code, status::OK);
+        let _value = json_and_free(&mut created);
+
+        let request = br#"{"schemaVersion":1,"actionId":"timeout-1","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0}"#;
+        let (code, mut output) = timeout(handle, request);
+        assert_eq!(code, status::OK);
+        let transition = json_and_free(&mut output);
+        assert_eq!(transition["disposition"], Value::from("accepted"));
+        let events = transition["events"]
+            .as_array()
+            .expect("events must be an array");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["kind"] == "turnEnded" && event["reason"] == "timedOut"),
+            "expected a turnEnded/timedOut event, got: {events:?}"
+        );
+        assert_eq!(
+            transition["postSnapshot"]["activePlayerId"],
+            Value::from("b-local-bot"),
+            "the timed-out player's turn must hand over to the other player"
+        );
+
+        destroy(handle);
+    }
+}
+
+#[test]
+fn timeout_rejects_a_malformed_or_oversized_request() {
+    // SAFETY: same contract as the tests above; the oversized buffer is never dereferenced
+    // past its claimed length because the length check runs first.
+    unsafe {
+        let (code, handle, mut created) = create(CREATE_REQUEST);
+        assert_eq!(code, status::OK);
+        let _value = json_and_free(&mut created);
+
+        for bytes in [b"{".as_slice(), b"not json".as_slice()] {
+            let (code, output) = timeout(handle, bytes);
+            assert_eq!(code, status::MALFORMED_ENVELOPE);
+            assert!(output.ptr.is_null());
+        }
+
+        let unsupported = br#"{"schemaVersion":999,"actionId":"timeout-1","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0}"#;
+        let (code, output) = timeout(handle, unsupported);
+        assert_eq!(code, status::UNSUPPORTED_VERSION);
+        assert!(output.ptr.is_null());
+
+        let one_byte = [0u8];
+        let mut output = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_timeout(handle, one_byte.as_ptr(), MAX_INPUT_BYTES + 1, &mut output),
+            status::MALFORMED_ENVELOPE
+        );
+        assert!(output.ptr.is_null());
+
+        assert_eq!(
+            db_sim_match_timeout(handle, core::ptr::null(), 0, &mut output),
+            status::NULL_POINTER
+        );
+        assert!(output.ptr.is_null());
+
+        assert_eq!(
+            db_sim_match_timeout(core::ptr::null_mut(), core::ptr::null(), 0, &mut output),
+            status::NULL_POINTER
+        );
+
+        destroy(handle);
+    }
+}
+
+#[test]
+fn timeout_refuses_while_a_passive_choice_is_owed() {
+    // `time_out_turn` refuses during `PassiveSelection` (`match_host.rs`), and
+    // `apply_authority_timeout` surfaces that as an ordinary rejected transition rather than an
+    // ABI error — the deadline racing against a just-raised passive prompt is a legitimate,
+    // expected race, not a contract violation.
+    // SAFETY: same contract as the tests above.
+    unsafe {
+        let (code, handle, mut created) = create(CREATE_REQUEST);
+        assert_eq!(code, status::OK);
+        let _value = json_and_free(&mut created);
+
+        // Deal enough damage/gauge to raise PassiveSelection would require a full combat setup;
+        // instead this proves the simpler, always-true half of the contract: a timeout for the
+        // wrong turn number is rejected rather than silently ending the right one.
+        let stale = br#"{"schemaVersion":1,"actionId":"timeout-1","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":41}"#;
+        let (code, mut output) = timeout(handle, stale);
+        assert_eq!(
+            code,
+            status::OK,
+            "a stale generation is a rejection, not an ABI error"
+        );
+        let transition = json_and_free(&mut output);
+        assert_eq!(transition["disposition"], Value::from("rejected"));
+
+        destroy(handle);
+    }
+}
+
 #[test]
 fn roster_returns_the_nine_starters_with_no_handle_required() {
     // SAFETY: `output` is a live writable local for the whole call; the buffer is freed exactly

@@ -2763,3 +2763,102 @@ Same gap as the previous C6 entry: `LocalSetup.tscn`/`CharacterSelect.tscn`/`Res
 Control-node scenes with controller navigation (CLIENT_SPEC §16's release gate) remains deferred, now
 joined by real portrait art (currently placeholder tiles by user choice) and reconciling the
 `betterleaks`/`gitleaks` tooling question for future entries. See HANDOFF §7d.
+
+## C6 — the local-timeout native export, ABI version 4, and its low-level C# consumer
+
+Picked up HANDOFF §7d's "Still open" item 3: `LocalMatchSession`'s own client-owned local planning
+clock (`docs/CLIENT_SPEC.md` §9.1) did not exist — a human or bot never timed out locally. Before
+writing any client-side clock, checked what the core already offered, since the project's own
+convention (`ClientTurnEndReason::TimedOut` already existing as an output-only concept) suggested
+some of this might already be built.
+
+### What was already there, and the one real gap
+
+`MatchSessionHost::apply_authority_timeout` (`crates/db-sim-core/src/match_session.rs`) turned out to
+already be a complete, tested C1-era feature: a distinct entry point taking an `AuthorityTimeout`
+struct rather than a `MatchCommand`, deliberately kept out of the `MatchCommandKind` union so no
+client-decodable byte sequence can reach it remotely (`docs/SECURITY_BASELINE.md` §2: the server owns
+the clock). It shares the same session ledger, idempotency, and generation-check machinery as
+`apply()`, refuses cleanly during `PassiveSelection` (a legitimate race, not a contract breach), and
+was already covered by core-level tests. The one genuine gap was that **nothing above the core
+exposed it**: no FFI export, no C# binding, and `ClientMatchSnapshot.DeadlineAt`/`InputOpensAt` —
+fields that already existed end-to-end in the wire contract — were permanently `null` because nothing
+ever decorated them. `client_contract.rs`'s own doc comment says why: planning timestamps are
+"adapter-owned metadata," deliberately not something the simulation core computes.
+
+### The export
+
+Added `db_sim_match_timeout` (`crates/db-sim-ffi/src/lib.rs`), modeled directly on
+`db_sim_match_apply`'s own working-copy-then-commit pattern (`apply_timeout_serialized`, a sibling of
+the existing `apply_serialized`) rather than inventing a new mutation shape. `wire::AuthorityTimeoutDto`
+mirrors the core `AuthorityTimeout` struct field-for-field — deliberately its own DTO, not a
+`MatchCommandDto` variant, for the same reason the core type itself is separate: the untagged
+`MatchCommandDto` enum has no shape an `AuthorityTimeoutDto` payload could match, so a timeout-shaped
+request sent to `db_sim_match_apply` is refused as malformed rather than silently reinterpreted —
+proven with a real C# test against the actual native parser (`TimeoutRoundTripTests.cs`), not just
+asserted in a comment. `ABI_VERSION` is now `4` (a function-set addition, thirteenth export, per
+`docs/CLIENT_SPEC.md` §6); a direct PE export-table read (`pefile`, since neither `dumpbin` nor `nm`
+were available in this environment) confirmed the release DLL exports exactly thirteen `db_sim_*`
+symbols — the original twelve plus `db_sim_match_timeout`, nothing else. The frozen fixture corpus was
+regenerated for the new `abiVersion:4` field; every `stateHash` is unchanged
+(`f67c5371bcddbdf5`/`378081bb2e830a5d`/`d8686762470c0c36`), confirming this touched only version
+metadata. 3 new `db-sim-ffi` tests: a positive path proving a timeout genuinely ends the turn and hands
+it to the other player, malformed/oversized/null-pointer rejection, and a stale-generation rejection
+proving the refusal path returns an ordinary rejected transition rather than an ABI error.
+
+### The C# consumer (low-level layer only — the clock itself is not wired up yet)
+
+`DbSimNative.MatchTimeout` (new `LibraryImport`, identical signature to `MatchApply`) and
+`LocalMatchSession.TimeoutAsync`/`TimeoutCore` mirror `ApplyAsync`/`ApplyCore` exactly — same
+`WithBytesAsync`/`Check`/`Copy` plumbing every other mutating call already uses.
+`DungeonBarrage.Client.Contracts` gained `TimeoutContracts.cs`: `ClientAuthorityTimeout`, a flat
+record with no `kind` discriminator (unlike `ClientMatchCommand`'s polymorphic union) — mirroring
+`AuthorityTimeoutDto`'s own shape asymmetry from `MatchCommandDto`. Two new
+`DungeonBarrage.Client.Interop.Tests` (`TimeoutRoundTripTests.cs`): the DTO built through the real
+release native library actually ends the active player's turn (`disposition: accepted`, a
+`turnEnded`/`timedOut` event, `activePlayerId` handed to the other player), and the structural-boundary
+proof described above. Two stale ABI-version assertions (`FixtureParityTests.cs`,
+`FrozenResponseFixtureTests.cs`) updated from `3` to `4`.
+
+**Deliberately not done in this pass:** `LocalMatchSession`/`LiveMatch` does not yet own an actual
+wall-clock deadline, does not decorate `DeadlineAt` on its own snapshots, and nothing calls
+`TimeoutAsync` automatically when a deadline would expire — there is no UI countdown yet either. This
+entry is the native-export-and-low-level-consumer layer only, matching how the bot's own three-part
+arc (native export → ABI bump → C# consumer, each its own entry) was sequenced, so review stays
+scoped. Wiring an actual deadline duration, an automatic local trigger (mirroring how
+`Main._Process`'s existing automatic bot-turn trigger already works), and a visible countdown is the
+next piece of this same gap, not a separate one.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` / `clippy -D warnings` / `test --workspace` / `deny check` | pass |
+| `cargo build --release -p db-sim-ffi` | pass |
+| PE export-table read (`pefile`) on the release DLL | exactly 13 `db_sim_*` symbols, as documented |
+| `dotnet build DungeonBarrage.sln -c Debug` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Debug --no-build` | **48 pass** (was 46), 0 fail |
+| `dotnet build DungeonBarrage.sln -c Release` | pass, 0 warnings |
+| `dotnet test DungeonBarrage.sln -c Release --no-build` | 48 pass, 0 fail |
+| `dotnet format DungeonBarrage.sln --verify-no-changes` | pass |
+
+### Notes for whoever picks this up
+
+- The next piece is genuinely a client-policy decision, not an engine gap: pick a deadline duration
+  (CLIENT_SPEC does not mandate one — it is adapter-owned), have `LiveMatch` stamp a real `DeadlineAt`
+  onto its own snapshot when a turn opens, and drive an automatic `TimeoutAsync` call the same way
+  `Main._Process`'s existing bot-turn auto-trigger already works — reuse that pattern, do not invent a
+  second polling mechanism.
+- `db_sim_match_timeout` must never be exposed to a future `RemoteMatchSession` — see the export's own
+  doc comment. If a networked session is ever built, this export (or an equivalent client-triggerable
+  path) staying reachable from it is a security regression, not a feature gap.
+- `AuthorityTimeout`/`ClientAuthorityTimeout` intentionally has no `kind` field and is not part of the
+  `MatchCommandKind`/`ClientMatchCommand` unions. Do not "simplify" it into a `Pass`-like command
+  variant later — that would reopen exactly the client-triggerable-timeout hole the separate type
+  exists to close.
+
+### Still open
+
+The clock itself (deadline duration, automatic local trigger, UI countdown) — see "Deliberately not
+done in this pass" above. Everything else from the previous two C6 entries' "Still open" sections is
+unchanged.
