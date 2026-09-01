@@ -299,3 +299,57 @@ fn timeout_and_preview_work_on_crow_perch() {
         "timeout must hand the crow-perch turn over"
     );
 }
+
+#[test]
+fn an_opening_shot_does_not_decide_the_match_on_any_stacked_map() {
+    // Regression guard for CONTENT_VERSION 3.
+    //
+    // At version 2 the Ramshot Cannon's knockback carried `magnitude_secondary: 0`, which
+    // `displacement.rs` reads as "no radius test at all" rather than its then-documented
+    // "primary target only": every shot shoved every living opponent a flat eight cells no
+    // matter where the shell actually landed. Eight cells is twice `STACK_BLOCK_WIDTH`, so a
+    // single opening shot launched the other crow off its perch and out of the world on every
+    // map, and every duel was decided on turn 1.
+    //
+    // `a_bot_opponent_on_the_ordinary_apply_path_reaches_win_or_lose` above cannot catch that,
+    // because an instant kill is still a terminal outcome and it accepts any terminal outcome.
+    for definition in map::stacked_catalog() {
+        let mut host = create_match(&stacked_duel(definition.id, 7))
+            .unwrap_or_else(|_| panic!("{} must create", definition.id));
+        let player_id = host.active_player().to_owned();
+        let command = AbilityCommand {
+            command_id: "opening-shot".to_owned(),
+            player_id,
+            expected_turn_number: host.state().turn_number,
+            slot: AbilitySlot::Basic,
+            angle_millidegrees: 45_000,
+            power_basis_points: 1_500,
+            target_player_id: None,
+            secondary_target_player_id: None,
+        };
+        let result = host
+            .submit_ability(&command)
+            .unwrap_or_else(|_| panic!("{} opening shot must not fault the host", definition.id));
+        assert!(
+            matches!(result, CommandResult::Accepted(_)),
+            "{}: the opening shot must be accepted, was {result:?}",
+            definition.id
+        );
+        assert_eq!(
+            host.state()
+                .players
+                .iter()
+                .filter(|player| player.is_eliminated())
+                .count(),
+            0,
+            "{}: no fighter may be eliminated by a single opening shot",
+            definition.id
+        );
+        assert!(
+            matches!(host.outcome(), MatchOutcome::InProgress),
+            "{}: one opening shot must not decide the match; outcome was {:?}",
+            definition.id,
+            host.outcome()
+        );
+    }
+}

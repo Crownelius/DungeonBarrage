@@ -73,7 +73,12 @@ pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSIT
 pub const SIMULATION_VERSION: u32 = 7;
 
 /// Version of the gameplay content tables (items, maps, modes).
-pub const CONTENT_VERSION: u32 = 2;
+///
+/// Version 3 scopes the Ramshot Cannon's knockback to its own crater radius. At version 2
+/// that effect carried `magnitude_secondary: 0`, which `displacement.rs` treats as "no
+/// radius test at all" rather than its documented "primary target only", so every shot
+/// shoved every opponent a flat 8 cells regardless of where the shell landed.
+pub const CONTENT_VERSION: u32 = 3;
 
 /// Version of the wire protocol.
 pub const PROTOCOL_VERSION: u32 = 1;

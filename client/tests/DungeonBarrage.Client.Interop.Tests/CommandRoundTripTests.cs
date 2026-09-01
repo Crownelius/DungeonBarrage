@@ -36,7 +36,7 @@ public sealed class CommandRoundTripTests
         using var document = JsonDocument.Parse(response);
         var root = document.RootElement;
         Assert.Equal("accepted", root.GetProperty("disposition").GetString());
-        Assert.Equal("57dc7133b8667daf", root.GetProperty("postStateHash").GetString());
+        Assert.Equal("e912fb78268c2eb4", root.GetProperty("postStateHash").GetString());
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public sealed class CommandRoundTripTests
         using var document = JsonDocument.Parse(response);
         var root = document.RootElement;
         Assert.Equal("accepted", root.GetProperty("disposition").GetString());
-        Assert.Equal("03388514a9108085", root.GetProperty("postStateHash").GetString());
+        Assert.Equal("39eab6e5bcbf7805", root.GetProperty("postStateHash").GetString());
     }
 
     [Fact]

@@ -107,6 +107,12 @@ public sealed class LoadoutPicker
             }
         }
 
-        return 0;
+        // The constructor documents "at least one entry per slot" as a precondition, so a
+        // catalog missing one is a broken catalog, not a case to paper over. Falling back to
+        // index 0 here used to hand every such slot whatever item happened to be first —
+        // silently building a loadout whose secondary or melee id is a main-slot item, which
+        // the native side then rejects far from the actual cause.
+        throw new ArgumentException(
+            $"The item catalog has no entry for the {slot} slot.", nameof(items));
     }
 }

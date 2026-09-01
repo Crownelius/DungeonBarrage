@@ -1,8 +1,9 @@
 //! Resolvers for [`EffectKind::Knockback`], [`EffectKind::Push`], [`EffectKind::Pull`],
 //! [`EffectKind::Recoil`], and [`EffectKind::WallImpact`].
 //!
-//! This is the most-used resolver family in the launch roster: Roberto's grenade
-//! (`Knockback`), Natomica's Repulse (`Push` + `WallImpact`), and Numa's harpoon (`Pull`).
+//! The playable cut reaches this family through item effects rather than character kits;
+//! `RAMSHOT_KNOCKBACK` is the only live caller. The Roberto/Natomica/Numa kits this module
+//! was originally written against were removed at `SIMULATION_VERSION` 7.
 //!
 //! # Displacement is swept, never teleported
 //!
@@ -17,16 +18,29 @@
 //!
 //! | Kind | `magnitude` | `magnitude_secondary` |
 //! |---|---|---|
-//! | `Knockback` | displacement, fixed-point | radius (0 = the primary target only) |
-//! | `Push` | displacement, fixed-point | radius |
+//! | `Knockback` | displacement, fixed-point | falloff radius, fixed-point (**see below**) |
+//! | `Push` | displacement, fixed-point | falloff radius, fixed-point (**see below**) |
 //! | `Pull` | displacement, fixed-point | HP threshold in basis points |
 //! | `Recoil` | displacement, fixed-point | unused |
 //! | `WallImpact` | bonus damage, percent of [`BASE_ATTACK`] | unused |
 //!
-//! Verified against `character.rs`: `ROBERTO_KNOCKBACK`, `NATOMICA_PUSH`,
-//! `NATOMICA_WALL_IMPACT`, and `NUMA_PULL` are the live callers. `Recoil` is currently
-//! attached to no character — its convention is established here for whenever one uses it,
-//! and that is flagged rather than presented as roster fact.
+//! ## A `Knockback`/`Push` radius of zero means *unbounded*, not *none*
+//!
+//! This is a trap, and it has already cost one shipped defect, so it is stated plainly
+//! rather than left to be rediscovered. An earlier revision of this table claimed `0` meant
+//! "the primary target only". The code does the opposite: [`targets_in_radius`] takes the
+//! `radius <= 0` branch and collects **every living opponent on the map** at any distance,
+//! and [`falloff`] then returns the **full magnitude** with no distance scaling. A `0` here
+//! is therefore the widest possible effect, not the narrowest.
+//!
+//! Content that fires without naming a primary target — anything aimed, which is every shot
+//! from the Godot drag path — must give a real, positive radius. `RAMSHOT_KNOCKBACK` shipped
+//! with `magnitude_secondary: 0` at `CONTENT_VERSION` 2 and consequently shoved both players
+//! a flat eight cells on every shot regardless of where the shell landed, which ended matches
+//! on turn 1. See `docs/BUILD_LOG.md`.
+//!
+//! `Recoil` is attached to no item — its convention is established here for whenever one uses
+//! it, and that is flagged rather than presented as content fact.
 
 use crate::error::{SimError, SimResult};
 use crate::fixed::{

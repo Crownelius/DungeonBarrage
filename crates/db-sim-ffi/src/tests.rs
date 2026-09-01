@@ -169,7 +169,7 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
         );
         assert_eq!(created["snapshot"]["matchId"], "fixture-horizontal-duel-v1");
         assert_eq!(created["snapshot"]["mapId"], "horizontal-test-array");
-        assert_eq!(created["snapshot"]["stateHash"], "864c1ec2512a0327");
+        assert_eq!(created["snapshot"]["stateHash"], "8e40798bc7fb9154");
 
         let mut snapshot_buffer = DbOwnedBuffer::empty();
         assert_eq!(
@@ -252,7 +252,7 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             moved["postSnapshot"]["fixedTickRate"],
             db_sim_core::FIXED_TICK_RATE
         );
-        assert_eq!(moved["postStateHash"], "57dc7133b8667daf");
+        assert_eq!(moved["postStateHash"], "e912fb78268c2eb4");
 
         let (ability_code, mut ability_buffer) = apply(handle, ABILITY_REQUEST);
         assert_eq!(ability_code, status::OK);
@@ -267,8 +267,8 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             ability["postSnapshot"]["fixedTickRate"],
             db_sim_core::FIXED_TICK_RATE
         );
-        assert_eq!(ability["postStateHash"], "03388514a9108085");
-        assert_eq!(ability["postSnapshot"]["stateHash"], "03388514a9108085");
+        assert_eq!(ability["postStateHash"], "39eab6e5bcbf7805");
+        assert_eq!(ability["postSnapshot"]["stateHash"], "39eab6e5bcbf7805");
         assert!(ability["events"].as_array().is_some_and(|events| {
             events
                 .iter()
@@ -550,7 +550,7 @@ fn command_parser_requires_nullable_fields_and_rejects_unknowns_without_mutation
         );
         let snapshot = json_and_free(&mut snapshot_output);
         assert_eq!(snapshot["snapshotGeneration"], 0);
-        assert_eq!(snapshot["stateHash"], "864c1ec2512a0327");
+        assert_eq!(snapshot["stateHash"], "8e40798bc7fb9154");
         destroy(handle);
     }
 }

@@ -30,7 +30,7 @@ namespace DungeonBarrage.Client.Interop.Tests;
 public sealed class LiveMatchTests
 {
     [Fact]
-    public async Task A_move_then_an_ability_deals_damage_and_hands_the_turn_over()
+    public async Task A_move_then_an_ability_deals_real_damage_and_reconciles_to_the_post_snapshot()
     {
         await using var live = await CreateLiveAsync();
 
@@ -51,10 +51,33 @@ public sealed class LiveMatchTests
         var afterDefenderHealth = live.CurrentSnapshot.Players
             .First(p => p.PlayerId == "b-local-bot").Health;
         Assert.True(afterDefenderHealth < beforeDefenderHealth, "the ability must have dealt damage");
+
+        // This runs on the C2 wire fixture, whose 15%-power 45-degree lob craters the shooter's
+        // own three-cell-tall platform over a void, so the match ends here. That makes the fixture
+        // unusable for proving turn handover, which is why handover has its own test below on a
+        // playable map rather than being dropped.
         Assert.IsNotType<ClientInProgressOutcome>(live.CurrentSnapshot.Outcome);
 
         // The C5 gate itself: every view ends at the post-snapshot. Checked, not assumed true by
         // LiveMatch's own construction.
+        Assert.Equal(ability.PostSnapshot.StateHash, live.CurrentSnapshot.StateHash);
+    }
+
+    /// <summary>
+    /// Restores the turn-handover assertions on a map where a turn can actually hand over.
+    /// </summary>
+    [Fact]
+    public async Task A_completed_turn_hands_over_to_the_other_player()
+    {
+        await using var live = await CreateLiveOnAsync("crow-perch");
+
+        _ = await live.SubmitMoveAsync(1024);
+        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
+        Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
+
+        Assert.IsType<ClientInProgressOutcome>(live.CurrentSnapshot.Outcome);
+        Assert.Equal("b-local-bot", live.CurrentSnapshot.ActivePlayerId);
+        Assert.Equal(2u, live.CurrentSnapshot.TurnNumber);
         Assert.Equal(ability.PostSnapshot.StateHash, live.CurrentSnapshot.StateHash);
     }
 
@@ -100,6 +123,29 @@ public sealed class LiveMatchTests
     private static async Task<LiveMatch> CreateLiveAsync()
     {
         var session = LocalMatchSession.Create(Fixtures.Read("create-request.json").Span);
+        var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(
+            session.CreateResponse.Span, ClientEnvelope.Options)!;
+        var terrain = await session.TerrainAsync(ulong.MaxValue);
+        return LiveMatch.Create(session, createResponse.Snapshot!, terrain, "test");
+    }
+
+    [SuppressMessage(
+        "Reliability",
+        "CA2000:Dispose objects before losing scope",
+        Justification =
+            "Ownership transfers to the returned LiveMatch, which every caller disposes via " +
+            "'await using'.")]
+    private static async Task<LiveMatch> CreateLiveOnAsync(string mapId)
+    {
+        var request = LocalMatchEnvelope.HumanVsBot(
+            LocalMatchSession.SimulationVersion,
+            LocalMatchSession.ContentVersion,
+            seed: 12345,
+            matchId: "test-match",
+            mapId: mapId,
+            loadout: new ClientLoadout("ramshot-cannon", "recurve-bow", "trench-spade"));
+        var session = LocalMatchSession.Create(
+            System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options));
         var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(
             session.CreateResponse.Span, ClientEnvelope.Options)!;
         var terrain = await session.TerrainAsync(ulong.MaxValue);

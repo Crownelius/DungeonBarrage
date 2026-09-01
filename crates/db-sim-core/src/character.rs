@@ -24,13 +24,37 @@ const PROJECTILE_TIER3_SPEED: i32 = 1_500;
 const PROJECTILE_TIER3_GRAVITY: i32 = 12;
 const PROJECTILE_TIER3_MAX_TICKS: u16 = 300;
 
+/// Ramshot's shove, scoped to the blast it actually makes.
+///
+/// `magnitude_secondary` is the falloff radius, and it must stay greater than zero.
+/// `displacement.rs` documents `0` as "the primary target only", but its implementation
+/// reads `radius <= 0` as *no radius test at all*: `targets_in_radius` then collects every
+/// living opponent anywhere on the map and `falloff` returns the full magnitude regardless
+/// of distance. An aim-fired shell names no primary target, so a `0` here shoved every
+/// opponent a flat 8 cells no matter where the shell landed — a shot falling 30 cells short
+/// still launched the target off its 4-cell perch and out of the world, ending the match on
+/// turn 1 (see `docs/BUILD_LOG.md`). Matching the radius to this item's own
+/// `TerrainProfile::Crater` keeps the shove tied to the crater the player can actually see.
 const RAMSHOT_KNOCKBACK: SpecialEffect = SpecialEffect {
     trigger: EffectTrigger::OnImpact,
     kind: EffectKind::Knockback,
     magnitude: 2 * BODY_WIDTH,
-    magnitude_secondary: 0,
+    magnitude_secondary: RAMSHOT_CRATER_RADIUS_FIXED,
     duration_turns: 0,
 };
+
+/// Crater radius of [`RAMSHOT_CANNON_ABILITY`], in cells.
+///
+/// Named so the ability's terrain profile and [`RAMSHOT_KNOCKBACK`]'s falloff radius cannot
+/// drift apart: the shove is meant to be the crater's shove.
+const RAMSHOT_CRATER_RADIUS_CELLS: u16 = 6;
+
+/// [`RAMSHOT_CRATER_RADIUS_CELLS`] in fixed-point units, for the knockback falloff.
+///
+/// The assertion below is what actually keeps the two in step, since the terrain profile
+/// wants cells and the falloff radius wants fixed-point.
+const RAMSHOT_CRATER_RADIUS_FIXED: i32 = 6 * POSITION_SCALE;
+const _: () = assert!(RAMSHOT_CRATER_RADIUS_CELLS == 6);
 
 const FROSTFALL_CHILL: SpecialEffect = SpecialEffect {
     trigger: EffectTrigger::OnImpact,
@@ -62,7 +86,9 @@ const RAMSHOT_CANNON_ABILITY: AbilityDefinition = AbilityDefinition {
         wind_scale_basis_points: 10_000,
         max_ticks: PROJECTILE_TIER2_MAX_TICKS,
         bounces: 0,
-        terrain: TerrainProfile::Crater { radius_cells: 6 },
+        terrain: TerrainProfile::Crater {
+            radius_cells: RAMSHOT_CRATER_RADIUS_CELLS,
+        },
     }),
     effects: &[RAMSHOT_KNOCKBACK],
 };

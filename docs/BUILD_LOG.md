@@ -3149,3 +3149,125 @@ Scratch: `C:\Users\rsfit\AppData\Local\Temp\grok-goal-gaps\godot-smoke\`.
 
 Still uncommitted. Still not a live human PLAY.md session.
 
+## Review of the version 7 playable cut — a turn-1 win on every map, and two falsified tests
+
+Review pass over `d3643a3` ("version 7 playable cut with one crow and item ammo"). The commit
+arrived with every gate green — all Rust tests, 64 .NET tests, `cargo deny`, `dotnet format` —
+so the review started from behaviour rather than from the test results.
+
+### The defect: one shot decided every match
+
+Driving a real duel through `LiveMatch` on each of the three playable maps showed the opening
+shot ending the match on turn 1, every time:
+
+| Map | Target start → end | Result |
+|---|---|---|
+| `crow-perch` | x=40 → 48.2, y=7.8 → 24.1 | victory, turn 1 |
+| `broken-battlements` | x=44 → 52.2, y=9.8 → 26.0 | victory, turn 1 |
+| `twin-spires` | x=38 → 46.2, y=6.8 → 24.1 | victory, turn 1 |
+
+Every target finished at `y ≈ map height` — knocked out of the bottom of the world. Damage was
+not what killed them: `RAMSHOT_CANNON_ABILITY` deals 62%, and `CROW_MAX_HEALTH` is 200 with three
+rounds of ammo, so the content is tuned for a two-hit kill. The fall was doing it.
+
+Swapping only the main item isolated the cause, same map, same angle and power:
+
+| Main item | Outcome |
+|---|---|
+| `ramshot-cannon` (knockback) | target ejected, dead, match over on turn 1 |
+| `frostfall-mortar` (chill, no knockback) | target untouched at 200 hp, turn 2, in progress |
+| `mole-drill` (no effects) | target untouched at 200 hp, turn 2, in progress |
+
+The control cases are the tell: the target takes **zero damage** in both, because the shell falls
+well short of it — yet `ramshot-cannon` still threw it eight cells. The knockback was not coming
+from the blast at all.
+
+### Root cause: a radius of zero means *unbounded*, not *none*
+
+`RAMSHOT_KNOCKBACK` carried `magnitude_secondary: 0`. `displacement.rs` documented that as
+"radius (0 = the primary target only)". Its implementation does the opposite:
+`targets_in_radius` takes the `radius <= 0` branch and collects **every living opponent on the
+map** at any distance, and `falloff` then returns the **full magnitude** with no distance scaling.
+
+An aim-fired shot names no primary target, so the documented reading would have meant "nobody".
+The actual reading meant "everybody, at full strength, wherever they are standing". With
+`magnitude: 2 * BODY_WIDTH` and `BODY_WIDTH = 4 * POSITION_SCALE`, that is a flat eight cells —
+twice `STACK_BLOCK_WIDTH`, so it cleared any perch by construction, and `material_at` reports
+out-of-map cells as `Empty`, so the swept displacement walks straight out of the world.
+
+The resolver is **pre-existing and unchanged** by this commit; the diff there is test-struct
+fields only. What version 7 changed is that it put this effect on the default main weapon every
+player spawns holding, so a latent one-character hazard became the whole game.
+
+Fixed by giving the effect the radius of its own crater
+(`magnitude_secondary: RAMSHOT_CRATER_RADIUS_FIXED`, 6 cells, tied by assertion to the
+`TerrainProfile::Crater` the same item already declares), so the shove is the crater's shove.
+`CONTENT_VERSION` moves 2 → 3: `SimulationState.content_version` is hashed (`hash.rs`), which is
+exactly what stops a new content table from replaying against an old one.
+
+### Two tests had been rewritten to pass against the broken behaviour
+
+Both of these assert turn handover in their names. Both had their handover assertions deleted and
+replaced with an assertion that the match was already over:
+
+- `LiveMatchTests.A_move_then_an_ability_deals_damage_and_hands_the_turn_over` lost
+  `Assert.Equal("b-local-bot", ...ActivePlayerId)` and `Assert.Equal(2u, ...TurnNumber)`.
+- `PlanningDeadlineTests.The_deadline_re_arms_for_the_next_player_once_a_turn_hands_over` lost
+  *every* deadline assertion, leaving `_ = deadlineForFirstTurn;` to silence the now-unused
+  variable. A test named for deadline re-arming no longer mentioned deadlines.
+
+Restored, and moved to `crow-perch`, because the C2 wire fixture cannot host them: its own
+15%-power 45° lob craters the shooter's three-cell platform over a void, so that fixture ends on
+turn 1 by its own parameters even with the knockback fixed. The damage assertion stayed on the
+fixture, where damage is observable. Verified both restored tests are real by reintroducing
+`magnitude_secondary: 0` and confirming both fail, then reverting.
+
+`maps_bot_outcome.rs` gained `an_opening_shot_does_not_decide_the_match_on_any_stacked_map`.
+The existing `a_bot_opponent_on_the_ordinary_apply_path_reaches_win_or_lose` could not catch any
+of this: an instant kill is still a terminal outcome, and that test accepts any terminal outcome.
+
+### Also corrected
+
+- `displacement.rs` doc table now states the real `radius <= 0` behaviour instead of the
+  contradiction that caused the defect, and no longer cites the Roberto/Natomica/Numa kits that
+  version 7 deleted.
+- `LoadoutPicker.IndexOfSlot` threw away its own documented "at least one entry per slot"
+  precondition by returning index `0` for a missing slot, silently building a loadout whose
+  secondary or melee id is a main-slot item. It now throws naming the slot.
+
+### Vectors and fixtures regenerated
+
+All five golden vectors moved, because `content_version` is part of the hashed state. Only
+`firing_duel` and `mixed_actions` move from the knockback fix itself — verified by applying that
+fix alone, with `walking_duel`, `low_health_duel` and `all_passes` unchanged until the version
+bump. Old values are recorded beside each constant per this file's own regeneration rule.
+
+The frozen response corpus was rewritten through `regenerate_shared_response_fixtures_from_production_abi`,
+the sanctioned writer. The C2 fixture's ability step changes from a mutual-annihilation **draw**
+— both crows at 0 hp on turn 1 — to a victory with the defender alive at 138 hp.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace` | pass |
+| `cargo deny check` | advisories, bans, licenses, sources ok |
+| `dotnet format --verify-no-changes` | pass |
+| `dotnet test -c Release` | **65 pass** (was 64), 0 fail |
+| `gitleaks git --log-opts="--all"` | 52 commits, no leaks |
+
+### Still open — owner calls, not defects
+
+- A **direct** hit still ejects a target from a four-cell perch, because `magnitude` remains
+  `2 * BODY_WIDTH`. That is now a skill outcome rather than a guarantee, but it still conflicts
+  with content tuned for a two-hit kill. Whether a clean hit should also be an instant kill is a
+  balance decision.
+- The stacked maps are floating towers over a void with no floor, so any displacement off a perch
+  is fatal. That is intentional-looking, but it is what makes knockback magnitude so sharp.
+- `displacement.rs`'s `radius <= 0` branch is still a live trap for the next content author. No
+  caller passes `0` today. Making it mean the documented "primary target only" would change
+  shared resolver semantics and every golden vector, so it is flagged rather than changed here.
+- `fixture.json`'s `purpose` still claims "authoritative turn handoff"; that fixture has not
+  handed a turn over since version 7 changed the roster.

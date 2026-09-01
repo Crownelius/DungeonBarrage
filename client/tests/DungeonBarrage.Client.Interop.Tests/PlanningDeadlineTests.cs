@@ -42,14 +42,17 @@ public sealed class PlanningDeadlineTests
     [Fact]
     public async Task The_deadline_re_arms_for_the_next_player_once_a_turn_hands_over()
     {
-        await using var live = await CreateLiveAsync();
+        // A playable map, not the C2 wire fixture: that fixture's own lob ends the match on
+        // turn 1, so no turn ever hands over there and this assertion could not be made.
+        await using var live = await CreateLiveOnAsync("crow-perch");
         var deadlineForFirstTurn = live.PlanningDeadlineUtc;
 
         _ = await live.SubmitMoveAsync(1024);
         _ = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
 
-        _ = deadlineForFirstTurn;
-        Assert.IsNotType<ClientInProgressOutcome>(live.CurrentSnapshot.Outcome);
+        Assert.Equal("b-local-bot", live.CurrentSnapshot.ActivePlayerId);
+        Assert.NotNull(live.PlanningDeadlineUtc);
+        Assert.NotEqual(deadlineForFirstTurn, live.PlanningDeadlineUtc);
     }
 
     [Fact]
@@ -78,6 +81,29 @@ public sealed class PlanningDeadlineTests
     private static async Task<LiveMatch> CreateLiveAsync()
     {
         var session = LocalMatchSession.Create(Fixtures.Read("create-request.json").Span);
+        var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(
+            session.CreateResponse.Span, ClientEnvelope.Options)!;
+        var terrain = await session.TerrainAsync(ulong.MaxValue);
+        return LiveMatch.Create(session, createResponse.Snapshot!, terrain, "test");
+    }
+
+    [SuppressMessage(
+        "Reliability",
+        "CA2000:Dispose objects before losing scope",
+        Justification =
+            "Ownership transfers to the returned LiveMatch, which every caller disposes via " +
+            "'await using'.")]
+    private static async Task<LiveMatch> CreateLiveOnAsync(string mapId)
+    {
+        var request = LocalMatchEnvelope.HumanVsBot(
+            LocalMatchSession.SimulationVersion,
+            LocalMatchSession.ContentVersion,
+            seed: 12345,
+            matchId: "test-match",
+            mapId: mapId,
+            loadout: new ClientLoadout("ramshot-cannon", "recurve-bow", "trench-spade"));
+        var session = LocalMatchSession.Create(
+            System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options));
         var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(
             session.CreateResponse.Span, ClientEnvelope.Options)!;
         var terrain = await session.TerrainAsync(ulong.MaxValue);

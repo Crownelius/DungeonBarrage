@@ -248,7 +248,11 @@ fn golden_all_passes_terminates_identically() {
     // "e828d490e955f3d7" at SIMULATION_VERSION 3.
     // REGENERATED 2026-08-31 at SIMULATION_VERSION 7.
     // Was "ecff79397aa402de" at SIMULATION_VERSION 6.
-    assert_vector("all_passes", &actual, "5fe56c374f884cf6");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 3. Every vector moved because
+    // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
+    // new content table from silently replaying against an old one.
+    // Previous value was "5fe56c374f884cf6".
+    assert_vector("all_passes", &actual, "f66401193708e515");
 }
 
 #[test]
@@ -268,7 +272,11 @@ fn golden_walking_duel() {
     // "35636b623102bbed" at SIMULATION_VERSION 3.
     // REGENERATED 2026-08-31 at SIMULATION_VERSION 7.
     // Was "af6978b06c1f9772" at SIMULATION_VERSION 6.
-    assert_vector("walking_duel", &actual, "0b914d175ade7d6e");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 3. Every vector moved because
+    // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
+    // new content table from silently replaying against an old one.
+    // Previous value was "0b914d175ade7d6e".
+    assert_vector("walking_duel", &actual, "ddb193455a403319");
 }
 
 #[test]
@@ -301,7 +309,15 @@ fn golden_firing_duel() {
     // "7b49a0275beafc1f" at SIMULATION_VERSION 3.
     // REGENERATED 2026-08-31 at SIMULATION_VERSION 7.
     // Was "a009c290a796d1ba" at SIMULATION_VERSION 6.
-    assert_vector("firing_duel", &actual, "7b07ba4dfa57d5f6");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 3. Every vector moved because
+    // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
+    // new content table from silently replaying against an old one. The Ramshot Cannon's
+    // knockback also stopped shoving every opponent on the map: its
+    // `magnitude_secondary` was 0, which `displacement.rs` reads as "no radius test"
+    // rather than its documented "primary target only", so this vector's shots now
+    // only shove what they land near.
+    // Previous value was "7b07ba4dfa57d5f6".
+    assert_vector("firing_duel", &actual, "9ea57823cddeb8ae");
 }
 
 #[test]
@@ -329,7 +345,15 @@ fn golden_mixed_actions() {
     );
     // REGENERATED 2026-08-31 at SIMULATION_VERSION 7 (crow + item ammo).
     // Was "c29e2d75ceba7f33" at SIMULATION_VERSION 6.
-    assert_vector("mixed_actions", &actual, "6faaa414ab6cff84");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 3. Every vector moved because
+    // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
+    // new content table from silently replaying against an old one. The Ramshot Cannon's
+    // knockback also stopped shoving every opponent on the map: its
+    // `magnitude_secondary` was 0, which `displacement.rs` reads as "no radius test"
+    // rather than its documented "primary target only", so this vector's shots now
+    // only shove what they land near.
+    // Previous value was "6faaa414ab6cff84".
+    assert_vector("mixed_actions", &actual, "c4911a24c765b3d0");
 }
 
 #[test]
@@ -354,7 +378,11 @@ fn golden_low_health_duel_reaches_a_decision() {
     // "b88af74446995c79" at SIMULATION_VERSION 3.
     // REGENERATED 2026-08-31 at SIMULATION_VERSION 7.
     // Was "0c908bfce4b927d6" at SIMULATION_VERSION 6.
-    assert_vector("low_health_duel", &actual, "dc6477a177b3e1f9");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 3. Every vector moved because
+    // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
+    // new content table from silently replaying against an old one.
+    // Previous value was "dc6477a177b3e1f9".
+    assert_vector("low_health_duel", &actual, "f1f76f9d8e9c1252");
 }
 
 #[test]

@@ -34,7 +34,7 @@ public sealed class FrozenResponseFixtureTests
         // ABI version 4: db_sim_match_timeout's addition (docs/BUILD_LOG.md's C6 entry).
         Assert.Equal(4U, snapshot.AbiVersion);
         Assert.Equal(7U, snapshot.SimulationVersion);
-        Assert.Equal(2U, snapshot.ContentVersion);
+        Assert.Equal(3U, snapshot.ContentVersion);
         Assert.Equal(1024, snapshot.PositionScale);
         Assert.Equal(60U, snapshot.FixedTickRate);
         Assert.Equal("a-local-player", snapshot.ActivePlayerId);
@@ -76,7 +76,7 @@ public sealed class FrozenResponseFixtureTests
         Assert.Equal(ClientEntityMovementCause.AuthoritativeResolution, movement.Cause);
         Assert.Equal(new ClientPosition(2048, 7936), movement.Start);
         Assert.Equal(new ClientPosition(3072, 7936), movement.End);
-        Assert.Equal("57dc7133b8667daf", transition.PostSnapshot.StateHash);
+        Assert.Equal("e912fb78268c2eb4", transition.PostSnapshot.StateHash);
         Assert.Equal(transition.PostSnapshot.StateHash, transition.PostStateHash);
     }
 
@@ -91,7 +91,7 @@ public sealed class FrozenResponseFixtureTests
         Assert.Contains(transition.Events, e => e is ClientPlayerEliminatedEvent);
         Assert.Contains(transition.Events, e => e is ClientMatchCompletedEvent);
         Assert.Contains(transition.Events, e => e is ClientTurnEndedEvent);
-        Assert.Equal("03388514a9108085", transition.PostStateHash);
+        Assert.Equal("39eab6e5bcbf7805", transition.PostStateHash);
         Assert.Equal(ClientMatchPhase.MatchComplete, transition.PostSnapshot.Phase);
     }
 
