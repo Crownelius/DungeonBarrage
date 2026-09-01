@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace DungeonBarrage.Client.App;
 
 /// <summary>
-/// CLI options selecting the C6 smoke path: full local match execution including character select,
+/// CLI options selecting the C6 smoke path: full local match execution including loadout select,
 /// bot decision turn handling, victory/draw outcome, and clean rematch.
 /// </summary>
 internal sealed record C6SmokeOptions(string ReportPath, string ScreenshotPath)
@@ -12,20 +12,20 @@ internal sealed record C6SmokeOptions(string ReportPath, string ScreenshotPath)
     private const string ScreenshotArgument = "--c6-screenshot";
 
     /// <summary>
-    /// Where the character-select screen's own screenshot is written: derived from
+    /// Where the loadout-select screen's own screenshot is written: derived from
     /// <see cref="ScreenshotPath"/> rather than a third CLI argument, so the two-flag contract
     /// C4 and C5's smoke modes already established stays uniform across all three.
     /// </summary>
-    internal string CharacterSelectScreenshotPath =>
+    internal string LoadoutSelectScreenshotPath =>
         Path.Combine(
             Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
-            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-character-select" + Path.GetExtension(ScreenshotPath));
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-loadout-select" + Path.GetExtension(ScreenshotPath));
 
     /// <summary>Where the mid-hover-float frame is written, derived the same way.</summary>
-    internal string CharacterSelectHoverScreenshotPath =>
+    internal string LoadoutSelectHoverScreenshotPath =>
         Path.Combine(
             Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
-            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-character-select-hover" + Path.GetExtension(ScreenshotPath));
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-loadout-select-hover" + Path.GetExtension(ScreenshotPath));
 
     /// <summary>Where the LocalSetup screen's own screenshot is written, derived the same way.</summary>
     internal string LocalSetupScreenshotPath =>
@@ -80,7 +80,7 @@ internal sealed record C6SmokeOptions(string ReportPath, string ScreenshotPath)
 
 /// <summary>
 /// Machine-checkable evidence for CLIENT_SPEC §21 milestone C6: full local match flow,
-/// character select, bot decisions, victory/draw results, and rematch.
+/// loadout select, bot decisions, victory/draw results, and rematch.
 /// </summary>
 internal sealed record C6SmokeReport(
     bool Success,
@@ -88,8 +88,8 @@ internal sealed record C6SmokeReport(
     string ClientVersion,
     string GodotVersion,
     int RosterCount,
-    string HumanCharacterId,
-    string BotCharacterId,
+    string HumanMainItemId,
+    string BotMainItemId,
     bool InitialMatchCreated,
     bool HoverAnimationInterruptionTestPassed,
     bool HumanTurnExecuted,
@@ -104,8 +104,8 @@ internal sealed record C6SmokeReport(
     bool RematchSessionDisposedCleanly,
     int ScreenshotWidth,
     int ScreenshotHeight,
-    int CharacterSelectScreenshotWidth,
-    int CharacterSelectScreenshotHeight,
+    int LoadoutSelectScreenshotWidth,
+    int LoadoutSelectScreenshotHeight,
     int LocalSetupScreenshotWidth,
     int LocalSetupScreenshotHeight,
     string MapsCompleted,

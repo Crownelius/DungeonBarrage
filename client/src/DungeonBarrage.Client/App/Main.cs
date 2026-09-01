@@ -7,7 +7,7 @@ using Godot;
 namespace DungeonBarrage.Client.App;
 
 /// <summary>
-/// The scene root: menu with build diagnostics, character selection across the full 9-starter roster,
+/// The scene root: menu with build diagnostics, loadout selection across the full 9-starter roster,
 /// playable authoritative match with human & bot turns, passive prompts, results, and rematch.
 /// </summary>
 public partial class Main : Node2D
@@ -59,11 +59,11 @@ public partial class Main : Node2D
         "broken-battlements",
         "twin-spires",
     ];
-    private int _selectedCharacterIndex;
-    private int _selectedBotCharacterIndex = 1;
-    private bool _inCharacterSelect;
-    private CharacterTileAnimation[]? _tileAnimations;
-    private int _hoveredCharacterIndex = -1;
+    private int _selectedItemIndex;
+    private int _botMainItemIndex;
+    private bool _inLoadoutSelect;
+    private ItemTileAnimation[]? _tileAnimations;
+    private int _hoveredItemIndex = -1;
 
     private const float TileSize = 76f;
     private const float TileGap = 12f;
@@ -74,12 +74,12 @@ public partial class Main : Node2D
     private static readonly Vector2 TileGridOrigin = new(40, 108);
 
     /// <summary>
-    /// One character tile's float animation: a small non-interruptible state machine, not a
+    /// One item tile's float animation: a small non-interruptible state machine, not a
     /// Godot <c>Tween</c>. <see cref="Main"/> has no scene-graph nodes to attach one to — every
     /// screen so far is hand-drawn from a single <see cref="_Draw"/> — so the float/land motion
-    /// is advanced manually each frame in <see cref="UpdateCharacterTileAnimations"/> instead.
+    /// is advanced manually each frame in <see cref="UpdateItemTileAnimations"/> instead.
     /// </summary>
-    private sealed class CharacterTileAnimation
+    private sealed class ItemTileAnimation
     {
         /// <summary>Current vertical offset in pixels; negative is floated upward.</summary>
         internal float YOffset;
@@ -171,9 +171,9 @@ public partial class Main : Node2D
             QueueRedraw();
         }
 
-        if (_inCharacterSelect)
+        if (_inLoadoutSelect)
         {
-            UpdateCharacterTileAnimations((float)delta);
+            UpdateItemTileAnimations((float)delta);
         }
 
         // A visible countdown needs a redraw roughly every frame while it's ticking, not just on
@@ -277,9 +277,9 @@ public partial class Main : Node2D
             return;
         }
 
-        if (_inCharacterSelect)
+        if (_inLoadoutSelect)
         {
-            HandleCharacterSelectInput(@event);
+            HandleLoadoutSelectInput(@event);
             return;
         }
 
@@ -318,9 +318,9 @@ public partial class Main : Node2D
         {
             DrawMatch(_match.Frame.Snapshot, _match.Frame.Terrain);
         }
-        else if (_inCharacterSelect)
+        else if (_inLoadoutSelect)
         {
-            DrawCharacterSelect();
+            DrawLoadoutSelect();
         }
         else if (_inLocalSetup)
         {
@@ -341,8 +341,8 @@ public partial class Main : Node2D
     }
 
     /// <summary>
-    /// Enters the map/mode/slots screen between the main menu and character select
-    /// (CLIENT_SPEC §11's own flow: Boot → MainMenu → LocalSetup → CharacterSelect → Match).
+    /// Enters the map/mode/slots screen between the main menu and loadout select
+    /// (CLIENT_SPEC §11's own flow: Boot → MainMenu → LocalSetup → LoadoutSelect → Match).
     /// </summary>
     /// <remarks>
     /// Only one map and one mode exist today, so this deliberately shows them as read-only
@@ -390,7 +390,7 @@ public partial class Main : Node2D
         {
             GetViewport().SetInputAsHandled();
             _inLocalSetup = false;
-            EnterCharacterSelect();
+            EnterLoadoutSelect();
         }
     }
 
@@ -432,10 +432,10 @@ public partial class Main : Node2D
             modulate: LockedHintColor);
 
         var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
-        DrawString(font, footerPos, "ENTER / Click to continue to Character Select · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
+        DrawString(font, footerPos, "ENTER / Click to continue to Loadout · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
     }
 
-    private void EnterCharacterSelect()
+    private void EnterLoadoutSelect()
     {
         try
         {
@@ -443,15 +443,15 @@ public partial class Main : Node2D
             _fighter = catalog.Fighter;
             _roster = catalog.Items;
             _picker = new LoadoutPicker(catalog.Items);
-            _selectedCharacterIndex = _picker.FocusedIndex;
-            _selectedBotCharacterIndex = _picker.SecondaryIndex;
-            _inCharacterSelect = true;
+            _selectedItemIndex = _picker.FocusedIndex;
+            _botMainItemIndex = BotMainItemIndex(catalog.Items);
+            _inLoadoutSelect = true;
             _menuError = null;
-            _hoveredCharacterIndex = -1;
-            _tileAnimations = new CharacterTileAnimation[_roster.Count];
+            _hoveredItemIndex = -1;
+            _tileAnimations = new ItemTileAnimation[_roster.Count];
             for (var i = 0; i < _tileAnimations.Length; i++)
             {
-                _tileAnimations[i] = new CharacterTileAnimation();
+                _tileAnimations[i] = new ItemTileAnimation();
             }
         }
         catch (NativeSimulationException exception)
@@ -470,7 +470,7 @@ public partial class Main : Node2D
     /// hover, a tile could float just far enough to leave the cursor, be judged un-hovered, and
     /// begin landing back under the cursor — an oscillation with no stable resting state.
     /// </remarks>
-    private static Rect2 CharacterTileRestRect(int index)
+    private static Rect2 ItemTileRestRect(int index)
     {
         var column = index % TileColumns;
         var row = index / TileColumns;
@@ -478,7 +478,7 @@ public partial class Main : Node2D
         return new Rect2(position, new Vector2(TileSize, TileSize));
     }
 
-    private int? HitTestCharacterTile(Vector2 point)
+    private int? HitTestItemTile(Vector2 point)
     {
         if (_roster is null)
         {
@@ -487,7 +487,7 @@ public partial class Main : Node2D
 
         for (var i = 0; i < _roster.Count; i++)
         {
-            if (CharacterTileRestRect(i).HasPoint(point))
+            if (ItemTileRestRect(i).HasPoint(point))
             {
                 return i;
             }
@@ -508,7 +508,7 @@ public partial class Main : Node2D
     /// least one full float or one full land before reversing, matching the fixture's own
     /// vocabulary: "it won't immediately restart the animation... it cannot be interrupted."
     /// </remarks>
-    private void UpdateCharacterTileAnimations(float delta)
+    private void UpdateItemTileAnimations(float delta)
     {
         if (_tileAnimations is null)
         {
@@ -519,7 +519,7 @@ public partial class Main : Node2D
         for (var i = 0; i < _tileAnimations.Length; i++)
         {
             var tile = _tileAnimations[i];
-            var hoverDesired = i == _hoveredCharacterIndex || i == _selectedCharacterIndex;
+            var hoverDesired = i == _hoveredItemIndex || i == _selectedItemIndex;
 
             if (tile.IsAnimating)
             {
@@ -568,7 +568,7 @@ public partial class Main : Node2D
         }
     }
 
-    private void HandleCharacterSelectInput(InputEvent @event)
+    private void HandleLoadoutSelectInput(InputEvent @event)
     {
         if (_roster is null or { Count: 0 })
         {
@@ -577,14 +577,14 @@ public partial class Main : Node2D
 
         if (@event is InputEventMouseMotion motion)
         {
-            _hoveredCharacterIndex = HitTestCharacterTile(motion.Position) ?? -1;
+            _hoveredItemIndex = HitTestItemTile(motion.Position) ?? -1;
             return;
         }
 
         if (@event.IsActionPressed("ui_cancel"))
         {
             GetViewport().SetInputAsHandled();
-            _inCharacterSelect = false;
+            _inLoadoutSelect = false;
             _inLocalSetup = true;
             QueueRedraw();
             return;
@@ -593,7 +593,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_up"))
         {
             GetViewport().SetInputAsHandled();
-            EquipTile((_selectedCharacterIndex - 1 + _roster.Count) % _roster.Count);
+            EquipTile((_selectedItemIndex - 1 + _roster.Count) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -601,7 +601,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_down"))
         {
             GetViewport().SetInputAsHandled();
-            EquipTile((_selectedCharacterIndex + 1) % _roster.Count);
+            EquipTile((_selectedItemIndex + 1) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -609,7 +609,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_left"))
         {
             GetViewport().SetInputAsHandled();
-            EquipTile((_selectedCharacterIndex - 1 + _roster.Count) % _roster.Count);
+            EquipTile((_selectedItemIndex - 1 + _roster.Count) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -617,7 +617,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_right"))
         {
             GetViewport().SetInputAsHandled();
-            EquipTile((_selectedCharacterIndex + 1) % _roster.Count);
+            EquipTile((_selectedItemIndex + 1) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -626,7 +626,7 @@ public partial class Main : Node2D
         // loadout — click no longer confirms, because it now has its own meaning.
         if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left } mouseButton)
         {
-            if (HitTestCharacterTile(mouseButton.Position) is int clickedIndex)
+            if (HitTestItemTile(mouseButton.Position) is int clickedIndex)
             {
                 GetViewport().SetInputAsHandled();
                 EquipTile(clickedIndex);
@@ -639,18 +639,39 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_accept"))
         {
             GetViewport().SetInputAsHandled();
-            ConfirmCharacterAndStartDuel();
+            ConfirmLoadoutAndStartDuel();
         }
     }
 
     private void EquipTile(int index)
     {
         _picker?.SelectTile(index);
-        _selectedCharacterIndex = _picker?.FocusedIndex ?? index;
-        _selectedBotCharacterIndex = _picker?.SecondaryIndex ?? _selectedBotCharacterIndex;
+        _selectedItemIndex = _picker?.FocusedIndex ?? index;
     }
 
-    private void ConfirmCharacterAndStartDuel()
+    /// <summary>
+    /// Catalog index of the opponent's main item, for the CPU card.
+    /// </summary>
+    /// <remarks>
+    /// The opponent fields <see cref="LocalMatchEnvelope.LaunchDefaultLoadout"/>, independent of
+    /// the human's pick. This used to track the human's own secondary index, so the CPU card
+    /// showed neither side's real loadout.
+    /// </remarks>
+    private static int BotMainItemIndex(IReadOnlyList<ClientItemDefinition> items)
+    {
+        var botMain = LocalMatchEnvelope.LaunchDefaultLoadout.Main;
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (items[i].Id == botMain)
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    private void ConfirmLoadoutAndStartDuel()
     {
         if (_picker is null || _roster is null || _roster.Count == 0)
         {
@@ -663,7 +684,7 @@ public partial class Main : Node2D
             seed: _matchSeed,
             matchId: $"local-duel-{_matchSeed}",
             mapId: PlayableMaps[_selectedMapIndex],
-            loadout: _picker.Loadout);
+            humanLoadout: _picker.Loadout);
 
         try
         {
@@ -675,7 +696,7 @@ public partial class Main : Node2D
             _menuError = exception.Message;
         }
 
-        _inCharacterSelect = _live is null;
+        _inLoadoutSelect = _live is null;
         _started = _live is not null || _menuError is not null;
         QueueRedraw();
     }
@@ -690,7 +711,7 @@ public partial class Main : Node2D
         _live.Dispose();
         _live = null;
         _matchSeed++;
-        ConfirmCharacterAndStartDuel();
+        ConfirmLoadoutAndStartDuel();
     }
 
     private static LiveMatch CreateLiveMatch(MatchBootstrapResult bootstrap) =>
@@ -901,15 +922,15 @@ public partial class Main : Node2D
         }
     }
 
-    private static Color CharacterTileColor(int index, int count) =>
+    private static Color ItemTileColor(int index, int count) =>
         Color.FromHsv(count <= 0 ? 0f : (float)index / count, 0.55f, 0.5f);
 
-    private void DrawCharacterSelect()
+    private void DrawLoadoutSelect()
     {
         var font = ThemeDB.FallbackFont;
 
         DrawRect(new Rect2(0, 0, GetViewportRect().Size.X, 64), new Color(0.55f, 0.10f, 0.12f));
-        DrawString(font, new Vector2(24, 40), "CHARACTER SELECT", fontSize: 24, modulate: Colors.White);
+        DrawString(font, new Vector2(24, 40), "LOADOUT", fontSize: 24, modulate: Colors.White);
 
         if (_roster is null or { Count: 0 })
         {
@@ -921,18 +942,18 @@ public partial class Main : Node2D
         // current human pick. Draw order matters here — later calls paint over earlier ones —
         // so the label goes on top of the tile, and every tile before its own float offset is
         // applied means a floated tile visually overlaps the row above it, matching the
-        // reference image's own slight overlap when a character lifts off the grid line.
+        // reference image's own slight overlap when an item tile lifts off the grid line.
         for (var i = 0; i < _roster.Count; i++)
         {
             var charDef = _roster[i];
-            var restRect = CharacterTileRestRect(i);
+            var restRect = ItemTileRestRect(i);
             var yOffset = _tileAnimations?[i].YOffset ?? 0f;
             var tileRect = new Rect2(restRect.Position + new Vector2(0, yOffset), restRect.Size);
 
-            var isFocused = i == _selectedCharacterIndex;
+            var isFocused = i == _selectedItemIndex;
             var isEquipped = _picker?.IsEquipped(i) == true;
 
-            DrawRect(tileRect, CharacterTileColor(i, _roster.Count));
+            DrawRect(tileRect, ItemTileColor(i, _roster.Count));
 
             var borderColor = isFocused ? Colors.Yellow : isEquipped ? Colors.Gold : new Color(1, 1, 1, 0.25f);
             DrawRect(tileRect, borderColor, filled: false, width: isFocused || isEquipped ? 3f : 1f);
@@ -953,7 +974,7 @@ public partial class Main : Node2D
 
         // Detail panel: whatever is under the mouse takes priority over the keyboard pick, the
         // same way a real player expects hovering to preview before committing.
-        var detailIndex = _hoveredCharacterIndex >= 0 ? _hoveredCharacterIndex : _selectedCharacterIndex;
+        var detailIndex = _hoveredItemIndex >= 0 ? _hoveredItemIndex : _selectedItemIndex;
         var detailChar = _roster[detailIndex];
         var detailPos = new Vector2(TileGridOrigin.X + (TileColumns * (TileSize + TileGap)) + 20, TileGridOrigin.Y);
         DrawString(font, detailPos, $"{detailChar.DisplayName} ({detailChar.Id})", fontSize: 18, modulate: Colors.Gold);
@@ -979,8 +1000,8 @@ public partial class Main : Node2D
         // reference image's P1/CPU panels.
         var cardTop = TileGridOrigin.Y + (2 * (TileSize + TileGap)) + 30;
         var cardWidth = (GetViewportRect().Size.X - 72) / 2f;
-        DrawSelectionCard(new Rect2(24, cardTop, cardWidth, 190), "PLAYER 1", _selectedCharacterIndex, new Color(0.55f, 0.10f, 0.12f));
-        DrawSelectionCard(new Rect2(48 + cardWidth, cardTop, cardWidth, 190), "CPU OPPONENT", _selectedBotCharacterIndex, new Color(0.30f, 0.30f, 0.34f));
+        DrawSelectionCard(new Rect2(24, cardTop, cardWidth, 190), "PLAYER 1", _selectedItemIndex, new Color(0.55f, 0.10f, 0.12f));
+        DrawSelectionCard(new Rect2(48 + cardWidth, cardTop, cardWidth, 190), "CPU OPPONENT", _botMainItemIndex, new Color(0.30f, 0.30f, 0.34f));
 
         var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
         DrawString(
@@ -991,29 +1012,29 @@ public partial class Main : Node2D
             modulate: Colors.Cyan);
     }
 
-    private void DrawSelectionCard(Rect2 rect, string label, int characterIndex, Color background)
+    private void DrawSelectionCard(Rect2 rect, string label, int itemIndex, Color background)
     {
-        if (_roster is null || characterIndex >= _roster.Count)
+        if (_roster is null || itemIndex >= _roster.Count)
         {
             return;
         }
 
         var font = ThemeDB.FallbackFont;
-        var character = _roster[characterIndex];
+        var item = _roster[itemIndex];
 
         DrawRect(rect, background);
         DrawRect(rect, new Color(1, 1, 1, 0.6f), filled: false, width: 2f);
 
         var swatchRect = new Rect2(rect.Position + new Vector2(18, 18), new Vector2(TileSize, TileSize));
-        DrawRect(swatchRect, CharacterTileColor(characterIndex, _roster.Count));
+        DrawRect(swatchRect, ItemTileColor(itemIndex, _roster.Count));
         DrawRect(swatchRect, Colors.White, filled: false, width: 2f);
 
         var textPos = rect.Position + new Vector2(18 + TileSize + 18, 40);
         DrawString(font, textPos, label, fontSize: 15, modulate: new Color(1, 1, 1, 0.85f));
         textPos.Y += 30;
-        DrawString(font, textPos, character.DisplayName, fontSize: 22, modulate: Colors.White);
+        DrawString(font, textPos, item.DisplayName, fontSize: 22, modulate: Colors.White);
         textPos.Y += 26;
-        DrawString(font, textPos, $"{character.Slot}  ammo {character.StartingAmmo}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
+        DrawString(font, textPos, $"{item.Slot}  ammo {item.StartingAmmo}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
     }
 
     private void DrawLiveMatch(LiveMatch live)
@@ -1335,13 +1356,13 @@ public partial class Main : Node2D
             _isProcessingBotTurn = true;
             EnterLocalSetup();
             _selectedMapIndex = 0;
-            EnterCharacterSelect();
+            EnterLoadoutSelect();
             if (_picker is null)
             {
                 throw new InvalidOperationException($"C5 picker failed to load: {_menuError}");
             }
 
-            ConfirmCharacterAndStartDuel();
+            ConfirmLoadoutAndStartDuel();
             live = _live ?? throw new InvalidOperationException($"C5 confirm failed to start a match: {_menuError}");
 
             if (live.CurrentSnapshot.MapId != PlayableMaps[0])
@@ -1496,11 +1517,11 @@ public partial class Main : Node2D
         try
         {
             // Drives the exact same methods a real player's input does — EnterLocalSetup,
-            // EnterCharacterSelect, ConfirmCharacterAndStartDuel, then Rematch — rather than
+            // EnterLoadoutSelect, ConfirmLoadoutAndStartDuel, then Rematch — rather than
             // building requests by hand and calling FixtureMatchBootstrapper.StartLive directly.
             // A hand-built request proves the backend accepts well-formed input; it does not
-            // prove the interactive screens themselves (DrawLocalSetup, DrawCharacterSelect/
-            // HandleCharacterSelectInput) ever ran or rendered. This is the whole point of a C6
+            // prove the interactive screens themselves (DrawLocalSetup, DrawLoadoutSelect/
+            // HandleLoadoutSelectInput) ever ran or rendered. This is the whole point of a C6
             // smoke test, per CLIENT_SPEC §20.5's own rule: a real pixel is the proof, not a
             // claim that the code compiles.
             EnterLocalSetup();
@@ -1510,10 +1531,10 @@ public partial class Main : Node2D
             var (localSetupWidth, localSetupHeight) = CaptureScreenshot(options.LocalSetupScreenshotPath);
             _inLocalSetup = false;
 
-            EnterCharacterSelect();
+            EnterLoadoutSelect();
             if (_roster is null || _roster.Count == 0)
             {
-                throw new InvalidOperationException($"Character select failed to load a roster: {_menuError}");
+                throw new InvalidOperationException($"Loadout select failed to load a roster: {_menuError}");
             }
 
             var rosterCount = _roster.Count;
@@ -1521,7 +1542,7 @@ public partial class Main : Node2D
             QueueRedraw();
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            var (characterSelectWidth, characterSelectHeight) = CaptureScreenshot(options.CharacterSelectScreenshotPath);
+            var (loadoutSelectWidth, loadoutSelectHeight) = CaptureScreenshot(options.LoadoutSelectScreenshotPath);
 
             // Exercises the hover-float animation through the exact input path real mouse
             // motion goes through, and proves the "cannot be interrupted" requirement: hover a
@@ -1529,50 +1550,50 @@ public partial class Main : Node2D
             // finishes, and confirm it still completes the float — never reverses mid-flight —
             // before landing begins.
             var hoverTileIndex = Math.Min(2, _roster.Count - 1);
-            var hoverPoint = CharacterTileRestRect(hoverTileIndex).GetCenter();
+            var hoverPoint = ItemTileRestRect(hoverTileIndex).GetCenter();
             using (var hoverEvent = new InputEventMouseMotion { Position = hoverPoint })
             {
-                HandleCharacterSelectInput(hoverEvent);
+                HandleLoadoutSelectInput(hoverEvent);
             }
 
             // The state transition into "animating toward floated" and the actual time-advance
-            // happen in separate branches of UpdateCharacterTileAnimations (a tile only starts
+            // happen in separate branches of UpdateItemTileAnimations (a tile only starts
             // consuming delta once IsAnimating is already true entering the call) — so this
             // needs two calls: one to begin the motion, a second to actually move partway
             // through it. A single call here would (incorrectly) start the animation without
             // visibly moving it at all.
-            UpdateCharacterTileAnimations(0f);
-            UpdateCharacterTileAnimations(TileFloatUpSeconds * 0.5f);
+            UpdateItemTileAnimations(0f);
+            UpdateItemTileAnimations(TileFloatUpSeconds * 0.5f);
             var wasFloatingMidFlight = _tileAnimations![hoverTileIndex].IsAnimating &&
                 _tileAnimations[hoverTileIndex].AnimatingTowardFloated &&
                 _tileAnimations[hoverTileIndex].YOffset < -1f;
 
             using (var awayEvent = new InputEventMouseMotion { Position = new Vector2(-100, -100) })
             {
-                HandleCharacterSelectInput(awayEvent);
+                HandleLoadoutSelectInput(awayEvent);
             }
 
-            UpdateCharacterTileAnimations(0.001f);
+            UpdateItemTileAnimations(0.001f);
             var stillCompletingTheFloatAfterHoverLeft = _tileAnimations[hoverTileIndex].IsAnimating &&
                 _tileAnimations[hoverTileIndex].AnimatingTowardFloated;
 
             QueueRedraw();
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            _ = CaptureScreenshot(options.CharacterSelectHoverScreenshotPath);
+            _ = CaptureScreenshot(options.LoadoutSelectHoverScreenshotPath);
 
-            UpdateCharacterTileAnimations(TileFloatUpSeconds);
-            UpdateCharacterTileAnimations(TileFloatDownSeconds);
+            UpdateItemTileAnimations(TileFloatUpSeconds);
+            UpdateItemTileAnimations(TileFloatDownSeconds);
             var restedCleanlyAfterTheFullCycle = !_tileAnimations[hoverTileIndex].IsAnimating &&
                 Mathf.Abs(_tileAnimations[hoverTileIndex].YOffset) < 0.01f;
 
             var hoverAnimationInterruptionTestPassed =
                 wasFloatingMidFlight && stillCompletingTheFloatAfterHoverLeft && restedCleanlyAfterTheFullCycle;
-            _hoveredCharacterIndex = -1;
+            _hoveredItemIndex = -1;
             if (!hoverAnimationInterruptionTestPassed)
             {
                 throw new InvalidOperationException(
-                    "The character-select tile float animation was interrupted mid-flight instead of completing it.");
+                    "The loadout-select tile float animation was interrupted mid-flight instead of completing it.");
             }
 
             ClickPickerItem("frostfall-mortar");
@@ -1582,8 +1603,10 @@ public partial class Main : Node2D
                     $"Clicking frostfall-mortar must equip it as main; loadout was {_picker?.Loadout.Main}.");
             }
 
-            var humanCharId = _picker.Loadout.Main;
-            var botCharId = _picker.Loadout.Main;
+            // Each side reports its own main item. These were both the human's pick, which made
+            // the two fields indistinguishable and hid that the bot was mirroring the loadout.
+            var humanMainItemId = _picker.Loadout.Main;
+            var botMainItemId = LocalMatchEnvelope.LaunchDefaultLoadout.Main;
             _isProcessingBotTurn = true;
 
             var mapsCompletedCsv = string.Empty;
@@ -1603,7 +1626,7 @@ public partial class Main : Node2D
             for (var mapIndex = 0; mapIndex < PlayableMaps.Length; mapIndex++)
             {
                 _selectedMapIndex = mapIndex;
-                ConfirmCharacterAndStartDuel();
+                ConfirmLoadoutAndStartDuel();
                 if (_live is null)
                 {
                     throw new InvalidOperationException(
@@ -1737,8 +1760,8 @@ public partial class Main : Node2D
                 ClientVersion: diagnostics.ClientVersion,
                 GodotVersion: diagnostics.GodotVersion,
                 RosterCount: rosterCount,
-                HumanCharacterId: humanCharId,
-                BotCharacterId: botCharId,
+                HumanMainItemId: humanMainItemId,
+                BotMainItemId: botMainItemId,
                 InitialMatchCreated: true,
                 HoverAnimationInterruptionTestPassed: hoverAnimationInterruptionTestPassed,
                 HumanTurnExecuted: humanTurnExecuted,
@@ -1753,8 +1776,8 @@ public partial class Main : Node2D
                 RematchSessionDisposedCleanly: rematchDisposedCleanly,
                 ScreenshotWidth: screenshotWidth,
                 ScreenshotHeight: screenshotHeight,
-                CharacterSelectScreenshotWidth: characterSelectWidth,
-                CharacterSelectScreenshotHeight: characterSelectHeight,
+                LoadoutSelectScreenshotWidth: loadoutSelectWidth,
+                LoadoutSelectScreenshotHeight: loadoutSelectHeight,
                 LocalSetupScreenshotWidth: localSetupWidth,
                 LocalSetupScreenshotHeight: localSetupHeight,
                 MapsCompleted: mapsCompletedCsv,
@@ -1769,8 +1792,8 @@ public partial class Main : Node2D
                 ClientVersion: diagnostics.ClientVersion,
                 GodotVersion: diagnostics.GodotVersion,
                 RosterCount: 0,
-                HumanCharacterId: string.Empty,
-                BotCharacterId: string.Empty,
+                HumanMainItemId: string.Empty,
+                BotMainItemId: string.Empty,
                 InitialMatchCreated: false,
                 HoverAnimationInterruptionTestPassed: false,
                 HumanTurnExecuted: false,
@@ -1785,8 +1808,8 @@ public partial class Main : Node2D
                 RematchSessionDisposedCleanly: false,
                 ScreenshotWidth: 0,
                 ScreenshotHeight: 0,
-                CharacterSelectScreenshotWidth: 0,
-                CharacterSelectScreenshotHeight: 0,
+                LoadoutSelectScreenshotWidth: 0,
+                LoadoutSelectScreenshotHeight: 0,
                 LocalSetupScreenshotWidth: 0,
                 LocalSetupScreenshotHeight: 0,
                 MapsCompleted: string.Empty,
@@ -1801,7 +1824,7 @@ public partial class Main : Node2D
                 _live = null;
             }
 
-            _inCharacterSelect = false;
+            _inLoadoutSelect = false;
             _isProcessingBotTurn = false;
         }
     }
@@ -1827,22 +1850,22 @@ public partial class Main : Node2D
 
         try
         {
-            // A minimal boot to a live match — LocalSetup and character select's own screens are
+            // A minimal boot to a live match — LocalSetup and loadout select's own screens are
             // already proven pixel-for-pixel by the C6 smoke path; this test exists to prove one
             // thing neither of those does: that an idle turn ends on its own, through the real
             // Main._Process trigger, without this test ever calling SubmitTimeoutAsync itself.
             EnterLocalSetup();
             _inLocalSetup = false;
-            EnterCharacterSelect();
+            EnterLoadoutSelect();
             if (_roster is null || _roster.Count == 0)
             {
-                throw new InvalidOperationException($"Character select failed to load a roster: {_menuError}");
+                throw new InvalidOperationException($"Loadout select failed to load a roster: {_menuError}");
             }
 
-            ConfirmCharacterAndStartDuel();
+            ConfirmLoadoutAndStartDuel();
             if (_live is null)
             {
-                throw new InvalidOperationException($"Character select confirmation failed to start a match: {_menuError}");
+                throw new InvalidOperationException($"Loadout select confirmation failed to start a match: {_menuError}");
             }
 
             var deadline = _live.PlanningDeadlineUtc
@@ -1924,7 +1947,7 @@ public partial class Main : Node2D
                 _live = null;
             }
 
-            _inCharacterSelect = false;
+            _inLoadoutSelect = false;
             _isProcessingBotTurn = false;
             _isProcessingTimeout = false;
         }
@@ -2061,9 +2084,9 @@ public partial class Main : Node2D
         {
             Pressed = true,
             ButtonIndex = MouseButton.Left,
-            Position = CharacterTileRestRect(index).GetCenter(),
+            Position = ItemTileRestRect(index).GetCenter(),
         };
-        HandleCharacterSelectInput(click);
+        HandleLoadoutSelectInput(click);
     }
 
     private static string LoadoutMainOf(ClientMatchSnapshot snapshot, string playerId)

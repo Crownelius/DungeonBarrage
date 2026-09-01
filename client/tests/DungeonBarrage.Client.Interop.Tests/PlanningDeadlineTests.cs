@@ -101,7 +101,7 @@ public sealed class PlanningDeadlineTests
             seed: 12345,
             matchId: "test-match",
             mapId: mapId,
-            loadout: new ClientLoadout("ramshot-cannon", "recurve-bow", "trench-spade"));
+            humanLoadout: new ClientLoadout("ramshot-cannon", "recurve-bow", "trench-spade"));
         var session = LocalMatchSession.Create(
             System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options));
         var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(

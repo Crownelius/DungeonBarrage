@@ -43,16 +43,22 @@ public sealed class LoadoutPickerTests
             seed: 12345,
             matchId: "picker-frostfall",
             mapId: "crow-perch",
-            loadout: picker.Loadout);
+            humanLoadout: picker.Loadout);
 
+        // The human's pick reaches their own side only. The opponent fields the launch default,
+        // so this also pins that a duel is not a mirror match by construction.
         Assert.Equal("frostfall-mortar", request.Match.Players[0].Loadout.Main);
-        Assert.Equal("frostfall-mortar", request.Match.Players[1].Loadout.Main);
+        Assert.Equal(
+            LocalMatchEnvelope.LaunchDefaultLoadout.Main,
+            request.Match.Players[1].Loadout.Main);
+        Assert.NotEqual(
+            request.Match.Players[0].Loadout.Main,
+            request.Match.Players[1].Loadout.Main);
 
         var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
         var json = Encoding.UTF8.GetString(jsonBytes);
         Assert.Contains("\"main\":\"frostfall-mortar\"", json, StringComparison.Ordinal);
         Assert.DoesNotContain("characterId", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("ramshot-cannon", json, StringComparison.Ordinal);
 
         using var session = LocalMatchSession.Create(jsonBytes);
         var created = JsonSerializer.Deserialize<ClientCreateResponse>(
@@ -61,7 +67,9 @@ public sealed class LoadoutPickerTests
         Assert.True(created.Created);
         Assert.NotNull(created.Snapshot);
         Assert.Equal("frostfall-mortar", created.Snapshot.Players[0].Loadout.Main);
-        Assert.Equal("frostfall-mortar", created.Snapshot.Players[1].Loadout.Main);
+        Assert.Equal(
+            LocalMatchEnvelope.LaunchDefaultLoadout.Main,
+            created.Snapshot.Players[1].Loadout.Main);
         Assert.Equal("recurve-bow", created.Snapshot.Players[0].Loadout.Secondary);
         Assert.Equal("trench-spade", created.Snapshot.Players[0].Loadout.MeleeTool);
 
@@ -152,7 +160,7 @@ public sealed class LoadoutPickerTests
                 seed: 12345,
                 matchId: $"picker-{item.Id}",
                 mapId: "crow-perch",
-                loadout: picker.Loadout);
+                humanLoadout: picker.Loadout);
 
             Assert.Equal(picker.Loadout.Main, request.Match.Players[0].Loadout.Main);
             Assert.Equal(picker.Loadout.Secondary, request.Match.Players[0].Loadout.Secondary);

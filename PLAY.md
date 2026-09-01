@@ -28,12 +28,15 @@ Open the Godot 4.7.1 .NET editor (pinned by `scripts/verify-toolchain.ps1`) on
 
 1. Click or press Enter on the menu.
 2. **Local setup:** left/right chooses one of the three stacked maps. Enter continues.
-3. **Loadout picker:** tiles are items. Click a tile (or use arrows) to **equip it into its
+3. **Loadout:** tiles are items. Click a tile (or use arrows) to **equip it into its
    slot** — a main-slot click replaces only main, and so on. The default triangle is
    Ramshot Cannon / Recurve Bow / Trench Spade. Enter starts a local duel versus the bot
-   with the equipped loadout.
-4. **Aim:** drag from your crow to set angle and power, then release to fire the selected
-   slot (`1` main, `2` secondary, `3` melee/tool). Left/right walk. `P` passes.
+   with the equipped loadout. The bot always fields the default triangle, so changing your
+   pick changes only your own side.
+4. **Aim:** drag *anywhere* on the screen to set angle and power, then release to fire the
+   selected slot (`1` main, `2` secondary, `3` melee/tool). The drag is a relative vector, so
+   it starts where you press, **not** at your crow, and the aim line is drawn from the press
+   point. Left/right walk. `P` passes.
 5. Destroying a supporting block makes the stacked blocks **fall in sim state**; Godot
    redraws the snapshot. The match ends with a visible victory, draw, or lose on the
    results screen. Enter rematches.
@@ -51,6 +54,12 @@ is not one of the three playable stacked maps.
 
 ## Envelope
 
-`SIMULATION_VERSION` is 7. Create/command JSON has no `characterId` and no kits. Each
-player sends `loadout: { main, secondary, meleeTool }`. Finite items spend ammo; the
-Longsword is the only unlimited item.
+`SIMULATION_VERSION` is 7 and `CONTENT_VERSION` is 3. Create/command JSON has no
+`characterId` and no kits. Each player sends `loadout: { main, secondary, meleeTool }`.
+Finite items spend ammo; the Longsword is the only unlimited item.
+
+Content version 3 scopes the Ramshot Cannon's knockback to its own crater. At version 2 that
+effect shoved every opponent a flat eight cells wherever the shell landed, so the opening shot
+launched the other crow out of the world and **every duel ended on turn 1**. If you are testing
+a build where one shot always wins, you are on content version 2 — check
+`db_sim_content_version()` before reading anything into the result.

@@ -3271,3 +3271,86 @@ the sanctioned writer. The C2 fixture's ability step changes from a mutual-annih
   shared resolver semantics and every golden vector, so it is flagged rather than changed here.
 - `fixture.json`'s `purpose` still claims "authoritative turn handoff"; that fixture has not
   handed a turn over since version 7 changed the roster.
+
+## Kit-name cleanup, independent bot loadout, and a manifest bump the unit tests could not see
+
+Follow-up to the review above, working the cleanup list from the external review of `d3643a3`.
+
+### The presentation manifest pinned the old content version
+
+`CONTENT_VERSION` went 2 → 3 in the fix commit, but
+`client/src/DungeonBarrage.Client/Settings/presentation-manifest-v1.json` still declared 2.
+`PresentationManifest` validates presentation/request/native agreement, so **every match refused
+to start**:
+
+```
+Confirm failed to start crow-perch: Presentation content 2, request content 3, and native
+content 3 must match.
+```
+
+Nothing in 65 unit tests caught this — they construct envelopes directly and never load the
+manifest. It surfaced only from running the exported C6 smoke path, which is the whole argument
+for keeping that path in the gate rather than trusting green unit tests. Bumped to 3.
+
+### The two smoke-report item fields were the same value
+
+`humanCharacterId` and `botCharacterId` were both assigned `_picker.Loadout.Main`, so they could
+never disagree and the report could not show that the opponent was mirroring the human's pick.
+
+`LocalMatchEnvelope.HumanVsBot` now takes `humanLoadout` and an optional `botLoadout`, defaulting
+to a named `LaunchDefaultLoadout` (the Rust `Loadout::launch_default()` triangle). The opponent no
+longer copies the player. The report now reads `humanMainItemId: frostfall-mortar`,
+`botMainItemId: ramshot-cannon` — two fields that can finally disagree, which is what makes them
+worth reporting.
+
+`LoadoutPickerTests` asserted the mirror explicitly (`Players[1].Loadout.Main == "frostfall-mortar"`
+plus `DoesNotContain("ramshot-cannon")`). Updated to pin the new contract rather than relaxed: it
+now asserts the human's side is frostfall, the opponent's is the launch default, and that the two
+differ.
+
+### Kit-era naming removed from the client
+
+112 identifier and string replacements across `Main.cs` and `C6Smoke.cs`: `_inCharacterSelect` →
+`_inLoadoutSelect`, `EnterCharacterSelect`/`DrawCharacterSelect`/`HandleCharacterSelectInput` →
+their `LoadoutSelect` equivalents, `CharacterTile*` → `ItemTile*`, `HumanCharacterId`/
+`BotCharacterId` → `HumanMainItemId`/`BotMainItemId`, and the `"CHARACTER SELECT"` header →
+`"LOADOUT"`. Derived screenshot paths follow (`-loadout-select.png`). The stale module doc claiming
+"character selection across the full 9-starter roster" now describes the item catalog.
+
+The `ClientCharacterDefinition` contract type is deliberately left alone: it is already marked a
+legacy view and is not on the picker path.
+
+### The CPU card was showing neither side's loadout
+
+`_selectedBotItemIndex` was assigned `_picker.SecondaryIndex`, so the opponent card displayed the
+*human's secondary* item — a leftover of the two-sided character picker. With the opponent now
+fielding a fixed default, that control was also inert. Replaced with `_botMainItemIndex`, resolved
+from `LaunchDefaultLoadout.Main`, so the card states what the opponent actually brings.
+
+### PLAY.md corrections
+
+- Aim is a **relative drag from wherever you press**, not from the crow, and the aim line is drawn
+  from the press point (`_aimOrigin = mouseButton.Position`). The old wording would have had a
+  play-tester dragging at their own bird and reading the result as a bug.
+- Records `CONTENT_VERSION` 3 and states the version-2 symptom, so a tester who sees one shot win
+  every duel checks `db_sim_content_version()` instead of accepting it as the intended feel.
+- Notes that the opponent always fields the default triangle.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt` / `clippy -D warnings` / `test --workspace` / `deny check` | pass |
+| `dotnet format --verify-no-changes` | pass |
+| `dotnet test -c Release` | 65 pass, 0 fail |
+| `gitleaks git --log-opts="--all"` | no leaks |
+| `godot --export-release "Windows Desktop"` | pass |
+| headless + windowed C6 smoke | pass: 3/3 maps completed, `stackedBlocksFell`, `turnsPlayed: 8` |
+
+`turnsPlayed: 8` across a completed three-map run is the number worth watching: at content
+version 2 the opening shot ended each duel, so this figure was the defect's own symptom.
+
+### Deliberately not done
+
+Steam page, un-ignoring the 41 kit tests, restoring ADR 0002, Box2D, and any match server all
+remain out of scope and untouched.
