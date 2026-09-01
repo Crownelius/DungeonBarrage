@@ -461,6 +461,22 @@ pub fn validate_roster() -> SimResult<()> {
                 }
             }
         }
+
+        // A `Knockback`/`Push` with no radius does not mean "no area effect".
+        // `displacement.rs` reads `magnitude_secondary <= 0` as *no radius test at all*:
+        // `targets_in_radius` then collects every living opponent on the map and `falloff`
+        // returns the full magnitude regardless of distance. That shipped once, on the
+        // Ramshot Cannon at `CONTENT_VERSION` 2, and decided every match on turn 1. The
+        // catalog refuses it here rather than trusting the next author to remember.
+        for effect in definition.ability.effects {
+            if matches!(effect.kind, EffectKind::Knockback | EffectKind::Push)
+                && effect.magnitude_secondary <= 0
+            {
+                return Err(SimError::InvalidCharacter {
+                    reason: CharacterRejection::StatOutOfRange,
+                });
+            }
+        }
     }
     if unlimited_count != 1 {
         return Err(SimError::InvalidRoster);
@@ -478,6 +494,28 @@ pub fn validate_roster() -> SimResult<()> {
 mod tests {
     use super::*;
     use crate::types::DEFAULT_AMMO;
+
+    #[test]
+    fn every_displacement_effect_declares_a_positive_falloff_radius() {
+        // Regression guard for CONTENT_VERSION 3. `magnitude_secondary` is the falloff radius
+        // for `Knockback`/`Push`, and `displacement.rs` treats `<= 0` as "no radius test at
+        // all" -- full magnitude against every living opponent, wherever they are standing.
+        // The Ramshot Cannon shipped that way and ended every duel on turn 1.
+        for definition in LAUNCH_ITEMS {
+            for effect in definition.ability.effects {
+                if matches!(effect.kind, EffectKind::Knockback | EffectKind::Push) {
+                    assert!(
+                        effect.magnitude_secondary > 0,
+                        "{} declares a {:?} with magnitude_secondary {}; a displacement radius                          must be positive or it applies to the whole map",
+                        definition.id,
+                        effect.kind,
+                        effect.magnitude_secondary
+                    );
+                }
+            }
+        }
+        validate_roster().expect("the shipped catalog must satisfy its own invariants");
+    }
 
     #[test]
     fn the_catalog_is_self_consistent() {

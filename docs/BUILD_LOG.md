@@ -3354,3 +3354,35 @@ version 2 the opening shot ended each duel, so this figure was the defect's own 
 
 Steam page, un-ignoring the 41 kit tests, restoring ADR 0002, Box2D, and any match server all
 remain out of scope and untouched.
+
+## Closing the radius trap in content validation
+
+The two commits above fixed the shipped instance of the radius-zero defect and corrected the
+documentation, but left the trap itself live: nothing stopped the next content author from
+writing `magnitude_secondary: 0` on a new `Knockback` or `Push` and reproducing it exactly.
+
+Changing `displacement.rs`'s `radius <= 0` branch to mean its originally documented "primary
+target only" would move shared resolver semantics and every golden vector, and it would silently
+make any aim-fired displacement inert -- the failure mode this codebase already recorded once,
+when 19 effects did nothing. So the invariant is enforced where the mistake is actually made, in
+the catalog:
+
+`validate_roster()` now rejects any `Knockback`/`Push` whose `magnitude_secondary` is not
+positive, and `every_displacement_effect_declares_a_positive_falloff_radius` states the rule
+directly against `LAUNCH_ITEMS`. Both were confirmed to fire, not pass vacuously, by setting the
+Ramshot radius back to `0`: the dedicated test and the pre-existing
+`the_catalog_is_self_consistent` (which calls `validate_roster`) both fail, then pass again once
+reverted.
+
+`fixture.json`'s `purpose` also still advertised "authoritative turn handoff". That fixture has
+not handed a turn over since version 7 changed the roster, and after the knockback fix it ends on
+its own shooter's crater rather than a mutual kill. Its description now says what it actually
+freezes and points turn-handover coverage at the playable maps.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt` / `clippy -D warnings` / `test --workspace` / `deny check` | pass |
+| `dotnet format --verify-no-changes` / `dotnet test -c Release` | pass, 65 tests |
+| `godot --export-release` + headless C6 smoke | pass: 3/3 maps, `stackedBlocksFell`, `turnsPlayed: 8` |

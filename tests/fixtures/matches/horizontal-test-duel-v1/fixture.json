@@ -1,7 +1,7 @@
 {
   "fixtureSchemaVersion": 1,
   "id": "horizontal-test-duel-v1",
-  "purpose": "Real map and roster: nonzero movement, one projectile, and authoritative turn handoff.",
+  "purpose": "Real map and loadout: nonzero movement, one projectile, and a terminal authoritative outcome. This fixture no longer hands a turn over -- its own 15%-power 45-degree lob craters the shooter's platform -- so turn-handover behaviour is proved on a playable map instead.",
   "versions": {
     "abiVersion": 1,
     "clientContractVersion": 1,
