@@ -193,9 +193,9 @@ impl From<AbilityPreviewRequestDto> for AbilityPreviewRequest {
             expected_snapshot_generation,
             player_id,
             slot: match slot {
-                AbilitySlotDto::Basic => AbilitySlot::Basic,
-                AbilitySlotDto::BasicAlt => AbilitySlot::BasicAlt,
-                AbilitySlotDto::Special => AbilitySlot::Special,
+                AbilitySlotDto::Main => AbilitySlot::Basic,
+                AbilitySlotDto::Secondary => AbilitySlot::BasicAlt,
+                AbilitySlotDto::MeleeTool => AbilitySlot::Special,
             },
             angle_millidegrees,
             power_basis_points,
@@ -246,8 +246,16 @@ enum MatchModeDto {
 struct MatchPlayerConfigDto {
     player_id: String,
     team: u8,
-    character_id: String,
+    loadout: LoadoutDto,
     appearance: AppearanceDto,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LoadoutDto {
+    main: String,
+    secondary: String,
+    melee_tool: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,12 +343,12 @@ enum MatchCommandDto {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 enum AbilitySlotDto {
-    #[serde(rename = "basic")]
-    Basic,
-    #[serde(rename = "basicAlt")]
-    BasicAlt,
-    #[serde(rename = "special")]
-    Special,
+    #[serde(rename = "main")]
+    Main,
+    #[serde(rename = "secondary")]
+    Secondary,
+    #[serde(rename = "meleeTool")]
+    MeleeTool,
 }
 
 fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -368,7 +376,11 @@ impl From<MatchPlayerConfigDto> for MatchPlayerConfig {
         Self {
             player_id: value.player_id,
             team: value.team,
-            character_id: value.character_id,
+            loadout: db_sim_core::types::Loadout {
+                main: value.loadout.main,
+                secondary: value.loadout.secondary,
+                melee_tool: value.loadout.melee_tool,
+            },
             appearance: Appearance {
                 skin_id: value.appearance.skin_id,
                 ability_skin_ids: value.appearance.ability_skin_ids,
@@ -415,9 +427,9 @@ impl From<MatchCommandDto> for MatchCommand {
                 expected_snapshot_generation,
                 kind: MatchCommandKind::Ability {
                     slot: match slot {
-                        AbilitySlotDto::Basic => AbilitySlot::Basic,
-                        AbilitySlotDto::BasicAlt => AbilitySlot::BasicAlt,
-                        AbilitySlotDto::Special => AbilitySlot::Special,
+                        AbilitySlotDto::Main => AbilitySlot::Basic,
+                        AbilitySlotDto::Secondary => AbilitySlot::BasicAlt,
+                        AbilitySlotDto::MeleeTool => AbilitySlot::Special,
                     },
                     angle_millidegrees,
                     power_basis_points,
@@ -697,7 +709,14 @@ fn assert_step(
         transition.post_snapshot.generation,
         expected.post_generation
     );
-    assert_eq!(session.generation(), expected.post_generation);
+    assert_eq!(
+        session.generation(),
+        expected.post_generation,
+        "session generation after {} (disposition {:?}, transition post {})",
+        actor_id,
+        transition.disposition,
+        transition.post_snapshot_generation
+    );
     assert_eq!(
         transition.post_snapshot.turn_number,
         expected.post_turn_number

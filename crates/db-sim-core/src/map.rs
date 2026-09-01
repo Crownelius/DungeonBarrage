@@ -167,6 +167,185 @@ pub fn horizontal_test_array() -> MapDefinition {
     }
 }
 
+/// Looks up an authored map by stable identifier.
+#[must_use]
+pub fn find(id: &str) -> Option<MapDefinition> {
+    match id {
+        "horizontal-test-array" => Some(horizontal_test_array()),
+        "crow-perch" => Some(crow_perch()),
+        "broken-battlements" => Some(broken_battlements()),
+        "twin-spires" => Some(twin_spires()),
+        _ => None,
+    }
+}
+
+/// Every playable map, including the unstacked C2 duel fixture.
+#[must_use]
+pub fn catalog() -> [MapDefinition; 4] {
+    [
+        horizontal_test_array(),
+        crow_perch(),
+        broken_battlements(),
+        twin_spires(),
+    ]
+}
+
+/// Maps that ship stacked destructible structures for the playable cut.
+#[must_use]
+pub fn stacked_catalog() -> [MapDefinition; 3] {
+    [crow_perch(), broken_battlements(), twin_spires()]
+}
+
+const STACK_BLOCK_WIDTH: u16 = 4;
+const STACK_BLOCK_HEIGHT: u16 = 3;
+const STACK_BLOCK_HEALTH: u16 = 80;
+
+fn stack_block(id: u32, origin_x: i32, origin_y: i32) -> TerrainBlock {
+    TerrainBlock {
+        id,
+        origin_cell_x: origin_x,
+        origin_cell_y: origin_y,
+        width_cells: STACK_BLOCK_WIDTH,
+        height_cells: STACK_BLOCK_HEIGHT,
+        material: Material::Soil,
+        health: STACK_BLOCK_HEALTH,
+        max_health: STACK_BLOCK_HEALTH,
+        erosion_axis: ErosionAxis::default(),
+    }
+}
+
+/// Two facing towers, three blocks high, with a spawn on each crown.
+///
+/// ```text
+///    S                         S
+///   ┌──┐                      ┌──┐
+///   ├──┤                      ├──┤
+///   └──┘                      └──┘
+/// ```
+#[must_use]
+pub fn crow_perch() -> MapDefinition {
+    // y increases downward. Towers occupy rows 8..17; spawns sit two cells above the crown.
+    let left_x: i32 = 6;
+    let right_x: i32 = 38;
+    let top_y: i32 = 8;
+    let mid_y = top_y.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    let bot_y = mid_y.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    let spawn_y = top_y.saturating_sub(2);
+    MapDefinition {
+        id: "crow-perch",
+        width_cells: 48,
+        height_cells: 24,
+        blocks: vec![
+            stack_block(1, left_x, top_y),
+            stack_block(2, left_x, mid_y),
+            stack_block(3, left_x, bot_y),
+            stack_block(4, right_x, top_y),
+            stack_block(5, right_x, mid_y),
+            stack_block(6, right_x, bot_y),
+        ],
+        spawn_points: vec![
+            spawn_point(left_x.saturating_add(2), spawn_y),
+            spawn_point(right_x.saturating_add(2), spawn_y),
+        ],
+    }
+}
+
+/// A three-layer keep between two stacked spawn ledges.
+#[must_use]
+pub fn broken_battlements() -> MapDefinition {
+    let left_x: i32 = 4;
+    let keep_x: i32 = 22;
+    let right_x: i32 = 42;
+    let keep_top: i32 = 6;
+    let keep_mid = keep_top.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    let keep_bot = keep_mid.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    let ledge_top: i32 = 10;
+    let ledge_bot = ledge_top.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    MapDefinition {
+        id: "broken-battlements",
+        width_cells: 52,
+        height_cells: 26,
+        blocks: vec![
+            stack_block(1, left_x, ledge_top),
+            stack_block(2, left_x, ledge_bot),
+            stack_block(3, keep_x, keep_top),
+            stack_block(4, keep_x, keep_mid),
+            stack_block(5, keep_x, keep_bot),
+            stack_block(6, keep_x.saturating_add(6), keep_top),
+            stack_block(7, keep_x.saturating_add(6), keep_mid),
+            stack_block(8, keep_x.saturating_add(6), keep_bot),
+            stack_block(9, right_x, ledge_top),
+            stack_block(10, right_x, ledge_bot),
+        ],
+        spawn_points: vec![
+            spawn_point(left_x.saturating_add(2), ledge_top.saturating_sub(2)),
+            spawn_point(right_x.saturating_add(2), ledge_top.saturating_sub(2)),
+        ],
+    }
+}
+
+/// Three columns of stacked blocks (2 / 3 / 2) with facing spawns on the outer crowns.
+#[must_use]
+pub fn twin_spires() -> MapDefinition {
+    let left_x: i32 = 8;
+    let mid_x: i32 = 22;
+    let right_x: i32 = 36;
+    let high_top: i32 = 7;
+    let high_bot = high_top.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    let mid_top: i32 = 4;
+    let mid_mid = mid_top.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    let mid_bot = mid_mid.saturating_add(i32::from(STACK_BLOCK_HEIGHT));
+    MapDefinition {
+        id: "twin-spires",
+        width_cells: 48,
+        height_cells: 24,
+        blocks: vec![
+            stack_block(1, left_x, high_top),
+            stack_block(2, left_x, high_bot),
+            stack_block(3, mid_x, mid_top),
+            stack_block(4, mid_x, mid_mid),
+            stack_block(5, mid_x, mid_bot),
+            stack_block(6, right_x, high_top),
+            stack_block(7, right_x, high_bot),
+        ],
+        spawn_points: vec![
+            spawn_point(left_x.saturating_add(2), high_top.saturating_sub(2)),
+            spawn_point(right_x.saturating_add(2), high_top.saturating_sub(2)),
+        ],
+    }
+}
+
+/// Whether `blocks` contains at least one living pair stacked on the same columns.
+#[must_use]
+pub fn has_stacked_destructible_structure(blocks: &[TerrainBlock]) -> bool {
+    blocks.iter().any(|upper| {
+        if upper.health == 0 {
+            return false;
+        }
+        let upper_bottom = upper
+            .origin_cell_y
+            .saturating_add(i32::from(upper.height_cells));
+        blocks.iter().any(|lower| {
+            lower.id != upper.id
+                && lower.health > 0
+                && lower.origin_cell_y == upper_bottom
+                && columns_overlap(upper, lower)
+        })
+    })
+}
+
+fn columns_overlap(a: &TerrainBlock, b: &TerrainBlock) -> bool {
+    let a_end = a
+        .origin_cell_x
+        .saturating_add(i32::from(a.width_cells))
+        .saturating_sub(1);
+    let b_end = b
+        .origin_cell_x
+        .saturating_add(i32::from(b.width_cells))
+        .saturating_sub(1);
+    a.origin_cell_x <= b_end && b.origin_cell_x <= a_end
+}
+
 /// Constructs a spawn point from whole cells, degrading to the origin — never panicking —
 /// on the practically unreachable overflow case [`FixedPoint::from_cells`] guards against.
 /// Every call site in this file uses fixture literals nowhere near that boundary; the
@@ -303,5 +482,36 @@ mod tests {
         // never panic, confirming the block clipped instead of wrapping or erroring.
         assert_eq!(material_at(&mask, 10, 0), Material::Empty);
         assert_eq!(material_at(&mask, 13, 1), Material::Empty);
+    }
+
+    #[test]
+    fn stacked_maps_have_destructible_columns_not_a_single_row() {
+        for map in stacked_catalog() {
+            assert!(
+                has_stacked_destructible_structure(&map.blocks),
+                "{} must stack living blocks",
+                map.id
+            );
+            assert!(map.spawn_points.len() >= 2);
+            let unique_y: std::collections::BTreeSet<i32> =
+                map.blocks.iter().map(|block| block.origin_cell_y).collect();
+            assert!(
+                unique_y.len() >= 2,
+                "{} must not be a single unstacked row",
+                map.id
+            );
+        }
+    }
+
+    #[test]
+    fn find_resolves_every_catalog_map() {
+        for map in catalog() {
+            let Some(found) = find(map.id) else {
+                panic!("catalog ids must resolve");
+            };
+            assert_eq!(found.id, map.id);
+            assert_eq!(found.blocks.len(), map.blocks.len());
+        }
+        assert!(find("missing-map").is_none());
     }
 }

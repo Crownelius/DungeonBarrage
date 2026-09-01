@@ -26,8 +26,8 @@ public sealed class ContractStrictnessTests
         Assert.Equal("fixture-horizontal-duel-v1", request.MatchId);
         Assert.Equal("horizontal-test-array", request.Match.MapId);
         Assert.Equal(2, request.Match.Players.Count);
-        Assert.Equal("zeke", request.Match.Players[0].CharacterId);
-        Assert.Equal("huck", request.Match.Players[1].CharacterId);
+        Assert.Equal("ramshot-cannon", request.Match.Players[0].Loadout.Main);
+        Assert.Equal("ramshot-cannon", request.Match.Players[1].Loadout.Main);
 
         // Re-serializing must reproduce the original bytes exactly. Anything less means the DTO
         // is lossy, and a lossy DTO cannot be used to author a request.
@@ -92,7 +92,7 @@ public sealed class ContractStrictnessTests
     [Fact]
     public void Closed_enums_use_the_frozen_camel_case_wire_names()
     {
-        Assert.Equal("\"basicAlt\"", JsonSerializer.Serialize(ClientAbilitySlot.BasicAlt, ClientEnvelope.Options));
+        Assert.Equal("\"secondary\"", JsonSerializer.Serialize(ClientAbilitySlot.Secondary, ClientEnvelope.Options));
         Assert.Equal(
             "\"aimingAndSelection\"",
             JsonSerializer.Serialize(ClientMatchPhase.AimingAndSelection, ClientEnvelope.Options));

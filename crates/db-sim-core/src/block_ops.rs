@@ -222,9 +222,123 @@ pub fn apply_operation(state: &mut SimulationState, op: &TerrainOperation) -> u3
         apply_to_mask(&mut state.terrain, block, Some(impact_x));
     }
     state.blocks = blocks;
+    settle_unsupported_blocks(state);
 
     let after = count_solid(&state.terrain, measured);
     before.saturating_sub(after)
+}
+
+/// Drops living blocks until each rests on another solid, or the bottom of the map.
+///
+/// This is the sim-owned falling-structures transition. Presentation may animate the same
+/// `origin_cell_y` change; it must not decide a different rest position.
+pub fn settle_unsupported_blocks(state: &mut SimulationState) {
+    const MAX_PASSES: u32 = 64;
+    let mut pass = 0u32;
+    while pass < MAX_PASSES {
+        pass = pass.saturating_add(1);
+        if !settle_once(state) {
+            break;
+        }
+    }
+}
+
+fn settle_once(state: &mut SimulationState) -> bool {
+    let mut blocks = core::mem::take(&mut state.blocks);
+    let mut order: Vec<(i32, u32, usize)> = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.origin_cell_y, block.id, index))
+        .collect();
+    // Lowest in the world (largest y) first so an upper block lands on an already-settled
+    // support rather than passing through it.
+    order.sort_unstable_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+
+    let mut moved = false;
+    for (_, _, index) in order {
+        let Some(block) = blocks.get(index).copied() else {
+            continue;
+        };
+        if block.health == 0 {
+            continue;
+        }
+        let Some(fall) = fall_distance(&state.terrain, &block) else {
+            continue;
+        };
+        if fall == 0 {
+            continue;
+        }
+        let mut cleared = block;
+        cleared.health = 0;
+        apply_to_mask(&mut state.terrain, &cleared, None);
+        if let Some(live) = blocks.get_mut(index) {
+            live.origin_cell_y = live.origin_cell_y.saturating_add(fall);
+            apply_to_mask(&mut state.terrain, live, None);
+            moved = true;
+        }
+    }
+    state.blocks = blocks;
+    moved
+}
+
+fn fall_distance(terrain: &crate::types::TerrainMask, block: &TerrainBlock) -> Option<i32> {
+    let height = i32::from(block.height_cells);
+    if height <= 0 {
+        return Some(0);
+    }
+    let map_h = i32::try_from(terrain.height).ok()?;
+    let max_origin = map_h.saturating_sub(height);
+    if block.origin_cell_y >= max_origin {
+        return Some(0);
+    }
+
+    let mut fall = 0i32;
+    let mut origin_y = block.origin_cell_y;
+    while origin_y < max_origin {
+        let next_y = origin_y.saturating_add(1);
+        if footprint_blocked(terrain, block, next_y) {
+            break;
+        }
+        fall = fall.saturating_add(1);
+        origin_y = next_y;
+    }
+    Some(fall)
+}
+
+fn footprint_blocked(
+    terrain: &crate::types::TerrainMask,
+    block: &TerrainBlock,
+    new_origin_y: i32,
+) -> bool {
+    let map_h = i32::try_from(terrain.height).unwrap_or(0);
+    for local_x in 0..block.width_cells {
+        let x = block.origin_cell_x.saturating_add(i32::from(local_x));
+        for local_y in 0..block.height_cells {
+            let y = new_origin_y.saturating_add(i32::from(local_y));
+            if y < 0 || y >= map_h {
+                return true;
+            }
+            if in_current_footprint(block, x, y) {
+                continue;
+            }
+            if material_at(terrain, x, y).is_solid() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn in_current_footprint(block: &TerrainBlock, x: i32, y: i32) -> bool {
+    let max_x = block
+        .origin_cell_x
+        .saturating_add(i32::from(block.width_cells))
+        .saturating_sub(1);
+    let max_y = block
+        .origin_cell_y
+        .saturating_add(i32::from(block.height_cells))
+        .saturating_sub(1);
+    x >= block.origin_cell_x && x <= max_x && y >= block.origin_cell_y && y <= max_y
 }
 
 #[cfg(test)]
@@ -418,5 +532,34 @@ mod tests {
         };
         assert_eq!(hit.health, 0);
         assert_eq!(count_solid(&state.terrain, block_bounds(hit)), 0);
+    }
+
+    #[test]
+    fn stacked_block_falls_when_its_support_is_destroyed() {
+        let mut state = state_with(
+            vec![
+                block(1, 10, 16, 4, 3, Material::Soil),
+                block(2, 10, 13, 4, 3, Material::Soil),
+            ],
+            Material::Empty,
+        );
+        let Some(support) = state.blocks.first_mut() else {
+            panic!("fixture invariant: support block");
+        };
+        support.health = 0;
+        apply_to_mask(&mut state.terrain, support, None);
+        let Some(upper_before) = state.blocks.get(1).map(|block| block.origin_cell_y) else {
+            panic!("fixture invariant: upper block");
+        };
+        settle_unsupported_blocks(&mut state);
+        let Some(upper) = state.blocks.get(1) else {
+            panic!("fixture invariant: upper block after settle");
+        };
+        assert!(
+            upper.origin_cell_y > upper_before,
+            "upper block must fall after its support is destroyed"
+        );
+        assert!(upper.health > 0);
+        assert!(count_solid(&state.terrain, block_bounds(upper)) > 0);
     }
 }

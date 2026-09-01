@@ -364,15 +364,12 @@ fn lowest_living_id(state: &SimulationState) -> Option<String> {
 /// # Errors
 ///
 /// Returns [`SimError::UnknownDefinition`] if `player_id` does not name a player in
-/// `state.players`, or if that player's `character_id` is not in the roster.
+/// `state.players`.
 fn movement_allowance_for(state: &SimulationState, player_id: &str) -> SimResult<i32> {
-    let Some(player) = state.player(player_id) else {
+    let Some(_player) = state.player(player_id) else {
         return Err(SimError::UnknownDefinition);
     };
-    let Some(character_def) = character::find(&player.character_id) else {
-        return Err(SimError::UnknownDefinition);
-    };
-    Ok(character_def.movement.per_turn())
+    Ok(character::fighter().movement.per_turn())
 }
 
 #[cfg(test)]
@@ -383,6 +380,8 @@ fn movement_allowance_for(state: &SimulationState, player_id: &str) -> SimResult
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::fixed::{BODY_WIDTH, FixedPoint};
+    use crate::types::{Appearance, EffectKind, Material, PlayerState, StatusEffect, TerrainMask};
 
     /// Advances one phase, discarding any status expiries.
     ///
@@ -391,8 +390,6 @@ mod tests {
     fn step(state: &mut SimulationState) -> SimResult<MatchPhase> {
         advance_phase(state, &mut Vec::new(), &mut Vec::new())
     }
-    use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
-    use crate::types::{Appearance, EffectKind, Material, PlayerState, StatusEffect, TerrainMask};
 
     // -----------------------------------------------------------------------------------
     // Fixtures
@@ -403,17 +400,15 @@ mod tests {
         player_as(id, team, "arzum")
     }
 
-    fn player_as(id: &str, team: u8, character_id: &str) -> PlayerState {
+    fn player_as(id: &str, team: u8, _character_id: &str) -> PlayerState {
         PlayerState {
             id: id.to_string(),
             team,
             health: 200,
             max_health: 200,
             position: FixedPoint::ZERO,
-            character_id: character_id.to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -475,13 +470,11 @@ mod tests {
 
     #[test]
     fn begin_match_refreshes_movement_from_the_openers_class() {
-        // "karl" is Slow (2.5 BW); confirms begin_match reads the real roster, not a
-        // hardcoded default.
-        let mut state = base_state(vec![player_as("only", 0, "karl")]);
+        let mut state = base_state(vec![player_as("only", 0, "crow")]);
 
         assert_eq!(begin_match(&mut state), Ok(()));
 
-        assert_eq!(state.movement_remaining, 10 * POSITION_SCALE);
+        assert_eq!(state.movement_remaining, 4 * BODY_WIDTH);
     }
 
     #[test]
@@ -685,32 +678,25 @@ mod tests {
 
     #[test]
     fn end_turn_refreshes_movement_for_the_incoming_players_own_class() {
-        // "arzum" is Fast (8 BW); "karl" is Slow (2.5 BW). Each incoming player must get
-        // their own allowance, not the outgoing player's.
         let mut state = base_state(vec![
-            player_as("arzum-p", 0, "arzum"),
-            player_as("karl-p", 1, "karl"),
+            player_as("a-p", 0, "crow"),
+            player_as("b-p", 1, "crow"),
         ]);
-        state.active_player_id = "arzum-p".to_string();
+        state.active_player_id = "a-p".to_string();
         state.movement_remaining = 999;
         state.has_attacked_this_turn = true;
         let turn_before = state.turn_number;
 
         assert_eq!(end_turn(&mut state, TurnEndReason::Attacked), Ok(()));
 
-        assert_eq!(state.active_player_id, "karl-p");
-        assert_eq!(
-            state.movement_remaining,
-            10 * POSITION_SCALE,
-            "2.5 BW for Slow"
-        );
+        assert_eq!(state.active_player_id, "b-p");
+        assert_eq!(state.movement_remaining, 4 * BODY_WIDTH);
         assert!(!state.has_attacked_this_turn);
         assert_eq!(state.turn_number, turn_before.saturating_add(1));
 
-        // Rotate back the other way to confirm Fast is read correctly too, not just Slow.
         assert_eq!(end_turn(&mut state, TurnEndReason::Passed), Ok(()));
-        assert_eq!(state.active_player_id, "arzum-p");
-        assert_eq!(state.movement_remaining, 8 * BODY_WIDTH, "8 BW for Fast");
+        assert_eq!(state.active_player_id, "a-p");
+        assert_eq!(state.movement_remaining, 4 * BODY_WIDTH);
     }
 
     #[test]

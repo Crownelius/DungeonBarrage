@@ -438,10 +438,8 @@ mod tests {
             health,
             max_health: 400,
             position,
-            character_id: "natomica".to_owned(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }

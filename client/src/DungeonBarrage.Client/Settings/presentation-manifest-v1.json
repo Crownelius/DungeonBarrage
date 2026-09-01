@@ -1,7 +1,13 @@
 {
   "schemaVersion": 1,
-  "contentVersion": 1,
+  "contentVersion": 2,
   "characters": [
+    {
+      "characterId": "crow",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
     {
       "characterId": "arzum",
       "skinIds": ["default"],

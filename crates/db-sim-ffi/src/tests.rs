@@ -169,7 +169,7 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
         );
         assert_eq!(created["snapshot"]["matchId"], "fixture-horizontal-duel-v1");
         assert_eq!(created["snapshot"]["mapId"], "horizontal-test-array");
-        assert_eq!(created["snapshot"]["stateHash"], "f67c5371bcddbdf5");
+        assert_eq!(created["snapshot"]["stateHash"], "864c1ec2512a0327");
 
         let mut snapshot_buffer = DbOwnedBuffer::empty();
         assert_eq!(
@@ -252,7 +252,7 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             moved["postSnapshot"]["fixedTickRate"],
             db_sim_core::FIXED_TICK_RATE
         );
-        assert_eq!(moved["postStateHash"], "378081bb2e830a5d");
+        assert_eq!(moved["postStateHash"], "57dc7133b8667daf");
 
         let (ability_code, mut ability_buffer) = apply(handle, ABILITY_REQUEST);
         assert_eq!(ability_code, status::OK);
@@ -267,8 +267,8 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             ability["postSnapshot"]["fixedTickRate"],
             db_sim_core::FIXED_TICK_RATE
         );
-        assert_eq!(ability["postStateHash"], "d8686762470c0c36");
-        assert_eq!(ability["postSnapshot"]["stateHash"], "d8686762470c0c36");
+        assert_eq!(ability["postStateHash"], "03388514a9108085");
+        assert_eq!(ability["postSnapshot"]["stateHash"], "03388514a9108085");
         assert!(ability["events"].as_array().is_some_and(|events| {
             events
                 .iter()
@@ -277,6 +277,128 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
 
         destroy(handle);
     }
+}
+
+#[test]
+fn ffi_create_apply_snapshot_matches_direct_rust_on_the_duel_blocks_path() {
+    use db_sim_core::client_contract::CLIENT_CONTRACT_VERSION;
+    use db_sim_core::hash::hash_state;
+    use db_sim_core::match_session::{MatchCommand, MatchCommandKind, MatchSessionHost};
+    use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig};
+    use db_sim_core::types::{Appearance, Loadout};
+
+    let config = MatchConfig {
+        seed: 12_345,
+        map_id: "horizontal-test-array".to_owned(),
+        mode: MatchMode::TurnBased,
+        players: vec![
+            MatchPlayerConfig {
+                player_id: "a-local-player".to_owned(),
+                team: 0,
+                loadout: Loadout::launch_default(),
+                appearance: Appearance::default(),
+            },
+            MatchPlayerConfig {
+                player_id: "b-local-bot".to_owned(),
+                team: 1,
+                loadout: Loadout::launch_default(),
+                appearance: Appearance::default(),
+            },
+        ],
+    };
+    let mut direct = MatchSessionHost::create(&config).expect("direct rust duel must start");
+    let direct_initial = hash_state(direct.host().state());
+    let move_command = MatchCommand {
+        schema_version: CLIENT_CONTRACT_VERSION,
+        command_id: "parity-move".to_owned(),
+        player_id: "a-local-player".to_owned(),
+        expected_turn_number: 1,
+        expected_snapshot_generation: 0,
+        kind: MatchCommandKind::Move { dx: 1024 },
+    };
+    direct.apply(move_command).expect("direct move");
+    let direct_after_move = hash_state(direct.host().state());
+    let ability_command = MatchCommand {
+        schema_version: CLIENT_CONTRACT_VERSION,
+        command_id: "parity-ability".to_owned(),
+        player_id: "a-local-player".to_owned(),
+        expected_turn_number: 1,
+        expected_snapshot_generation: 1,
+        kind: MatchCommandKind::Ability {
+            slot: db_sim_core::types::AbilitySlot::Basic,
+            angle_millidegrees: 45_000,
+            power_basis_points: 1_500,
+            target_player_id: None,
+            secondary_target_player_id: None,
+        },
+    };
+    direct.apply(ability_command).expect("direct ability");
+    let direct_after_ability = hash_state(direct.host().state());
+
+    let create_json = format!(
+        r#"{{"schemaVersion":1,"matchId":"parity-duel","simulationVersion":{},"contentVersion":{},"match":{{"seed":12345,"mapId":"horizontal-test-array","mode":"turnBased","players":[{{"playerId":"a-local-player","team":0,"loadout":{{"main":"ramshot-cannon","secondary":"recurve-bow","meleeTool":"trench-spade"}},"appearance":{{"skinId":"default","abilitySkinIds":["default","default","default"],"victoryPoseId":"default"}}}},{{"playerId":"b-local-bot","team":1,"loadout":{{"main":"ramshot-cannon","secondary":"recurve-bow","meleeTool":"trench-spade"}},"appearance":{{"skinId":"default","abilitySkinIds":["default","default","default"],"victoryPoseId":"default"}}}}]}}}}"#,
+        db_sim_core::SIMULATION_VERSION,
+        db_sim_core::CONTENT_VERSION
+    );
+    assert!(
+        !create_json.contains("characterId") && !create_json.contains("character_id"),
+        "create envelope must not carry characterId"
+    );
+
+    // SAFETY: live pointers and one destroy.
+    unsafe {
+        let (code, handle, mut created_buffer) = create(create_json.as_bytes());
+        assert_eq!(code, status::OK);
+        assert!(!handle.is_null());
+        let created = json_and_free(&mut created_buffer);
+        assert_eq!(created["created"], true);
+        assert_eq!(
+            created["snapshot"]["stateHash"].as_str(),
+            Some(direct_initial.as_str())
+        );
+        assert!(
+            created["snapshot"]["players"][0]
+                .get("characterId")
+                .is_none()
+        );
+        assert!(created["snapshot"]["players"][0].get("loadout").is_some());
+
+        let mut snapshot_buffer = DbOwnedBuffer::empty();
+        assert_eq!(
+            db_sim_match_snapshot(handle, &mut snapshot_buffer),
+            status::OK
+        );
+        let snapshot = json_and_free(&mut snapshot_buffer);
+        assert_eq!(
+            snapshot["stateHash"].as_str(),
+            Some(direct_initial.as_str())
+        );
+
+        let move_json = br#"{"schemaVersion":1,"commandId":"parity-move","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"move","dx":1024}"#;
+        let (move_code, mut move_buffer) = apply(handle, move_json);
+        assert_eq!(move_code, status::OK);
+        let moved = json_and_free(&mut move_buffer);
+        assert_eq!(moved["disposition"], "accepted");
+        assert_eq!(
+            moved["postStateHash"].as_str(),
+            Some(direct_after_move.as_str())
+        );
+
+        let ability_json = br#"{"schemaVersion":1,"commandId":"parity-ability","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":1,"kind":"ability","slot":"main","angleMillidegrees":45000,"powerBasisPoints":1500,"targetPlayerId":null,"secondaryTargetPlayerId":null}"#;
+        let (ability_code, mut ability_buffer) = apply(handle, ability_json);
+        assert_eq!(ability_code, status::OK);
+        let ability_response = json_and_free(&mut ability_buffer);
+        assert_eq!(ability_response["disposition"], "accepted");
+        assert_eq!(
+            ability_response["postStateHash"].as_str(),
+            Some(direct_after_ability.as_str())
+        );
+        destroy(handle);
+    }
+
+    assert_ne!(direct_initial, "f67c5371bcddbdf5");
+    assert_ne!(direct_after_move, "378081bb2e830a5d");
+    assert_ne!(direct_after_ability, "d8686762470c0c36");
 }
 
 #[test]
@@ -428,7 +550,7 @@ fn command_parser_requires_nullable_fields_and_rejects_unknowns_without_mutation
         );
         let snapshot = json_and_free(&mut snapshot_output);
         assert_eq!(snapshot["snapshotGeneration"], 0);
-        assert_eq!(snapshot["stateHash"], "f67c5371bcddbdf5");
+        assert_eq!(snapshot["stateHash"], "864c1ec2512a0327");
         destroy(handle);
     }
 }
@@ -891,7 +1013,7 @@ fn bot_decide_proposes_a_valid_action_through_the_real_c_abi() {
         );
         if kind == "ability" {
             let slot = decision["slot"].as_str().expect("slot must be a string");
-            assert!(["basic", "basicAlt", "special"].contains(&slot));
+            assert!(["main", "secondary", "meleeTool"].contains(&slot));
         }
 
         destroy(handle);
@@ -1095,7 +1217,7 @@ fn timeout_refuses_while_a_passive_choice_is_owed() {
 }
 
 #[test]
-fn roster_returns_the_nine_starters_with_no_handle_required() {
+fn roster_returns_the_crow_and_items_with_no_handle_required() {
     // SAFETY: `output` is a live writable local for the whole call; the buffer is freed exactly
     // once. Deliberately no `create()` call anywhere in this test — the whole point is that a
     // roster listing does not need a live match to exist first.
@@ -1105,45 +1227,23 @@ fn roster_returns_the_nine_starters_with_no_handle_required() {
         let roster = json_and_free(&mut output);
 
         assert_eq!(roster["schemaVersion"], Value::from(1));
-        let characters = roster["characters"]
-            .as_array()
-            .expect("characters must be an array");
-        assert_eq!(
-            characters.len(),
-            9,
-            "the launch roster is exactly nine characters"
-        );
-
-        let ids: Vec<&str> = characters
+        assert_eq!(roster["fighter"]["id"], Value::from("crow"));
+        assert_eq!(roster["fighter"]["maxHealth"], Value::from(200));
+        let items = roster["items"].as_array().expect("items must be an array");
+        assert!(items.len() >= 6, "loadout picker needs multiple items");
+        let ids: Vec<&str> = items
             .iter()
-            .map(|c| c["id"].as_str().expect("id must be a string"))
+            .map(|item| item["id"].as_str().expect("id must be a string"))
             .collect();
-        for expected in [
-            "arzum", "emi", "karl", "huck", "numa", "aleph", "zeke", "roberto", "natomica",
-        ] {
-            assert!(ids.contains(&expected), "roster is missing {expected}");
+        for expected in ["ramshot-cannon", "recurve-bow", "trench-spade", "longsword"] {
+            assert!(ids.contains(&expected), "catalog is missing {expected}");
         }
-
-        // Spot-check one entry's full shape rather than every field of every character: proves
-        // the ability/passive nesting round-trips correctly without pinning every character's
-        // exact balance numbers to this test.
-        let huck = characters
+        let ramshot = items
             .iter()
-            .find(|c| c["id"] == "huck")
-            .expect("huck must be in the roster");
-        assert_eq!(huck["basic"]["slot"], Value::from("basic"));
-        assert_eq!(huck["basic"]["attackShape"], Value::from("strike"));
-        assert!(
-            huck["basic"]["range"].is_number(),
-            "a strike ability must report its range"
-        );
-        assert_eq!(
-            huck["passives"]
-                .as_array()
-                .expect("passives must be an array")
-                .len(),
-            3
-        );
+            .find(|item| item["id"] == "ramshot-cannon")
+            .expect("ramshot must be in the catalog");
+        assert_eq!(ramshot["slot"], Value::from("main"));
+        assert_eq!(ramshot["ability"]["attackShape"], Value::from("projectile"));
     }
 }
 

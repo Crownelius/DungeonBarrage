@@ -43,7 +43,7 @@ public sealed class LiveMatchTests
         Assert.Single(move.Events);
         Assert.IsType<ClientEntityMovedEvent>(move.Events[0]);
 
-        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Basic, 45_000, 1_500, null);
+        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
         Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
 
         // The concrete gameplay facts a live-generated command id cannot change: real damage
@@ -51,8 +51,7 @@ public sealed class LiveMatchTests
         var afterDefenderHealth = live.CurrentSnapshot.Players
             .First(p => p.PlayerId == "b-local-bot").Health;
         Assert.True(afterDefenderHealth < beforeDefenderHealth, "the ability must have dealt damage");
-        Assert.Equal("b-local-bot", live.CurrentSnapshot.ActivePlayerId);
-        Assert.Equal(2u, live.CurrentSnapshot.TurnNumber);
+        Assert.IsNotType<ClientInProgressOutcome>(live.CurrentSnapshot.Outcome);
 
         // The C5 gate itself: every view ends at the post-snapshot. Checked, not assumed true by
         // LiveMatch's own construction.
@@ -65,7 +64,7 @@ public sealed class LiveMatchTests
         await using var live = await CreateLiveAsync();
         _ = await live.SubmitMoveAsync(1024);
 
-        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Basic, 45_000, 1_500, null);
+        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
 
         // Unlike the move above (0 ticks — nothing to play back), a strike with a projectile
         // flight genuinely has something to lock input for. This is the number
@@ -86,8 +85,8 @@ public sealed class LiveMatchTests
 
         _ = await first.SubmitMoveAsync(1024);
         _ = await second.SubmitMoveAsync(1024);
-        var firstAbility = await first.SubmitAbilityAsync(ClientAbilitySlot.Basic, 45_000, 1_500, null);
-        var secondAbility = await second.SubmitAbilityAsync(ClientAbilitySlot.Basic, 45_000, 1_500, null);
+        var firstAbility = await first.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
+        var secondAbility = await second.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
 
         Assert.Equal(firstAbility.PostStateHash, secondAbility.PostStateHash);
     }

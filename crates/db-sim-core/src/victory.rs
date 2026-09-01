@@ -199,10 +199,8 @@ mod tests {
             health,
             max_health: 300,
             position: FixedPoint::ZERO,
-            character_id: "test-character".to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }

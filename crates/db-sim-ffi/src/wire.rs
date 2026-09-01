@@ -22,9 +22,9 @@ use db_sim_core::match_session::{
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig};
 use db_sim_core::types::{
-    AbilityDefinition, AbilitySlot, Appearance, Attack, CharacterDefinition, CommandRejection,
-    CritRoll, EffectKind, PassiveDefinition, PersistentObjectRemovalCause, RandomOutcome,
-    StatusTransition, StrikeDelivery, StrikeResolution,
+    AbilityDefinition, AbilitySlot, Appearance, Attack, CommandRejection, CritRoll, EffectKind,
+    PersistentObjectRemovalCause, RandomOutcome, StatusTransition, StrikeDelivery,
+    StrikeResolution,
 };
 
 use serde::de::{Error as _, SeqAccess, Visitor};
@@ -125,8 +125,16 @@ enum MatchModeDto {
 struct MatchPlayerDto {
     player_id: String,
     team: u8,
-    character_id: String,
+    loadout: LoadoutDto,
     appearance: AppearanceDto,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LoadoutDto {
+    main: String,
+    secondary: String,
+    melee_tool: String,
 }
 
 impl MatchPlayerDto {
@@ -134,7 +142,11 @@ impl MatchPlayerDto {
         MatchPlayerConfig {
             player_id: self.player_id,
             team: self.team,
-            character_id: self.character_id,
+            loadout: db_sim_core::types::Loadout {
+                main: self.loadout.main,
+                secondary: self.loadout.secondary,
+                melee_tool: self.loadout.melee_tool,
+            },
             appearance: self.appearance.into_core(),
         }
     }
@@ -368,17 +380,17 @@ impl AuthorityTimeoutDto {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum AbilitySlotDto {
-    Basic,
-    BasicAlt,
-    Special,
+    Main,
+    Secondary,
+    MeleeTool,
 }
 
 impl AbilitySlotDto {
     const fn into_core(self) -> AbilitySlot {
         match self {
-            Self::Basic => AbilitySlot::Basic,
-            Self::BasicAlt => AbilitySlot::BasicAlt,
-            Self::Special => AbilitySlot::Special,
+            Self::Main => AbilitySlot::Basic,
+            Self::Secondary => AbilitySlot::BasicAlt,
+            Self::MeleeTool => AbilitySlot::Special,
         }
     }
 }
@@ -696,12 +708,26 @@ struct WirePlayer {
     is_eliminated: bool,
     max_health: u16,
     position: WirePosition,
-    character_id: String,
-    passive_id: Option<String>,
-    special_gauge: u16,
-    has_chosen_passive: bool,
+    loadout: WireLoadout,
+    ammo: [WireAmmo; 3],
     statuses: Vec<WireStatus>,
     appearance: WireAppearance,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireLoadout {
+    main: String,
+    secondary: String,
+    melee_tool: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireAmmo {
+    remaining: u16,
+    maximum: u16,
+    policy: &'static str,
 }
 
 impl WirePlayer {
@@ -713,14 +739,42 @@ impl WirePlayer {
             is_eliminated: player.is_eliminated,
             max_health: player.max_health,
             position: WirePosition::from_core(player.position),
-            character_id: player.character_id.clone(),
-            passive_id: player.passive_id.clone(),
-            special_gauge: player.special_gauge,
-            has_chosen_passive: player.has_chosen_passive,
+            loadout: WireLoadout {
+                main: player.loadout.main.clone(),
+                secondary: player.loadout.secondary.clone(),
+                melee_tool: player.loadout.melee_tool.clone(),
+            },
+            ammo: [
+                WireAmmo::from_core(snapshot_ammo(player, 0)),
+                WireAmmo::from_core(snapshot_ammo(player, 1)),
+                WireAmmo::from_core(snapshot_ammo(player, 2)),
+            ],
             statuses: player.statuses.iter().map(WireStatus::from_core).collect(),
             appearance: WireAppearance::from_core(&player.appearance),
         }
     }
+}
+
+impl WireAmmo {
+    fn from_core(ammo: db_sim_core::types::AmmoCounter) -> Self {
+        Self {
+            remaining: ammo.remaining,
+            maximum: ammo.maximum,
+            policy: ammo.policy.wire_name(),
+        }
+    }
+}
+
+fn snapshot_ammo(player: &PlayerSnapshot, index: usize) -> db_sim_core::types::AmmoCounter {
+    player
+        .ammo
+        .get(index)
+        .copied()
+        .unwrap_or(db_sim_core::types::AmmoCounter {
+            remaining: 0,
+            maximum: 0,
+            policy: db_sim_core::types::AmmoPolicy::Finite,
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -1571,47 +1625,35 @@ impl WireBotAction {
     }
 }
 
-/// The full launch roster, for a character-select screen. Static content, not match state —
-/// callable without a live handle.
+/// The one fighter plus the item catalog, for the loadout picker. Static content, not
+/// match state — callable without a live handle.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WireRoster {
     schema_version: u32,
-    characters: Vec<WireCharacter>,
+    fighter: WireFighter,
+    items: Vec<WireItem>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WireCharacter {
+struct WireFighter {
     id: &'static str,
     display_name: &'static str,
     max_health: u16,
     range_tier: &'static str,
     movement_class: &'static str,
-    basic: WireAbility,
-    basic_alt: Option<WireAbility>,
-    special: WireAbility,
-    passives: Vec<WirePassivePreview>,
 }
 
-impl WireCharacter {
-    fn from_core(character: &'static CharacterDefinition) -> Self {
-        Self {
-            id: character.id,
-            display_name: character.display_name,
-            max_health: character.max_health,
-            range_tier: character.range_tier.wire_name(),
-            movement_class: character.movement.wire_name(),
-            basic: WireAbility::from_core(&character.basic),
-            basic_alt: character.basic_alt.as_ref().map(WireAbility::from_core),
-            special: WireAbility::from_core(&character.special),
-            passives: character
-                .passives
-                .iter()
-                .map(WirePassivePreview::from_core)
-                .collect(),
-        }
-    }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireItem {
+    id: &'static str,
+    display_name: &'static str,
+    slot: &'static str,
+    ammo_policy: &'static str,
+    starting_ammo: u16,
+    ability: WireAbility,
 }
 
 /// An ability's selection-relevant shape. Deliberately excludes resolution internals
@@ -1654,32 +1696,27 @@ impl WireAbility {
     }
 }
 
-/// A passive's name only. The choice itself happens mid-match on first gauge fill
-/// (`CHARACTERS.md`'s passive-choice section), never at character select, so the magnitude and
-/// closed-vocabulary `PassiveKind` this preview deliberately omits are not yet relevant to a
-/// selection decision.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WirePassivePreview {
-    id: &'static str,
-    display_name: &'static str,
-}
-
-impl WirePassivePreview {
-    fn from_core(passive: &PassiveDefinition) -> Self {
-        Self {
-            id: passive.id,
-            display_name: passive.display_name,
-        }
-    }
-}
-
 pub(crate) fn serialize_roster() -> Result<Vec<u8>, serde_json::Error> {
+    let fighter = character::fighter();
     let roster = WireRoster {
         schema_version: db_sim_core::client_contract::CLIENT_CONTRACT_VERSION,
-        characters: character::LAUNCH_ROSTER
+        fighter: WireFighter {
+            id: fighter.id,
+            display_name: fighter.display_name,
+            max_health: fighter.max_health,
+            range_tier: fighter.range_tier.wire_name(),
+            movement_class: fighter.movement.wire_name(),
+        },
+        items: character::LAUNCH_ITEMS
             .iter()
-            .map(WireCharacter::from_core)
+            .map(|item| WireItem {
+                id: item.id,
+                display_name: item.display_name,
+                slot: item.slot.wire_name(),
+                ammo_policy: item.ammo_policy.wire_name(),
+                starting_ammo: item.starting_ammo,
+                ability: WireAbility::from_core(&item.ability),
+            })
             .collect(),
     };
     serialize_line(&roster)
@@ -1917,6 +1954,7 @@ const fn command_rejection_name(value: CommandRejection) -> &'static str {
         CommandRejection::UnknownCharacter => "unknownCharacter",
         CommandRejection::AbilityNotAvailable => "abilityNotAvailable",
         CommandRejection::GaugeNotReady => "gaugeNotReady",
+        CommandRejection::OutOfAmmo => "outOfAmmo",
         CommandRejection::AlreadyAttacked => "alreadyAttacked",
         CommandRejection::InputOutOfRange => "inputOutOfRange",
         CommandRejection::InvalidTarget => "invalidTarget",

@@ -49,7 +49,16 @@ public partial class Main : Node2D
     private bool _started;
 
     private bool _inLocalSetup;
-    private IReadOnlyList<ClientCharacterDefinition>? _roster;
+    private IReadOnlyList<ClientItemDefinition>? _roster;
+    private ClientFighterDefinition? _fighter;
+    private LoadoutPicker? _picker;
+    private int _selectedMapIndex;
+    private static readonly string[] PlayableMaps =
+    [
+        "crow-perch",
+        "broken-battlements",
+        "twin-spires",
+    ];
     private int _selectedCharacterIndex;
     private int _selectedBotCharacterIndex = 1;
     private bool _inCharacterSelect;
@@ -89,7 +98,7 @@ public partial class Main : Node2D
         internal float ElapsedSeconds;
     }
 
-    private ClientAbilitySlot _selectedAbilitySlot = ClientAbilitySlot.Basic;
+    private ClientAbilitySlot _selectedAbilitySlot = ClientAbilitySlot.Main;
     private int _selectedPassiveIndex;
 
     private bool _isAiming;
@@ -359,6 +368,22 @@ public partial class Main : Node2D
             return;
         }
 
+        if (@event.IsActionPressed("ui_left"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedMapIndex = (_selectedMapIndex - 1 + PlayableMaps.Length) % PlayableMaps.Length;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_right"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedMapIndex = (_selectedMapIndex + 1) % PlayableMaps.Length;
+            QueueRedraw();
+            return;
+        }
+
         var isConfirm = @event.IsActionPressed("ui_accept") ||
             (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
         if (isConfirm)
@@ -377,9 +402,9 @@ public partial class Main : Node2D
         DrawString(font, new Vector2(24, 40), "LOCAL MATCH SETUP", fontSize: 24, modulate: Colors.White);
 
         var pos = new Vector2(24, 110);
-        DrawString(font, pos, "Map", fontSize: 14, modulate: Colors.Gold);
+        DrawString(font, pos, "Map  (left/right to change)", fontSize: 14, modulate: Colors.Gold);
         pos.Y += 22;
-        DrawString(font, pos, "Horizontal Test Array", fontSize: 18, modulate: MenuTextColor);
+        DrawString(font, pos, PlayableMaps[_selectedMapIndex], fontSize: 18, modulate: MenuTextColor);
         pos.Y += 40;
 
         DrawString(font, pos, "Mode", fontSize: 14, modulate: Colors.Gold);
@@ -395,14 +420,14 @@ public partial class Main : Node2D
         DrawString(
             font,
             pos,
-            "More maps and modes are not built yet — this screen exists so the flow and its",
+            "Left/right cycles crow-perch, broken-battlements, and twin-spires. Mode is",
             fontSize: 13,
             modulate: LockedHintColor);
         pos.Y += 18;
         DrawString(
             font,
             pos,
-            "controls are real now, ready to grow once there is more than one option to pick.",
+            "fixed to a turn-based duel. ENTER continues to the loadout picker.",
             fontSize: 13,
             modulate: LockedHintColor);
 
@@ -414,9 +439,12 @@ public partial class Main : Node2D
     {
         try
         {
-            _roster = RosterCatalog.Get().Characters;
-            _selectedCharacterIndex = 0;
-            _selectedBotCharacterIndex = Math.Min(1, _roster.Count - 1);
+            var catalog = RosterCatalog.Get();
+            _fighter = catalog.Fighter;
+            _roster = catalog.Items;
+            _picker = new LoadoutPicker(catalog.Items);
+            _selectedCharacterIndex = _picker.FocusedIndex;
+            _selectedBotCharacterIndex = _picker.SecondaryIndex;
             _inCharacterSelect = true;
             _menuError = null;
             _hoveredCharacterIndex = -1;
@@ -565,7 +593,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_up"))
         {
             GetViewport().SetInputAsHandled();
-            _selectedCharacterIndex = (_selectedCharacterIndex - 1 + _roster.Count) % _roster.Count;
+            EquipTile((_selectedCharacterIndex - 1 + _roster.Count) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -573,7 +601,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_down"))
         {
             GetViewport().SetInputAsHandled();
-            _selectedCharacterIndex = (_selectedCharacterIndex + 1) % _roster.Count;
+            EquipTile((_selectedCharacterIndex + 1) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -581,7 +609,7 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_left"))
         {
             GetViewport().SetInputAsHandled();
-            _selectedBotCharacterIndex = (_selectedBotCharacterIndex - 1 + _roster.Count) % _roster.Count;
+            EquipTile((_selectedCharacterIndex - 1 + _roster.Count) % _roster.Count);
             QueueRedraw();
             return;
         }
@@ -589,20 +617,19 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_right"))
         {
             GetViewport().SetInputAsHandled();
-            _selectedBotCharacterIndex = (_selectedBotCharacterIndex + 1) % _roster.Count;
+            EquipTile((_selectedCharacterIndex + 1) % _roster.Count);
             QueueRedraw();
             return;
         }
 
-        // A click on a tile picks it as the human champion; ENTER alone starts the match — a
-        // click can no longer do double duty as "confirm," now that clicking has its own,
-        // different meaning on this screen.
+        // A click equips that tile into its slot. ENTER starts the match with the equipped
+        // loadout — click no longer confirms, because it now has its own meaning.
         if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left } mouseButton)
         {
             if (HitTestCharacterTile(mouseButton.Position) is int clickedIndex)
             {
                 GetViewport().SetInputAsHandled();
-                _selectedCharacterIndex = clickedIndex;
+                EquipTile(clickedIndex);
                 QueueRedraw();
             }
 
@@ -616,30 +643,27 @@ public partial class Main : Node2D
         }
     }
 
+    private void EquipTile(int index)
+    {
+        _picker?.SelectTile(index);
+        _selectedCharacterIndex = _picker?.FocusedIndex ?? index;
+        _selectedBotCharacterIndex = _picker?.SecondaryIndex ?? _selectedBotCharacterIndex;
+    }
+
     private void ConfirmCharacterAndStartDuel()
     {
-        if (_roster is null || _selectedCharacterIndex >= _roster.Count)
+        if (_picker is null || _roster is null || _roster.Count == 0)
         {
             return;
         }
 
-        var human = _roster[_selectedCharacterIndex];
-        var bot = _roster[_selectedBotCharacterIndex];
-        var appearance = new ClientAppearance("default", ["default", "default", "default"], "default");
-        var request = new ClientCreateRequest(
-            SchemaVersion: 1,
-            MatchId: $"local-duel-{_matchSeed}",
-            SimulationVersion: LocalMatchSession.SimulationVersion,
-            ContentVersion: LocalMatchSession.ContentVersion,
-            Match: new ClientMatchConfig(
-                Seed: _matchSeed,
-                MapId: "horizontal-test-array",
-                Mode: "turnBased",
-                Players:
-                [
-                    new ClientPlayerConfig("a-local-player", Team: 0, human.Id, appearance),
-                    new ClientPlayerConfig("b-local-bot", Team: 1, bot.Id, appearance),
-                ]));
+        var request = LocalMatchEnvelope.HumanVsBot(
+            simulationVersion: LocalMatchSession.SimulationVersion,
+            contentVersion: LocalMatchSession.ContentVersion,
+            seed: _matchSeed,
+            matchId: $"local-duel-{_matchSeed}",
+            mapId: PlayableMaps[_selectedMapIndex],
+            loadout: _picker.Loadout);
 
         try
         {
@@ -717,15 +741,15 @@ public partial class Main : Node2D
             switch (keyEvent.Keycode)
             {
                 case Key.Key1:
-                    _selectedAbilitySlot = ClientAbilitySlot.Basic;
+                    _selectedAbilitySlot = ClientAbilitySlot.Main;
                     QueueRedraw();
                     return;
                 case Key.Key2:
-                    _selectedAbilitySlot = ClientAbilitySlot.BasicAlt;
+                    _selectedAbilitySlot = ClientAbilitySlot.Secondary;
                     QueueRedraw();
                     return;
                 case Key.Key3:
-                    _selectedAbilitySlot = ClientAbilitySlot.Special;
+                    _selectedAbilitySlot = ClientAbilitySlot.MeleeTool;
                     QueueRedraw();
                     return;
                 case Key.F:
@@ -784,43 +808,9 @@ public partial class Main : Node2D
         }
     }
 
-    private void HandlePassiveSelectionInput(InputEvent @event)
+    private static void HandlePassiveSelectionInput(InputEvent @event)
     {
-        if (_live is null || _roster is null)
-        {
-            return;
-        }
-
-        var activePlayer = _live.CurrentSnapshot.Players.FirstOrDefault(p => p.PlayerId == _live.CurrentSnapshot.ActivePlayerId);
-        var charDef = _roster.FirstOrDefault(c => c.Id == activePlayer?.CharacterId);
-        if (charDef is null or { Passives.Count: 0 })
-        {
-            return;
-        }
-
-        if (@event.IsActionPressed("ui_up"))
-        {
-            GetViewport().SetInputAsHandled();
-            _selectedPassiveIndex = (_selectedPassiveIndex - 1 + charDef.Passives.Count) % charDef.Passives.Count;
-            QueueRedraw();
-            return;
-        }
-
-        if (@event.IsActionPressed("ui_down"))
-        {
-            GetViewport().SetInputAsHandled();
-            _selectedPassiveIndex = (_selectedPassiveIndex + 1) % charDef.Passives.Count;
-            QueueRedraw();
-            return;
-        }
-
-        if (@event.IsActionPressed("ui_accept") ||
-            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left }))
-        {
-            GetViewport().SetInputAsHandled();
-            var chosenPassive = charDef.Passives[_selectedPassiveIndex].Id;
-            _ = SubmitAndRedrawAsync(() => _live.SubmitPassiveChoiceAsync(chosenPassive));
-        }
+        _ = @event;
     }
 
     private static (int AngleMillidegrees, int PowerBasisPoints) ResolveAim(Vector2 origin, Vector2 release)
@@ -939,13 +929,13 @@ public partial class Main : Node2D
             var yOffset = _tileAnimations?[i].YOffset ?? 0f;
             var tileRect = new Rect2(restRect.Position + new Vector2(0, yOffset), restRect.Size);
 
-            var isHuman = i == _selectedCharacterIndex;
-            var isBot = i == _selectedBotCharacterIndex;
+            var isFocused = i == _selectedCharacterIndex;
+            var isEquipped = _picker?.IsEquipped(i) == true;
 
             DrawRect(tileRect, CharacterTileColor(i, _roster.Count));
 
-            var borderColor = isHuman ? Colors.Yellow : isBot ? Colors.Coral : new Color(1, 1, 1, 0.25f);
-            DrawRect(tileRect, borderColor, filled: false, width: isHuman || isBot ? 3f : 1f);
+            var borderColor = isFocused ? Colors.Yellow : isEquipped ? Colors.Gold : new Color(1, 1, 1, 0.25f);
+            DrawRect(tileRect, borderColor, filled: false, width: isFocused || isEquipped ? 3f : 1f);
 
             var letter = char.ToUpperInvariant(charDef.DisplayName.Length > 0 ? charDef.DisplayName[0] : '?').ToString();
             var letterSize = font.GetStringSize(letter, fontSize: 30);
@@ -953,15 +943,11 @@ public partial class Main : Node2D
                 new Vector2((tileRect.Size.X - letterSize.X) / 2f, (tileRect.Size.Y + letterSize.Y * 0.7f) / 2f);
             DrawString(font, letterPos, letter, fontSize: 30, modulate: Colors.White);
 
-            if (isHuman)
+            if (isEquipped)
             {
-                var tagSize = font.GetStringSize("YOU", fontSize: 11);
-                DrawString(font, tileRect.Position + new Vector2((tileRect.Size.X - tagSize.X) / 2f, -6), "YOU", fontSize: 11, modulate: Colors.Yellow);
-            }
-            else if (isBot)
-            {
-                var tagSize = font.GetStringSize("BOT", fontSize: 11);
-                DrawString(font, tileRect.Position + new Vector2((tileRect.Size.X - tagSize.X) / 2f, -6), "BOT", fontSize: 11, modulate: Colors.Coral);
+                var tag = i == _picker?.MainIndex ? "MAIN" : i == _picker?.SecondaryIndex ? "SEC" : "MELEE";
+                var tagSize = font.GetStringSize(tag, fontSize: 11);
+                DrawString(font, tileRect.Position + new Vector2((tileRect.Size.X - tagSize.X) / 2f, -6), tag, fontSize: 11, modulate: Colors.Gold);
             }
         }
 
@@ -972,25 +958,22 @@ public partial class Main : Node2D
         var detailPos = new Vector2(TileGridOrigin.X + (TileColumns * (TileSize + TileGap)) + 20, TileGridOrigin.Y);
         DrawString(font, detailPos, $"{detailChar.DisplayName} ({detailChar.Id})", fontSize: 18, modulate: Colors.Gold);
         detailPos.Y += 26;
-        DrawString(font, detailPos, $"HP {detailChar.MaxHealth}   Range {detailChar.RangeTier}   Move {detailChar.MovementClass}", fontSize: 14, modulate: MenuTextColor);
+        DrawString(
+            font,
+            detailPos,
+            $"Slot {detailChar.Slot}   {detailChar.AmmoPolicy} ammo {detailChar.StartingAmmo}   {detailChar.Ability.DamagePercent}% dmg",
+            fontSize: 14,
+            modulate: MenuTextColor);
         detailPos.Y += 24;
-        DrawString(font, detailPos, $"Basic: {detailChar.Basic.DisplayName} ({detailChar.Basic.DamagePercent}% dmg, {detailChar.Basic.AttackShape})", fontSize: 14, modulate: MenuTextColor);
-        detailPos.Y += 20;
-        if (detailChar.BasicAlt is not null)
-        {
-            DrawString(font, detailPos, $"Basic Alt: {detailChar.BasicAlt.DisplayName} ({detailChar.BasicAlt.DamagePercent}% dmg, {detailChar.BasicAlt.AttackShape})", fontSize: 14, modulate: MenuTextColor);
-            detailPos.Y += 20;
-        }
-
-        DrawString(font, detailPos, $"Special: {detailChar.Special.DisplayName} ({detailChar.Special.DamagePercent}% dmg, {detailChar.Special.AttackShape})", fontSize: 14, modulate: MenuTextColor);
+        DrawString(
+            font,
+            detailPos,
+            $"Loadout: {_picker?.Loadout.Main} / {_picker?.Loadout.Secondary} / {_picker?.Loadout.MeleeTool}",
+            fontSize: 14,
+            modulate: MenuTextColor);
         detailPos.Y += 26;
-        DrawString(font, detailPos, "Passives (chosen mid-match):", fontSize: 13, modulate: Colors.Gold);
-        detailPos.Y += 18;
-        foreach (var passive in detailChar.Passives)
-        {
-            DrawString(font, detailPos, $" • {passive.DisplayName}", fontSize: 12, modulate: LockedHintColor);
-            detailPos.Y += 17;
-        }
+        var fighterName = _fighter?.DisplayName ?? "Crow";
+        DrawString(font, detailPos, $"Fighter: {fighterName} (every player is the crow; items are ammo)", fontSize: 13, modulate: Colors.Gold);
 
         // Bottom cards: the human's pick and the bot's pick side by side, mirroring the
         // reference image's P1/CPU panels.
@@ -1003,7 +986,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             footerPos,
-            "UP/DOWN pick your champion · LEFT/RIGHT pick the bot's · hover or click a tile · ENTER to start · ESC to go back",
+            "Click or arrows equip that item into its slot · ENTER starts with the equipped loadout · ESC back",
             fontSize: 13,
             modulate: Colors.Cyan);
     }
@@ -1030,7 +1013,7 @@ public partial class Main : Node2D
         textPos.Y += 30;
         DrawString(font, textPos, character.DisplayName, fontSize: 22, modulate: Colors.White);
         textPos.Y += 26;
-        DrawString(font, textPos, $"HP {character.MaxHealth}   {character.RangeTier} / {character.MovementClass}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
+        DrawString(font, textPos, $"{character.Slot}  ammo {character.StartingAmmo}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
     }
 
     private void DrawLiveMatch(LiveMatch live)
@@ -1086,40 +1069,8 @@ public partial class Main : Node2D
         }
     }
 
-    private void DrawPassiveSelectModal()
+    private static void DrawPassiveSelectModal()
     {
-        if (_live is null || _roster is null)
-        {
-            return;
-        }
-
-        var activePlayer = _live.CurrentSnapshot.Players.FirstOrDefault(p => p.PlayerId == _live.CurrentSnapshot.ActivePlayerId);
-        var charDef = _roster.FirstOrDefault(c => c.Id == activePlayer?.CharacterId);
-        if (charDef is null or { Passives.Count: 0 })
-        {
-            return;
-        }
-
-        var rect = new Rect2(new Vector2(200, 150), new Vector2(400, 240));
-        DrawRect(rect, new Color(0.12f, 0.14f, 0.20f, 0.95f));
-        DrawRect(rect, Colors.Gold, filled: false, width: 2);
-
-        var font = ThemeDB.FallbackFont;
-        var pos = rect.Position + new Vector2(20, 30);
-        DrawString(font, pos, "SPECIAL GAUGE FULL — SELECT PASSIVE", fontSize: 16, modulate: Colors.Gold);
-        pos.Y += 30;
-
-        for (var i = 0; i < charDef.Passives.Count; i++)
-        {
-            var isSelected = i == _selectedPassiveIndex;
-            var prefix = isSelected ? " > " : "   ";
-            var color = isSelected ? Colors.Yellow : MenuTextColor;
-            DrawString(font, pos, $"{prefix}{charDef.Passives[i].DisplayName}", fontSize: 14, modulate: color);
-            pos.Y += 24;
-        }
-
-        pos.Y += 20;
-        DrawString(font, pos, "UP/DOWN to select | ENTER to confirm", fontSize: 12, modulate: LockedHintColor);
     }
 
     private void DrawResultsScreen(ClientMatchSnapshot snapshot)
@@ -1228,7 +1179,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             center + new Vector2(-PlayerRadiusPixels, labelY),
-            $"{player.CharacterId} {player.Health}/{player.MaxHealth}  gauge {player.SpecialGauge}",
+            $"{player.Loadout.Main} {player.Health}/{player.MaxHealth}  ammo {(player.Ammo.Count > 0 ? player.Ammo[0].Remaining : 0)}",
             fontSize: 12,
             modulate: MenuTextColor);
     }
@@ -1381,25 +1332,54 @@ public partial class Main : Node2D
         LiveMatch? live = null;
         try
         {
-            live = CreateLiveMatch(FixtureMatchBootstrapper.Start());
-            _live = live;
+            _isProcessingBotTurn = true;
+            EnterLocalSetup();
+            _selectedMapIndex = 0;
+            EnterCharacterSelect();
+            if (_picker is null)
+            {
+                throw new InvalidOperationException($"C5 picker failed to load: {_menuError}");
+            }
+
+            ConfirmCharacterAndStartDuel();
+            live = _live ?? throw new InvalidOperationException($"C5 confirm failed to start a match: {_menuError}");
+
+            if (live.CurrentSnapshot.MapId != PlayableMaps[0])
+            {
+                throw new InvalidOperationException(
+                    $"C5 must start on stacked map {PlayableMaps[0]}; started {live.CurrentSnapshot.MapId}.");
+            }
 
             var beforeActivePlayer = live.CurrentSnapshot.ActivePlayerId;
-            var defenderId = live.CurrentSnapshot.Players.First(p => p.PlayerId != beforeActivePlayer).PlayerId;
+            var defenderId = string.Empty;
+            for (var i = 0; i < live.CurrentSnapshot.Players.Count; i++)
+            {
+                if (live.CurrentSnapshot.Players[i].PlayerId != beforeActivePlayer)
+                {
+                    defenderId = live.CurrentSnapshot.Players[i].PlayerId;
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(defenderId))
+            {
+                throw new InvalidOperationException("C5 could not identify the defending player.");
+            }
+
             var defenderHealthBefore = HealthOf(live.CurrentSnapshot, defenderId);
 
             var moveTransition = await SubmitAndRedrawAsync(() => live.SubmitMoveAsync(MoveStepDx))
                 .ConfigureAwait(true)
-                ?? throw new InvalidOperationException("The fixture move was rejected.");
+                ?? throw new InvalidOperationException("The picker-started move was rejected.");
             await WaitTicksAsync(moveTransition.InputLockTicks, moveTransition.PresentationTickRate).ConfigureAwait(true);
 
             var abilityTransition = await SubmitAndRedrawAsync(() => live.SubmitAbilityAsync(
-                ClientAbilitySlot.Basic,
+                ClientAbilitySlot.Main,
                 angleMillidegrees: 45_000,
                 powerBasisPoints: 1_500,
                 targetPlayerId: null))
                 .ConfigureAwait(true)
-                ?? throw new InvalidOperationException("The fixture ability was rejected.");
+                ?? throw new InvalidOperationException("The picker-started ability was rejected.");
             var lockedImmediatelyAfterAbility = IsInputLocked();
 
             await WaitTicksAsync(abilityTransition.InputLockTicks, abilityTransition.PresentationTickRate)
@@ -1413,6 +1393,13 @@ public partial class Main : Node2D
 
             var final = live.CurrentSnapshot;
             var defenderHealthAfter = HealthOf(final, defenderId);
+            var terminal = final.Outcome is not ClientInProgressOutcome;
+            var handedOver = final.ActivePlayerId != beforeActivePlayer;
+            if (!handedOver && !terminal)
+            {
+                throw new InvalidOperationException(
+                    "C5 must hand the turn over or finish the match after the picker-started shot.");
+            }
 
             return new C5SmokeReport(
                 Success: true,
@@ -1435,10 +1422,14 @@ public partial class Main : Node2D
                 AbilityDealtRealDamage: defenderHealthAfter < defenderHealthBefore,
                 FinalSnapshotMatchesAbilityPostSnapshot: final.StateHash == abilityTransition.PostSnapshot.StateHash,
                 AfterActivePlayerId: final.ActivePlayerId,
-                TurnHandedOverToTheOtherPlayer: final.ActivePlayerId != beforeActivePlayer,
+                TurnHandedOverToTheOtherPlayer: handedOver,
                 TurnNumberAfter: final.TurnNumber,
                 ScreenshotWidth: screenshotWidth,
-                ScreenshotHeight: screenshotHeight);
+                ScreenshotHeight: screenshotHeight,
+                MapId: final.MapId,
+                LoadoutMain: _picker?.Loadout.Main ?? string.Empty,
+                UsedLoadoutPicker: _picker is not null,
+                MatchReachedTerminalOutcome: terminal);
         }
         catch (Exception exception)
         {
@@ -1466,7 +1457,11 @@ public partial class Main : Node2D
                 TurnHandedOverToTheOtherPlayer: false,
                 TurnNumberAfter: 0,
                 ScreenshotWidth: 0,
-                ScreenshotHeight: 0);
+                ScreenshotHeight: 0,
+                MapId: string.Empty,
+                LoadoutMain: string.Empty,
+                UsedLoadoutPicker: false,
+                MatchReachedTerminalOutcome: false);
         }
         finally
         {
@@ -1522,8 +1517,6 @@ public partial class Main : Node2D
             }
 
             var rosterCount = _roster.Count;
-            var humanChar = _roster[_selectedCharacterIndex];
-            var botChar = _roster[_selectedBotCharacterIndex];
 
             QueueRedraw();
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
@@ -1582,115 +1575,161 @@ public partial class Main : Node2D
                     "The character-select tile float animation was interrupted mid-flight instead of completing it.");
             }
 
-            // Claims the same guard flag Main's own _Process loop checks before auto-firing a
-            // bot turn (see ProcessBotTurnAsync). Without this, the moment this method awaits
-            // anything below, _Process can race in and submit a SEPARATE bot decision through
-            // the production auto-play path while this method is also mid-way through driving
-            // its own turn — corrupting turn accounting and leaving stray input locks behind
-            // that make later screens (like the passive-select modal) appear not to render.
-            _isProcessingBotTurn = true;
-
-            ConfirmCharacterAndStartDuel();
-            if (_live is null)
+            ClickPickerItem("frostfall-mortar");
+            if (_picker is null || _picker.Loadout.Main != "frostfall-mortar")
             {
-                throw new InvalidOperationException($"Character select confirmation failed to start a match: {_menuError}");
+                throw new InvalidOperationException(
+                    $"Clicking frostfall-mortar must equip it as main; loadout was {_picker?.Loadout.Main}.");
             }
 
-            // 1. Human Move & Ability Turn
-            var moveTrans = await _live.SubmitMoveAsync(MoveStepDx).ConfigureAwait(true);
-            await WaitTicksAsync(moveTrans.InputLockTicks, moveTrans.PresentationTickRate).ConfigureAwait(true);
+            var humanCharId = _picker.Loadout.Main;
+            var botCharId = _picker.Loadout.Main;
+            _isProcessingBotTurn = true;
 
-            var abilityTrans = await _live.SubmitAbilityAsync(
-                ClientAbilitySlot.Basic,
-                angleMillidegrees: 45_000,
-                powerBasisPoints: 1_500,
-                targetPlayerId: null).ConfigureAwait(true);
-            await WaitTicksAsync(abilityTrans.InputLockTicks, abilityTrans.PresentationTickRate).ConfigureAwait(true);
-
-            var humanTurnExecuted = moveTrans.Disposition == ClientTransitionDisposition.Accepted &&
-                                    abilityTrans.Disposition == ClientTransitionDisposition.Accepted;
-
-            // 2. Drive the match to genuine completion — after the human's one demonstration
-            // turn, the bot plays every remaining turn for whichever player is active (bounded,
-            // like the Rust bot::tests and BotDecisionTests full-duel proofs already do) until
-            // Outcome actually leaves ClientInProgressOutcome. A single bot decision call proves
-            // a bot CAN act; it does not prove C6's own gate — "completes... a bot match" — which
-            // needs a real terminal outcome, not one action.
-            //
-            // One case is intercepted rather than left to the bot: if the human's own gauge
-            // fills and PassiveSelection comes up for them specifically, it is routed through
-            // the real HandlePassiveSelectionInput keyboard path (a synthetic Enter press) —
-            // the same method a real player's ENTER key goes through — instead of the bot's
-            // automatic handling. Letting the bot decide it would prove a decision gets made
-            // somehow; it would not prove DrawPassiveSelectModal/HandlePassiveSelectionInput
-            // themselves render and work.
-            var decisionSeed = 777uL;
-            var turnsPlayed = 0;
+            var mapsCompletedCsv = string.Empty;
+            var mapsCompletedCount = 0;
+            var stackedBlocksFell = false;
+            var humanTurnExecuted = false;
             var botTurnExecuted = false;
             var passivePromptShownForHuman = false;
             var passivePromptConfirmedThroughRealInput = false;
-            while (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome && turnsPlayed < 300)
+            var turnsPlayed = 0;
+            var rematchCreated = false;
+            var rematchDisposedCleanly = false;
+            var screenshotWidth = 0;
+            var screenshotHeight = 0;
+            ClientMatchSnapshot? finalSnapshot = null;
+
+            for (var mapIndex = 0; mapIndex < PlayableMaps.Length; mapIndex++)
             {
-                turnsPlayed++;
-
-                if (_live.CurrentSnapshot.ActivePlayerId == "a-local-player" &&
-                    _live.CurrentSnapshot.Phase == ClientMatchPhase.PassiveSelection)
+                _selectedMapIndex = mapIndex;
+                ConfirmCharacterAndStartDuel();
+                if (_live is null)
                 {
-                    passivePromptShownForHuman = true;
-                    QueueRedraw();
-                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-                    await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-                    _ = CaptureScreenshot(options.PassivePromptScreenshotPath);
-
-                    var beforeGeneration = _live.CurrentSnapshot.SnapshotGeneration;
-                    using (var confirmEvent = new InputEventKey { Keycode = Key.Enter, Pressed = true })
-                    {
-                        HandlePassiveSelectionInput(confirmEvent);
-                    }
-
-                    var pollAttempts = 0;
-                    while (_live.CurrentSnapshot.SnapshotGeneration == beforeGeneration && pollAttempts < 120)
-                    {
-                        pollAttempts++;
-                        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-                    }
-
-                    passivePromptConfirmedThroughRealInput =
-                        _live.CurrentSnapshot.SnapshotGeneration != beforeGeneration;
-                    continue;
+                    throw new InvalidOperationException(
+                        $"Confirm failed to start {PlayableMaps[mapIndex]}: {_menuError}");
                 }
 
-                var botTrans = await _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed++)
-                    .ConfigureAwait(true);
-                await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
-                botTurnExecuted = botTurnExecuted || botTrans.Disposition == ClientTransitionDisposition.Accepted;
+                if (_live.CurrentSnapshot.MapId != PlayableMaps[mapIndex])
+                {
+                    throw new InvalidOperationException(
+                        $"Expected map {PlayableMaps[mapIndex]}; snapshot was {_live.CurrentSnapshot.MapId}.");
+                }
+
+                var startedMain = LoadoutMainOf(_live.CurrentSnapshot, "a-local-player");
+                if (startedMain != "frostfall-mortar")
+                {
+                    throw new InvalidOperationException(
+                        $"{PlayableMaps[mapIndex]} must carry frostfall-mortar as main; snapshot main was '{startedMain}'.");
+                }
+
+                var blocksBefore = _live.CurrentSnapshot;
+
+                var moveTrans = await _live.SubmitMoveAsync(MoveStepDx).ConfigureAwait(true);
+                await WaitTicksAsync(moveTrans.InputLockTicks, moveTrans.PresentationTickRate).ConfigureAwait(true);
+
+                var abilityTrans = await _live.SubmitAbilityAsync(
+                    ClientAbilitySlot.Main,
+                    angleMillidegrees: 45_000,
+                    powerBasisPoints: 1_500,
+                    targetPlayerId: null).ConfigureAwait(true);
+                await WaitTicksAsync(abilityTrans.InputLockTicks, abilityTrans.PresentationTickRate).ConfigureAwait(true);
+
+                humanTurnExecuted = humanTurnExecuted
+                    || (moveTrans.Disposition == ClientTransitionDisposition.Accepted
+                        && abilityTrans.Disposition == ClientTransitionDisposition.Accepted);
+                stackedBlocksFell = stackedBlocksFell
+                    || AnyLivingBlockFell(blocksBefore, _live.CurrentSnapshot);
+
+                var decisionSeed = 777uL + (ulong)mapIndex;
+                var mapTurns = 0;
+                while (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome && mapTurns < 300)
+                {
+                    mapTurns++;
+                    turnsPlayed++;
+
+                    if (_live.CurrentSnapshot.ActivePlayerId == "a-local-player" &&
+                        _live.CurrentSnapshot.Phase == ClientMatchPhase.PassiveSelection)
+                    {
+                        passivePromptShownForHuman = true;
+                        QueueRedraw();
+                        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                        _ = CaptureScreenshot(options.PassivePromptScreenshotPath);
+
+                        var beforeGeneration = _live.CurrentSnapshot.SnapshotGeneration;
+                        using (var confirmEvent = new InputEventKey { Keycode = Key.Enter, Pressed = true })
+                        {
+                            HandlePassiveSelectionInput(confirmEvent);
+                        }
+
+                        var pollAttempts = 0;
+                        while (_live.CurrentSnapshot.SnapshotGeneration == beforeGeneration && pollAttempts < 120)
+                        {
+                            pollAttempts++;
+                            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                        }
+
+                        passivePromptConfirmedThroughRealInput =
+                            _live.CurrentSnapshot.SnapshotGeneration != beforeGeneration;
+                        continue;
+                    }
+
+                    var botTrans = await _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed++)
+                        .ConfigureAwait(true);
+                    await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
+                    botTurnExecuted = botTurnExecuted || botTrans.Disposition == ClientTransitionDisposition.Accepted;
+                    stackedBlocksFell = stackedBlocksFell
+                        || AnyLivingBlockFell(blocksBefore, _live.CurrentSnapshot);
+                }
+
+                if (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome)
+                {
+                    throw new InvalidOperationException(
+                        $"{PlayableMaps[mapIndex]} did not reach a terminal outcome within {mapTurns} bot decisions.");
+                }
+
+                mapsCompletedCsv = mapsCompletedCount == 0
+                    ? PlayableMaps[mapIndex]
+                    : mapsCompletedCsv + "," + PlayableMaps[mapIndex];
+                mapsCompletedCount++;
+                finalSnapshot = _live.CurrentSnapshot;
+
+                QueueRedraw();
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+                if (mapIndex == 0)
+                {
+                    Rematch();
+                    if (_live is null)
+                    {
+                        throw new InvalidOperationException($"Rematch failed to start a fresh match: {_menuError}");
+                    }
+
+                    rematchCreated = _live.CurrentSnapshot.TurnNumber == 1;
+                    await _live.DisposeAsync().ConfigureAwait(true);
+                    rematchDisposedCleanly = true;
+                    _live = null;
+                }
+                else
+                {
+                    await _live.DisposeAsync().ConfigureAwait(true);
+                    _live = null;
+                }
             }
 
-            var matchCompleted = _live.CurrentSnapshot.Outcome is not ClientInProgressOutcome;
-
-            QueueRedraw();
-            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
-
-            var finalSnapshot = _live.CurrentSnapshot;
-            if (!matchCompleted)
+            if (mapsCompletedCount != PlayableMaps.Length)
             {
                 throw new InvalidOperationException(
-                    $"The match did not reach a terminal outcome within {turnsPlayed} bot decisions.");
+                    $"C6 must finish every playable map; completed {mapsCompletedCsv}.");
             }
 
-            // 3. Rematch — the real Rematch() method, not a hand-built second request.
-            Rematch();
-            if (_live is null)
+            if (finalSnapshot is null)
             {
-                throw new InvalidOperationException($"Rematch failed to start a fresh match: {_menuError}");
+                throw new InvalidOperationException("C6 finished with no snapshot.");
             }
-
-            var rematchCreated = _live.CurrentSnapshot.TurnNumber == 1;
-            await _live.DisposeAsync().ConfigureAwait(true);
-            var rematchDisposedCleanly = true;
-            _live = null;
 
             return new C6SmokeReport(
                 Success: true,
@@ -1698,15 +1737,15 @@ public partial class Main : Node2D
                 ClientVersion: diagnostics.ClientVersion,
                 GodotVersion: diagnostics.GodotVersion,
                 RosterCount: rosterCount,
-                HumanCharacterId: humanChar.Id,
-                BotCharacterId: botChar.Id,
+                HumanCharacterId: humanCharId,
+                BotCharacterId: botCharId,
                 InitialMatchCreated: true,
                 HoverAnimationInterruptionTestPassed: hoverAnimationInterruptionTestPassed,
                 HumanTurnExecuted: humanTurnExecuted,
                 BotTurnExecuted: botTurnExecuted,
                 PassivePromptShownForHuman: passivePromptShownForHuman,
                 PassivePromptConfirmedThroughRealInput: passivePromptConfirmedThroughRealInput,
-                MatchCompleted: matchCompleted,
+                MatchCompleted: true,
                 TurnsPlayed: turnsPlayed,
                 FinalTurnNumber: finalSnapshot.TurnNumber,
                 FinalStateHash: finalSnapshot.StateHash,
@@ -1717,7 +1756,10 @@ public partial class Main : Node2D
                 CharacterSelectScreenshotWidth: characterSelectWidth,
                 CharacterSelectScreenshotHeight: characterSelectHeight,
                 LocalSetupScreenshotWidth: localSetupWidth,
-                LocalSetupScreenshotHeight: localSetupHeight);
+                LocalSetupScreenshotHeight: localSetupHeight,
+                MapsCompleted: mapsCompletedCsv,
+                AllPlayableMapsCompleted: mapsCompletedCount == PlayableMaps.Length,
+                StackedBlocksFell: stackedBlocksFell);
         }
         catch (Exception exception)
         {
@@ -1746,7 +1788,10 @@ public partial class Main : Node2D
                 CharacterSelectScreenshotWidth: 0,
                 CharacterSelectScreenshotHeight: 0,
                 LocalSetupScreenshotWidth: 0,
-                LocalSetupScreenshotHeight: 0);
+                LocalSetupScreenshotHeight: 0,
+                MapsCompleted: string.Empty,
+                AllPlayableMapsCompleted: false,
+                StackedBlocksFell: false);
         }
         finally
         {
@@ -1977,8 +2022,84 @@ public partial class Main : Node2D
         }
     }
 
-    private static ushort HealthOf(ClientMatchSnapshot snapshot, string playerId) =>
-        snapshot.Players.First(p => p.PlayerId == playerId).Health;
+    private static ushort HealthOf(ClientMatchSnapshot snapshot, string playerId)
+    {
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == playerId)
+            {
+                return snapshot.Players[i].Health;
+            }
+        }
+
+        throw new InvalidOperationException($"No player '{playerId}' in the snapshot.");
+    }
+
+    private void ClickPickerItem(string itemId)
+    {
+        if (_roster is null)
+        {
+            throw new InvalidOperationException("The picker catalog is not loaded.");
+        }
+
+        var index = -1;
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            if (_roster[i].Id == itemId)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index < 0)
+        {
+            throw new InvalidOperationException($"The loadout picker catalog is missing {itemId}.");
+        }
+
+        using var click = new InputEventMouseButton
+        {
+            Pressed = true,
+            ButtonIndex = MouseButton.Left,
+            Position = CharacterTileRestRect(index).GetCenter(),
+        };
+        HandleCharacterSelectInput(click);
+    }
+
+    private static string LoadoutMainOf(ClientMatchSnapshot snapshot, string playerId)
+    {
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == playerId)
+            {
+                return snapshot.Players[i].Loadout.Main;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool AnyLivingBlockFell(ClientMatchSnapshot before, ClientMatchSnapshot after)
+    {
+        for (var i = 0; i < after.Blocks.Count; i++)
+        {
+            var fallen = after.Blocks[i];
+            if (fallen.Health == 0)
+            {
+                continue;
+            }
+
+            for (var j = 0; j < before.Blocks.Count; j++)
+            {
+                if (before.Blocks[j].Id == fallen.Id && fallen.OriginCellY > before.Blocks[j].OriginCellY)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 
     private static async Task WaitTicksAsync(uint ticks, uint tickRate)
     {

@@ -5,21 +5,27 @@
 //! types; they do not define their own. Changing a type here is a cross-cutting change
 //! and must be coordinated, not made locally.
 //!
-//! Per ADR 0002, characters replace the three-slot loadout. A player picks one character
-//! and its fixed kit is their whole moveset. The *shape* of an attack is unchanged from
-//! the retired weapon model — a projectile is still a projectile — so terrain,
-//! ballistics, damage, and knockback carry over untouched. Only the owner of an attack
-//! changed, from "a weapon a player equipped" to "an ability a character has".
+//! Playable cut (SIMULATION_VERSION 7): every fighter is the one crow. Expression is the
+//! three-slot item loadout; equipped items are ammunition. ADR 0002's nine-kit roster is
+//! historical and is not restored for this envelope. Attack *shape* is unchanged — a
+//! projectile is still a projectile — so terrain, ballistics, damage, and knockback carry
+//! over. The owner of an attack is the equipped item, not a character kit.
 
 use crate::blocks::TerrainBlock;
 use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
 
-/// Reference value that every damage percentage scales from (`CHARACTERS.md` §2).
+/// Reference value that every damage percentage scales from (`ARSENAL.md`).
 ///
-/// A "55% attack" deals 55 hit points. One shared reference keeps all 24 characters on a
-/// comparable scale, and — unlike scaling from target max HP — it means a 400 HP tank is
-/// genuinely tankier than a 190 HP assassin rather than merely having a bigger number.
+/// A "62% attack" deals 62 hit points. One shared reference keeps every item on a
+/// comparable scale.
 pub const BASE_ATTACK: i32 = 100;
+
+/// Shared fighter identity for this envelope. The create/command wire does not carry a
+/// character id; every player is this crow.
+pub const CROW_ID: &str = "crow";
+
+/// Shared crow maximum health (`PRODUCT_SPEC.md` §2 / `ARSENAL.md`).
+pub const CROW_MAX_HEALTH: u16 = 200;
 
 /// Special-gauge scale. The gauge is stored in hundredths so the fractional per-damage
 /// gains in `CHARACTERS.md` §2 (+0.40 dealt, +0.25 taken, +0.30 healed) stay exact
@@ -110,18 +116,18 @@ impl MovementClass {
     }
 }
 
-/// Which of a character's abilities is being used.
+/// Which equipped item slot is being used.
 ///
-/// Bounded at three so the HUD is bounded at three buttons. `BasicAlt` exists because
-/// Aleph carries both a bow and throwing knives; modelling that as a second basic is
-/// cheaper than a general per-character ability list.
+/// Bounded at three so the HUD is bounded at three buttons. Variant names keep the
+/// historical `Basic` / `BasicAlt` / `Special` discriminants so canonical tags stay
+/// stable; the *wire* names are the loadout slots `main` / `secondary` / `meleeTool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AbilitySlot {
-    /// Primary basic attack. Always available, never gated.
+    /// Main item. Finite ammunition; strongest terrain or area influence.
     Basic,
-    /// Optional second basic attack. Always available on characters that have one.
+    /// Secondary item. Includes bows, the longsword, and handguns.
     BasicAlt,
-    /// Special. Requires a full gauge, which it consumes entirely.
+    /// Melee/tool item. Close-range damage, digging, or risky burst.
     Special,
 }
 
@@ -129,22 +135,131 @@ impl AbilitySlot {
     /// All slots in canonical order. Iteration order is fixed for hashing.
     pub const ALL: [Self; 3] = [Self::Basic, Self::BasicAlt, Self::Special];
 
-    /// Stable wire identifier.
+    /// Stable wire identifier. Never localize these.
     #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
-            Self::Basic => "basic",
-            Self::BasicAlt => "basicAlt",
-            Self::Special => "special",
+            Self::Basic => "main",
+            Self::BasicAlt => "secondary",
+            Self::Special => "meleeTool",
         }
     }
 
-    /// Whether using this slot requires and consumes a full special gauge.
+    /// Index into [`PlayerState::ammo`] / loadout slot order.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Basic => 0,
+            Self::BasicAlt => 1,
+            Self::Special => 2,
+        }
+    }
+
+    /// Historical gauge gate. Always false: items spend ammo, not a special gauge.
     #[must_use]
     pub const fn consumes_gauge(self) -> bool {
-        matches!(self, Self::Special)
+        false
     }
 }
+
+/// How an equipped item spends charges (`PRODUCT_SPEC.md` §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AmmoPolicy {
+    /// Decrement once after the authority accepts the attack.
+    Finite,
+    /// Never decrements. The Longsword is the only unlimited item.
+    Unlimited,
+}
+
+impl AmmoPolicy {
+    /// Stable wire identifier. Never localize these.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Finite => "finite",
+            Self::Unlimited => "unlimited",
+        }
+    }
+}
+
+/// One slot's remaining charges. Durability uses the same counter as ammunition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmmoCounter {
+    /// Charges remaining. Ignored when [`Self::policy`] is [`AmmoPolicy::Unlimited`].
+    pub remaining: u16,
+    /// Starting charges for this match.
+    pub maximum: u16,
+    /// Whether the slot decrements.
+    pub policy: AmmoPolicy,
+}
+
+impl AmmoCounter {
+    /// Whether the slot can legally fire once.
+    #[must_use]
+    pub const fn can_spend(self) -> bool {
+        matches!(self.policy, AmmoPolicy::Unlimited) || self.remaining > 0
+    }
+
+    /// Spends one finite charge. Unlimited ammo is unchanged.
+    pub const fn spend(&mut self) {
+        if matches!(self.policy, AmmoPolicy::Finite) {
+            self.remaining = self.remaining.saturating_sub(1);
+        }
+    }
+}
+
+/// Equipped item identifiers in slot order. Validated against the item catalog at match create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loadout {
+    /// Main item identifier.
+    pub main: String,
+    /// Secondary item identifier.
+    pub secondary: String,
+    /// Melee/tool item identifier.
+    pub melee_tool: String,
+}
+
+impl Loadout {
+    /// Launch-default triangle: Ramshot Cannon, Recurve Bow, Trench Spade.
+    #[must_use]
+    pub fn launch_default() -> Self {
+        Self {
+            main: "ramshot-cannon".to_owned(),
+            secondary: "recurve-bow".to_owned(),
+            melee_tool: "trench-spade".to_owned(),
+        }
+    }
+
+    /// Item identifier equipped in `slot`.
+    #[must_use]
+    pub fn item_id(&self, slot: AbilitySlot) -> &str {
+        match slot {
+            AbilitySlot::Basic => self.main.as_str(),
+            AbilitySlot::BasicAlt => self.secondary.as_str(),
+            AbilitySlot::Special => self.melee_tool.as_str(),
+        }
+    }
+}
+
+/// Default ammo matching [`Loadout::launch_default`]. Kept here so `PlayerState`
+/// construction does not take a dependency on the item catalog.
+pub const DEFAULT_AMMO: [AmmoCounter; 3] = [
+    AmmoCounter {
+        remaining: 3,
+        maximum: 3,
+        policy: AmmoPolicy::Finite,
+    },
+    AmmoCounter {
+        remaining: 5,
+        maximum: 5,
+        policy: AmmoPolicy::Finite,
+    },
+    AmmoCounter {
+        remaining: 4,
+        maximum: 4,
+        policy: AmmoPolicy::Finite,
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Ability definitions
@@ -298,7 +413,7 @@ pub enum Attack {
 pub const MAX_SPECIAL_EFFECTS: usize = 6;
 
 /// A single ability belonging to a character.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbilityDefinition {
     /// Stable identifier, e.g. `"arzum-chain-strike"`.
     pub id: &'static str,
@@ -398,13 +513,13 @@ pub enum PassiveKind {
 // Character definitions
 // ---------------------------------------------------------------------------
 
-/// A complete, versioned playable character.
+/// The one playable fighter. Kits are not part of this envelope; attacks come from items.
 ///
 /// Definitions are immutable once used by a completed match. Balance changes publish a
 /// new version rather than mutating in place.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CharacterDefinition {
-    /// Stable identifier, e.g. `"arzum"`.
+    /// Stable identifier. Always [`CROW_ID`] for this envelope.
     pub id: &'static str,
     /// Definition version.
     pub version: u32,
@@ -412,34 +527,32 @@ pub struct CharacterDefinition {
     pub display_name: &'static str,
     /// Starting and maximum health.
     pub max_health: u16,
-    /// Default reach.
+    /// Default reach class for UI; item reach is authoritative per attack.
     pub range_tier: RangeTier,
     /// Movement allowance class.
     pub movement: MovementClass,
-    /// Primary basic attack.
-    pub basic: AbilityDefinition,
-    /// Optional second basic attack. Only Aleph has one at launch.
-    pub basic_alt: Option<AbilityDefinition>,
-    /// Special, gated by a full gauge.
-    pub special: AbilityDefinition,
-    /// Exactly [`PASSIVES_PER_CHARACTER`] options.
-    pub passives: &'static [PassiveDefinition],
-    /// Whether this character is free on every account (`CHARACTERS.md` §3).
+    /// Whether this fighter is free on every account.
     pub is_starter: bool,
-    /// Credit cost when not a starter. Zero for starters.
+    /// Credit cost when not a starter. Zero for the crow.
     pub credit_cost: u32,
 }
 
-impl CharacterDefinition {
-    /// The ability in `slot`, if this character has one there.
-    #[must_use]
-    pub const fn ability(&self, slot: AbilitySlot) -> Option<&AbilityDefinition> {
-        match slot {
-            AbilitySlot::Basic => Some(&self.basic),
-            AbilitySlot::BasicAlt => self.basic_alt.as_ref(),
-            AbilitySlot::Special => Some(&self.special),
-        }
-    }
+/// One equippable item. The attack shape is an [`AbilityDefinition`] so resolution,
+/// ballistics, and terrain keep a single vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemDefinition {
+    /// Stable identifier, e.g. `"ramshot-cannon"`.
+    pub id: &'static str,
+    /// Player-facing name.
+    pub display_name: &'static str,
+    /// Which loadout slot this item may occupy.
+    pub slot: AbilitySlot,
+    /// Ammunition policy. Only the Longsword is [`AmmoPolicy::Unlimited`].
+    pub ammo_policy: AmmoPolicy,
+    /// Starting charges. Ignored for unlimited items.
+    pub starting_ammo: u16,
+    /// Attack used when this item is fired.
+    pub ability: AbilityDefinition,
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +896,7 @@ pub struct PersistentObjectChange {
     pub transition: PersistentObjectTransition,
 }
 
-/// One character's authoritative state.
+/// One fighter's authoritative state. Every player is the crow; items are ammo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerState {
     /// Opaque server-generated identifier. Never an email, external subject, or platform
@@ -793,22 +906,15 @@ pub struct PlayerState {
     pub team: u8,
     /// Current health. Zero means eliminated.
     pub health: u16,
-    /// Maximum health, from the character definition plus any passive bonus. Stored
-    /// rather than re-derived so a mid-match definition change cannot retroactively move
-    /// a player's ceiling.
+    /// Maximum health, from the crow definition. Stored rather than re-derived so a
+    /// mid-match definition change cannot retroactively move a player's ceiling.
     pub max_health: u16,
     /// Position, fixed-point.
     pub position: FixedPoint,
-    /// Which character is being played.
-    pub character_id: String,
-    /// The passive chosen on first gauge fill. [`None`] until that choice is made — the
-    /// choice happens mid-match, not at selection (`CHARACTERS.md` §2).
-    pub passive_id: Option<String>,
-    /// Special gauge in hundredths, `0..=`[`GAUGE_FULL`].
-    pub special_gauge: u16,
-    /// Whether the gauge has ever been full this match. Gates the one-time passive
-    /// prompt, so a player who fills, spends, and refills is not asked twice.
-    pub has_chosen_passive: bool,
+    /// Equipped item identifiers in slot order.
+    pub loadout: Loadout,
+    /// Remaining ammunition per slot, in [`AbilitySlot::ALL`] order.
+    pub ammo: [AmmoCounter; 3],
     /// Active statuses, kept sorted by `kind` for canonical encoding.
     pub statuses: Vec<StatusEffect>,
     /// Cosmetic only. Excluded from the state hash.
@@ -816,34 +922,43 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
-    /// Whether the special is available.
+    /// Constructs a crow fighter with the launch-default loadout at full health.
     #[must_use]
-    pub const fn special_ready(&self) -> bool {
-        self.special_gauge >= GAUGE_FULL
+    pub fn crow(id: impl Into<String>, team: u8, position: FixedPoint) -> Self {
+        Self {
+            id: id.into(),
+            team,
+            health: CROW_MAX_HEALTH,
+            max_health: CROW_MAX_HEALTH,
+            position,
+            loadout: Loadout::launch_default(),
+            ammo: DEFAULT_AMMO,
+            statuses: Vec::new(),
+            appearance: Appearance::default(),
+        }
     }
 
-    /// Whether this character is eliminated.
+    /// Whether this fighter is eliminated.
     #[must_use]
     pub const fn is_eliminated(&self) -> bool {
         self.health == 0
     }
 
-    /// Adds gauge charge, applying both the per-action cap and the ceiling.
-    ///
-    /// Saturating throughout: an overflowing charge must clamp to full, never wrap to
-    /// empty and rob a player of an earned special.
-    pub const fn add_gauge(&mut self, amount: u16) {
-        let capped = if amount > GAUGE_MAX_PER_ACTION {
-            GAUGE_MAX_PER_ACTION
-        } else {
-            amount
-        };
-        let raised = self.special_gauge.saturating_add(capped);
-        self.special_gauge = if raised > GAUGE_FULL {
-            GAUGE_FULL
-        } else {
-            raised
-        };
+    /// Ammunition counter for `slot`.
+    #[must_use]
+    pub fn ammo_for(&self, slot: AbilitySlot) -> AmmoCounter {
+        self.ammo.get(slot.index()).copied().unwrap_or(AmmoCounter {
+            remaining: 0,
+            maximum: 0,
+            policy: AmmoPolicy::Finite,
+        })
+    }
+
+    /// Spends one charge in `slot` when the policy is finite.
+    pub fn spend_ammo(&mut self, slot: AbilitySlot) {
+        if let Some(ammo) = self.ammo.get_mut(slot.index()) {
+            ammo.spend();
+        }
     }
 }
 
@@ -1059,10 +1174,12 @@ pub enum CommandRejection {
     WrongPhase,
     /// The client's expected turn number is stale or ahead.
     TurnVersionMismatch,
-    /// The acting player's character has no ability in that slot. **Security event.**
+    /// The acting player's loadout has no item in that slot. **Security event.**
     AbilityNotAvailable,
-    /// The special was used without a full gauge.
+    /// The special was used without a full gauge. Unused in this envelope; items spend ammo.
     GaugeNotReady,
+    /// The selected item has no remaining ammunition or durability.
+    OutOfAmmo,
     /// The player has already attacked this turn.
     AlreadyAttacked,
     /// Angle or power outside the permitted range. **Security event.**

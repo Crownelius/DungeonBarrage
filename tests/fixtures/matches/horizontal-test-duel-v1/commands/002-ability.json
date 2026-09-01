@@ -1,1 +1,1 @@
-{"schemaVersion":1,"commandId":"fixture-ability-002","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":1,"kind":"ability","slot":"basic","angleMillidegrees":45000,"powerBasisPoints":1500,"targetPlayerId":null,"secondaryTargetPlayerId":null}
+{"schemaVersion":1,"commandId":"fixture-ability-002","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":1,"kind":"ability","slot":"main","angleMillidegrees":45000,"powerBasisPoints":1500,"targetPlayerId":null,"secondaryTargetPlayerId":null}

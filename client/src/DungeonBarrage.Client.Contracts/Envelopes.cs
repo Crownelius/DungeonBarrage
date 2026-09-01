@@ -104,18 +104,46 @@ public enum ClientTransitionDisposition
     DuplicateReplay,
 }
 
-/// <summary>Character ability slots.</summary>
+/// <summary>Equipped item slots. Wire names are main / secondary / meleeTool.</summary>
 public enum ClientAbilitySlot
 {
-    /// <summary>Primary basic attack.</summary>
-    Basic,
+    /// <summary>Main item.</summary>
+    Main,
 
-    /// <summary>Optional second basic attack.</summary>
-    BasicAlt,
+    /// <summary>Secondary item.</summary>
+    Secondary,
 
-    /// <summary>Gauge-consuming special.</summary>
-    Special,
+    /// <summary>Melee/tool item.</summary>
+    MeleeTool,
 }
+
+/// <summary>Ammunition policy for one equipped item.</summary>
+public enum ClientAmmoPolicy
+{
+    /// <summary>Decrements after an accepted attack.</summary>
+    Finite,
+
+    /// <summary>Never decrements. Longsword only.</summary>
+    Unlimited,
+}
+
+/// <summary>One slot's remaining charges.</summary>
+/// <param name="Remaining">Charges left.</param>
+/// <param name="Maximum">Starting charges.</param>
+/// <param name="Policy">Finite or unlimited.</param>
+public sealed record ClientAmmoCounter(
+    [property: JsonPropertyName("remaining")] ushort Remaining,
+    [property: JsonPropertyName("maximum")] ushort Maximum,
+    [property: JsonPropertyName("policy")] ClientAmmoPolicy Policy);
+
+/// <summary>Equipped item identifiers in slot order.</summary>
+/// <param name="Main">Main item id.</param>
+/// <param name="Secondary">Secondary item id.</param>
+/// <param name="MeleeTool">Melee/tool item id.</param>
+public sealed record ClientLoadout(
+    [property: JsonPropertyName("main")] string Main,
+    [property: JsonPropertyName("secondary")] string Secondary,
+    [property: JsonPropertyName("meleeTool")] string MeleeTool);
 
 /// <summary>Cosmetic appearance selected before the match.</summary>
 /// <param name="SkinId">Character skin identifier.</param>
@@ -129,12 +157,12 @@ public sealed record ClientAppearance(
 /// <summary>One player in a creation request.</summary>
 /// <param name="PlayerId">Opaque match-local player identifier.</param>
 /// <param name="Team">Team number; equal values are allies.</param>
-/// <param name="CharacterId">Stable character definition identifier.</param>
+/// <param name="Loadout">Equipped items; each slot is ammunition.</param>
 /// <param name="Appearance">Cosmetic-only selection.</param>
 public sealed record ClientPlayerConfig(
     [property: JsonPropertyName("playerId")] string PlayerId,
     [property: JsonPropertyName("team")] byte Team,
-    [property: JsonPropertyName("characterId")] string CharacterId,
+    [property: JsonPropertyName("loadout")] ClientLoadout Loadout,
     [property: JsonPropertyName("appearance")] ClientAppearance Appearance);
 
 /// <summary>The match body of a creation request.</summary>

@@ -3030,4 +3030,122 @@ Completed milestone C7 (**Desktop Release Quality**), establishing client-side s
 }
 ```
 
-<!-- GOAL_COMPLETE -->
+---
+
+## 2026-08-31 — Playable cut: one crow, item ammo, stacked maps (SIMULATION_VERSION 7)
+
+Envelope change. `characterId` and character kits are gone from match-create/command.
+Every fighter is the crow. Equipped items are ammunition. `CONTENT_VERSION` is 2.
+
+Do not restore the nine-kit roster for this cut. ADR 0002 remains historical.
+
+### What changed
+
+- `MatchPlayerConfig` / wire create: `loadout { main, secondary, meleeTool }` instead of `characterId`.
+- Ability slot wire names: `main` / `secondary` / `meleeTool`. Finite items spend ammo.
+- Item catalog in `character.rs`; roster FFI returns `{ fighter, items }`.
+- Maps: `crow-perch`, `broken-battlements`, `twin-spires` (stacked destructible structures).
+  `horizontal-test-array` remains the C2 FFI duel fixture.
+- `block_ops::settle_unsupported_blocks`: stacked blocks fall when support is destroyed.
+- Bot uses equipped items on the ordinary `MatchHost` apply path.
+- Godot `Main.cs`: loadout picker + map select + ammo HUD. No kit select.
+- `PLAY.md` added.
+
+### Shared-fixture hashes (version 7)
+
+| Vector | Hash |
+|---|---|
+| initial | `864c1ec2512a0327` |
+| after move | `57dc7133b8667daf` |
+| after ability / final | `03388514a9108085` |
+
+Version-6 hashes (`f67c5371bcddbdf5` / `378081bb2e830a5d` / `d8686762470c0c36`) are retired.
+
+Leftover C1 kit-specific unit tests (Arzum/Aleph/Karl provenance, passive interrupt, knife
+objects) are `#[ignore]` and are not a gate for this cut.
+
+### Rollback
+
+Revert this checkpoint, restore `SIMULATION_VERSION` 6 fixtures, and recopy the previous
+release `db_sim_ffi.dll`.
+
+---
+
+## 2026-08-31 — Loadout picker actually equips the clicked item
+
+C4 was not complete: character-select click/arrows only moved a highlight index.
+`ConfirmCharacterAndStartDuel` always sent the default Ramshot/Bow/Spade triangle.
+
+### What changed
+
+- `LoadoutPicker` (Interop, Godot-free) maps `SelectTile(index)` onto that item's slot.
+  A main-slot click replaces only main.
+- `LocalMatchEnvelope.HumanVsBot` is the create request Confirm submits.
+- `Main.cs` click/arrows call `EquipTile` → `SelectTile`; Confirm uses `_picker.Loadout`.
+- `LoadoutPickerTests.Selecting_frostfall_mortar_puts_it_on_the_create_envelope_main_slot`
+  drives the native catalog, serializes the envelope, and creates a release-FFI match
+  whose snapshot main is `frostfall-mortar`. The C6 script (move 1024, main 45°/1500)
+  is accepted on that session.
+- Aim-fired Frostfall was rejecting the whole shot (`InvalidTarget`) because Chill
+  required a named `primary_target_id` and Godot aim always sends `targetPlayerId: null`.
+  `resolve_chill` now applies to living opponents within one body width of impact when
+  no target is named; nobody in range is a no-op. The mortar crater still resolves.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | **0** |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **0** |
+| `cargo test --workspace --locked` | **436 pass**, 41 ignored, 0 fail (core lib) |
+| `cargo test --release -p db-sim-ffi --locked` | **22 pass**, 1 ignored |
+| `cargo build --release -p db-sim-ffi --locked` | **0** |
+| `cargo deny check` | **0** (unmatched license-allowance warnings only) |
+| `dotnet test client/DungeonBarrage.sln -c Release` | **12 + 51** twice |
+| Godot C6 (`--c6-smoke-report`) | **twice**: `success: true`, `humanCharacterId: frostfall-mortar`, `matchCompleted: true`, `botTurnExecuted: true`, hash `f8a34cacacbc0732` |
+
+Scratch: `C:\Users\rsfit\AppData\Local\Temp\grok-goal-0f63fafb5f44\implementer\picker` and `...\godot-smoke\c6-picker.json`.
+
+Source revision at recapture: `316a43e57eb429d1c40292428a78c932c5131ece` (uncommitted picker + chill fix on top).
+
+---
+
+## 2026-08-31 — Close remaining playable-cut test gaps
+
+The picker fix left holes: C5 still booted the embedded fixture, C6 only launched
+crow-perch, bot-to-terminal was one map, picker tests covered two items, headless
+screenshots were 0×0, and leftover C1 kit tests were still ignored.
+
+### What changed
+
+- `maps_bot_outcome`: bot-to-terminal on all three stacked maps; crown drops when
+  support is destroyed on each map; every `LAUNCH_ITEMS` entry fires with
+  `target_player_id: None`; timeout + preview on crow-perch.
+- `LoadoutPickerTests.Every_catalog_item_lands_on_its_slot_and_fires_with_a_null_target`
+  creates a release-FFI match per catalog item and fires that slot with a null target.
+- C5 smoke starts through the loadout picker on `crow-perch` (no embedded fixture).
+- C6 smoke loops all three playable maps with frostfall equipped, records
+  `stackedBlocksFell` from snapshot origin Y, rematches after the first map.
+- Windowed (not `--headless`) C5/C6 produce 1280×720 PNGs. Headless remains 0×0 by design.
+- 41 kit-envelope unit tests stay `#[ignore]`. They require Arzum/Karl/Aleph/Huck/Zeke.
+  Crow-envelope timeout, preview, and catalog fire are the replacements for this cut.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | **0** |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **0** |
+| `cargo test --workspace --locked` | core **436 pass / 41 ignored**; maps_bot **5 pass**; FFI **22 pass / 1 ignored** |
+| `cargo test --release -p db-sim-ffi --locked` | **22 pass**, 1 ignored |
+| `cargo build --release -p db-sim-ffi --locked` | **0** |
+| `cargo deny check` | **0** |
+| `dotnet test client/DungeonBarrage.sln -c Release` | **12 + 52** twice |
+| Godot C5 headless | `success: true`, `mapId: crow-perch`, `usedLoadoutPicker: true` |
+| Godot C5 windowed | `screenshotWidth: 1280`, `screenshotHeight: 720`, MATCH COMPLETE visible |
+| Godot C6 headless + windowed | `mapsCompleted: crow-perch,broken-battlements,twin-spires`, `stackedBlocksFell: true`, `humanCharacterId: frostfall-mortar` |
+
+Scratch: `C:\Users\rsfit\AppData\Local\Temp\grok-goal-gaps\godot-smoke\`.
+
+Still uncommitted. Still not a live human PLAY.md session.
+

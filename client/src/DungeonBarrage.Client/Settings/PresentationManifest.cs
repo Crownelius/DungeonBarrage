@@ -58,28 +58,27 @@ internal sealed record PresentationManifest(
             throw new InvalidDataException("The presentation manifest contains a duplicate character ID.");
         }
 
+        if (!characters.TryGetValue("crow", out var crow))
+        {
+            throw new InvalidDataException("The presentation manifest must include the crow fighter.");
+        }
+
         foreach (var player in request.Match.Players)
         {
-            if (!characters.TryGetValue(player.CharacterId, out var character))
-            {
-                throw new InvalidDataException(
-                    $"No presentation entry exists for character '{player.CharacterId}'.");
-            }
-
-            RequireContains(character.SkinIds, player.Appearance.SkinId, "skin", player.CharacterId);
+            RequireContains(crow.SkinIds, player.Appearance.SkinId, "skin", "crow");
             RequireContains(
-                character.VictoryPoseIds,
+                crow.VictoryPoseIds,
                 player.Appearance.VictoryPoseId,
                 "victory pose",
-                player.CharacterId);
+                "crow");
 
             foreach (var abilitySkinId in player.Appearance.AbilitySkinIds)
             {
                 RequireContains(
-                    character.AbilitySkinIds,
+                    crow.AbilitySkinIds,
                     abilitySkinId,
                     "ability skin",
-                    player.CharacterId);
+                    "crow");
             }
         }
 

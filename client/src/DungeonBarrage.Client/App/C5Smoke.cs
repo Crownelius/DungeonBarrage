@@ -128,7 +128,11 @@ internal sealed record C5SmokeReport(
     bool TurnHandedOverToTheOtherPlayer,
     uint TurnNumberAfter,
     int ScreenshotWidth,
-    int ScreenshotHeight)
+    int ScreenshotHeight,
+    string MapId,
+    string LoadoutMain,
+    bool UsedLoadoutPicker,
+    bool MatchReachedTerminalOutcome)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerOptions.Default)
     {

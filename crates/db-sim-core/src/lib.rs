@@ -67,14 +67,13 @@ pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSIT
 /// a change to the canonical encoding. Every match records the version it ran under so
 /// old replays stay interpretable (`PLATFORM_STRATEGY.md` §6).
 ///
-/// Version 6 corrects three live lifecycle rules: statuses tick on the affected player's
-/// own turns, Feeding Frenzy's count-based mark forces and consumes Carrion Call crits, and
-/// ordinary health-zero/fall elimination removes the defeated owner's persistent objects.
-/// Version 5 remains the terminal-turn-reason compatibility boundary.
-pub const SIMULATION_VERSION: u32 = 6;
+/// Version 7 drops character kits from the match-create/command envelope: every fighter is
+/// the one crow, equipped items are ammunition, and stacked structures collapse when their
+/// support is destroyed. Version 6 remains the kit-envelope compatibility boundary.
+pub const SIMULATION_VERSION: u32 = 7;
 
-/// Version of the gameplay content tables (weapons, maps, modes).
-pub const CONTENT_VERSION: u32 = 1;
+/// Version of the gameplay content tables (items, maps, modes).
+pub const CONTENT_VERSION: u32 = 2;
 
 /// Version of the wire protocol.
 pub const PROTOCOL_VERSION: u32 = 1;

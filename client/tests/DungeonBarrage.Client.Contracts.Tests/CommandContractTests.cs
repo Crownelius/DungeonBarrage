@@ -45,7 +45,7 @@ public sealed class CommandContractTests
             playerId: "a-local-player",
             expectedTurnNumber: 1,
             expectedSnapshotGeneration: 1,
-            slot: ClientAbilitySlot.Basic,
+            slot: ClientAbilitySlot.Main,
             angleMillidegrees: 45_000,
             powerBasisPoints: 1_500,
             targetPlayerId: null,

@@ -153,10 +153,8 @@ public sealed record ClientStatusSnapshot(
 /// <param name="IsEliminated">Whether the player is eliminated.</param>
 /// <param name="MaxHealth">Maximum health.</param>
 /// <param name="Position">Authoritative fixed-point position.</param>
-/// <param name="CharacterId">Stable character identifier.</param>
-/// <param name="PassiveId">Chosen passive identifier, or null before selection.</param>
-/// <param name="SpecialGauge">Current special gauge.</param>
-/// <param name="HasChosenPassive">Whether the one-time passive choice is complete.</param>
+/// <param name="Loadout">Equipped item identifiers.</param>
+/// <param name="Ammo">Remaining ammunition per slot.</param>
 /// <param name="Statuses">Current statuses.</param>
 /// <param name="Appearance">Cosmetic appearance.</param>
 public sealed record ClientPlayerSnapshot(
@@ -166,10 +164,8 @@ public sealed record ClientPlayerSnapshot(
     bool IsEliminated,
     ushort MaxHealth,
     ClientPosition Position,
-    string CharacterId,
-    string? PassiveId,
-    ushort SpecialGauge,
-    bool HasChosenPassive,
+    ClientLoadout Loadout,
+    IReadOnlyList<ClientAmmoCounter> Ammo,
     IReadOnlyList<ClientStatusSnapshot> Statuses,
     ClientAppearance Appearance);
 

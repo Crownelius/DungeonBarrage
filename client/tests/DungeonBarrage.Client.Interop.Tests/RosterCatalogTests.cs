@@ -15,31 +15,31 @@ public sealed class RosterCatalogTests
         var roster = RosterCatalog.Get();
 
         Assert.Equal(1u, roster.SchemaVersion);
-        Assert.Equal(9, roster.Characters.Count);
+        Assert.Equal("crow", roster.Fighter.Id);
+        Assert.Equal((ushort)200, roster.Fighter.MaxHealth);
+        Assert.True(roster.Items.Count >= 6);
 
-        var ids = roster.Characters.Select(c => c.Id).ToArray();
-        foreach (var expected in new[]
-                 {
-                     "arzum", "emi", "karl", "huck", "numa", "aleph", "zeke", "roberto", "natomica",
-                 })
+        var ids = roster.Items.Select(item => item.Id).ToArray();
+        foreach (var expected in new[] { "ramshot-cannon", "recurve-bow", "trench-spade", "longsword" })
         {
             Assert.Contains(expected, ids);
         }
     }
 
     [Fact]
-    public void Get_reports_a_strike_ability_with_its_range_and_a_projectile_without_one()
+    public void Get_reports_a_strike_item_with_its_range_and_a_projectile_without_one()
     {
         var roster = RosterCatalog.Get();
 
-        var huck = Assert.Single(roster.Characters, c => c.Id == "huck");
-        Assert.Equal(ClientAttackShape.Strike, huck.Basic.AttackShape);
-        Assert.NotNull(huck.Basic.Range);
-        Assert.Equal(3, huck.Passives.Count);
+        var sword = Assert.Single(roster.Items, item => item.Id == "longsword");
+        Assert.Equal(ClientAttackShape.Strike, sword.Ability.AttackShape);
+        Assert.NotNull(sword.Ability.Range);
+        Assert.Equal(ClientAmmoPolicy.Unlimited, sword.AmmoPolicy);
 
-        var zeke = Assert.Single(roster.Characters, c => c.Id == "zeke");
-        Assert.Equal(ClientAttackShape.Projectile, zeke.Basic.AttackShape);
-        Assert.Null(zeke.Basic.Range);
+        var ramshot = Assert.Single(roster.Items, item => item.Id == "ramshot-cannon");
+        Assert.Equal(ClientAttackShape.Projectile, ramshot.Ability.AttackShape);
+        Assert.Null(ramshot.Ability.Range);
+        Assert.Equal(ClientAbilitySlot.Main, ramshot.Slot);
     }
 
     [Fact]
@@ -48,12 +48,9 @@ public sealed class RosterCatalogTests
         var first = RosterCatalog.Get();
         var second = RosterCatalog.Get();
 
-        // Compares ids in order rather than the records themselves: a record's compiler-generated
-        // Equals delegates to List<T>'s reference equality for the nested Characters/Passives
-        // collections, so two independently deserialized responses would compare unequal even
-        // with identical content. Id order is exactly what "deterministic" needs to prove here.
+        Assert.Equal(first.Fighter.Id, second.Fighter.Id);
         Assert.Equal(
-            first.Characters.Select(c => c.Id),
-            second.Characters.Select(c => c.Id));
+            first.Items.Select(item => item.Id),
+            second.Items.Select(item => item.Id));
     }
 }

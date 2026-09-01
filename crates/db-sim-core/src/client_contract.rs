@@ -242,14 +242,10 @@ pub struct PlayerSnapshot {
     pub max_health: u16,
     /// Authoritative fixed-point position.
     pub position: PositionSnapshot,
-    /// Stable character definition identifier.
-    pub character_id: String,
-    /// Chosen passive identifier, if the one-time choice has occurred.
-    pub passive_id: Option<String>,
-    /// Special gauge in hundredths, from zero through ten thousand.
-    pub special_gauge: u16,
-    /// Whether the one-time passive-selection gate has been consumed.
-    pub has_chosen_passive: bool,
+    /// Equipped item identifiers in slot order.
+    pub loadout: crate::types::Loadout,
+    /// Remaining ammunition per slot, in canonical slot order.
+    pub ammo: [crate::types::AmmoCounter; 3],
     /// Active statuses in deterministic kind/magnitude/duration order.
     pub statuses: Vec<StatusSnapshot>,
     /// Cosmetic appearance used only by presentation.
@@ -546,10 +542,8 @@ fn snapshot_players(source: &[PlayerState]) -> Vec<PlayerSnapshot> {
             is_eliminated: player.is_eliminated(),
             max_health: player.max_health,
             position: snapshot_position(player.position),
-            character_id: player.character_id.clone(),
-            passive_id: player.passive_id.clone(),
-            special_gauge: player.special_gauge,
-            has_chosen_passive: player.has_chosen_passive,
+            loadout: player.loadout.clone(),
+            ammo: player.ammo,
             statuses: snapshot_statuses(&player.statuses),
             appearance: snapshot_appearance(&player.appearance),
         })
@@ -609,13 +603,13 @@ mod tests {
     fn player_config(
         player_id: &str,
         team: u8,
-        character_id: &str,
+        _character_id: &str,
         skin_id: &str,
     ) -> MatchPlayerConfig {
         MatchPlayerConfig {
             player_id: player_id.to_owned(),
             team,
-            character_id: character_id.to_owned(),
+            loadout: crate::types::Loadout::launch_default(),
             appearance: Appearance {
                 skin_id: skin_id.to_owned(),
                 ability_skin_ids: [
@@ -634,9 +628,9 @@ mod tests {
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
-                player_config("zeta", 2, "zeke", "skin-zeta"),
-                player_config("alpha", 1, "huck", "skin-alpha"),
-                player_config("beta", 3, "huck", "skin-beta"),
+                player_config("zeta", 2, "crow", "skin-zeta"),
+                player_config("alpha", 1, "crow", "skin-alpha"),
+                player_config("beta", 3, "crow", "skin-beta"),
             ],
         };
         let Ok(mut state) = build_initial_state(&config) else {
@@ -651,9 +645,7 @@ mod tests {
             panic!("alpha fixture player must exist");
         };
         alpha.health = 777;
-        alpha.passive_id = Some("huck-unyielding".to_owned());
-        alpha.special_gauge = 8_765;
-        alpha.has_chosen_passive = true;
+        alpha.spend_ammo(crate::types::AbilitySlot::Basic);
         alpha.statuses = vec![
             StatusEffect {
                 kind: EffectKind::GuaranteeCrit,
@@ -808,10 +800,8 @@ mod tests {
             alpha.position,
             snapshot_position(authoritative_alpha.position)
         );
-        assert_eq!(alpha.character_id, "huck");
-        assert_eq!(alpha.passive_id.as_deref(), Some("huck-unyielding"));
-        assert_eq!(alpha.special_gauge, 8_765);
-        assert!(alpha.has_chosen_passive);
+        assert_eq!(alpha.loadout.main, "ramshot-cannon");
+        assert_eq!(alpha.ammo.first().map(|ammo| ammo.remaining), Some(2));
         assert_eq!(alpha.statuses.len(), 2);
         assert!(
             alpha

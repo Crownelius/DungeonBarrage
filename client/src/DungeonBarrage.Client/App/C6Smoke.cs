@@ -107,7 +107,10 @@ internal sealed record C6SmokeReport(
     int CharacterSelectScreenshotWidth,
     int CharacterSelectScreenshotHeight,
     int LocalSetupScreenshotWidth,
-    int LocalSetupScreenshotHeight)
+    int LocalSetupScreenshotHeight,
+    string MapsCompleted,
+    bool AllPlayableMapsCompleted,
+    bool StackedBlocksFell)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerOptions.Default)
     {
