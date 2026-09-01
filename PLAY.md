@@ -54,12 +54,12 @@ is not one of the three playable stacked maps.
 
 ## Envelope
 
-`SIMULATION_VERSION` is 7 and `CONTENT_VERSION` is 3. Create/command JSON has no
+`SIMULATION_VERSION` is 7 and `CONTENT_VERSION` is 4. Create/command JSON has no
 `characterId` and no kits. Each player sends `loadout: { main, secondary, meleeTool }`.
 Finite items spend ammo; the Longsword is the only unlimited item.
 
-Content version 3 scopes the Ramshot Cannon's knockback to its own crater. At version 2 that
-effect shoved every opponent a flat eight cells wherever the shell landed, so the opening shot
-launched the other crow out of the world and **every duel ended on turn 1**. If you are testing
-a build where one shot always wins, you are on content version 2 — check
+Content version 4 cuts the Ramshot Cannon's knockback to two cells, and version 3 scoped it to
+the crater. Before those, one shot launched the other crow clean out of the world and **every
+duel ended on turn 1**. A healthy match now runs three to four turns and the winner finishes
+hurt. If one shot still wins outright, you are on an older content table — check
 `db_sim_content_version()` before reading anything into the result.

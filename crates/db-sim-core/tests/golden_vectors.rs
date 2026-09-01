@@ -252,7 +252,11 @@ fn golden_all_passes_terminates_identically() {
     // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
     // new content table from silently replaying against an old one.
     // Previous value was "5fe56c374f884cf6".
-    assert_vector("all_passes", &actual, "f66401193708e515");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 4: the Ramshot Cannon's knockback drops
+    // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
+    // damage race decides the match. `content_version` is hashed, so every vector moves.
+    // Previous value was "f66401193708e515".
+    assert_vector("all_passes", &actual, "fc8cf0f4ba111b74");
 }
 
 #[test]
@@ -276,7 +280,11 @@ fn golden_walking_duel() {
     // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
     // new content table from silently replaying against an old one.
     // Previous value was "0b914d175ade7d6e".
-    assert_vector("walking_duel", &actual, "ddb193455a403319");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 4: the Ramshot Cannon's knockback drops
+    // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
+    // damage race decides the match. `content_version` is hashed, so every vector moves.
+    // Previous value was "ddb193455a403319".
+    assert_vector("walking_duel", &actual, "8831e091d2b5e054");
 }
 
 #[test]
@@ -317,7 +325,11 @@ fn golden_firing_duel() {
     // rather than its documented "primary target only", so this vector's shots now
     // only shove what they land near.
     // Previous value was "7b07ba4dfa57d5f6".
-    assert_vector("firing_duel", &actual, "9ea57823cddeb8ae");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 4: the Ramshot Cannon's knockback drops
+    // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
+    // damage race decides the match. `content_version` is hashed, so every vector moves.
+    // Previous value was "9ea57823cddeb8ae".
+    assert_vector("firing_duel", &actual, "13df21bcfee32f12");
 }
 
 #[test]
@@ -353,7 +365,11 @@ fn golden_mixed_actions() {
     // rather than its documented "primary target only", so this vector's shots now
     // only shove what they land near.
     // Previous value was "6faaa414ab6cff84".
-    assert_vector("mixed_actions", &actual, "c4911a24c765b3d0");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 4: the Ramshot Cannon's knockback drops
+    // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
+    // damage race decides the match. `content_version` is hashed, so every vector moves.
+    // Previous value was "c4911a24c765b3d0".
+    assert_vector("mixed_actions", &actual, "0aec335ec568cf3e");
 }
 
 #[test]
@@ -382,7 +398,11 @@ fn golden_low_health_duel_reaches_a_decision() {
     // `content_version` is part of the hashed state (`hash.rs`), which is what stops a
     // new content table from silently replaying against an old one.
     // Previous value was "dc6477a177b3e1f9".
-    assert_vector("low_health_duel", &actual, "f1f76f9d8e9c1252");
+    // REGENERATED 2026-08-31 at CONTENT_VERSION 4: the Ramshot Cannon's knockback drops
+    // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
+    // damage race decides the match. `content_version` is hashed, so every vector moves.
+    // Previous value was "f1f76f9d8e9c1252".
+    assert_vector("low_health_duel", &actual, "3e201b123e110a0b");
 }
 
 #[test]

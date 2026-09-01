@@ -38,10 +38,20 @@ const PROJECTILE_TIER3_MAX_TICKS: u16 = 300;
 const RAMSHOT_KNOCKBACK: SpecialEffect = SpecialEffect {
     trigger: EffectTrigger::OnImpact,
     kind: EffectKind::Knockback,
-    magnitude: 2 * BODY_WIDTH,
+    magnitude: RAMSHOT_KNOCKBACK_CELLS * POSITION_SCALE,
     magnitude_secondary: RAMSHOT_CRATER_RADIUS_FIXED,
     duration_turns: 0,
 };
+
+/// How far a direct Ramshot hit shoves its target, in cells.
+///
+/// Half `map::STACK_BLOCK_WIDTH` (4). At `2 * BODY_WIDTH` (eight cells) a direct hit cleared
+/// any perch outright and dropped the target into the void, so the first accurate shot won
+/// regardless of health: the bot ended crow-perch and broken-battlements on turn 1 while the
+/// item's own damage (62 against 200 health, with three rounds) is tuned for roughly a
+/// four-hit kill. Two cells still repositions — standing near an edge is still punished — but
+/// it no longer substitutes for the damage race.
+const RAMSHOT_KNOCKBACK_CELLS: i32 = 2;
 
 /// Crater radius of [`RAMSHOT_CANNON_ABILITY`], in cells.
 ///

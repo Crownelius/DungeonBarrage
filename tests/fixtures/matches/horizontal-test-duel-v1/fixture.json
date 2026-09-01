@@ -6,7 +6,7 @@
     "abiVersion": 1,
     "clientContractVersion": 1,
     "simulationVersion": 7,
-    "contentVersion": 3
+    "contentVersion": 4
   },
   "createRequestFile": "create-request.json",
   "createResponseFile": "responses/create.json",
@@ -25,7 +25,7 @@
     "activePlayerId": "a-local-player",
     "playerCount": 2,
     "blockCount": 8,
-    "stateHash": "8e40798bc7fb9154"
+    "stateHash": "5ff7b9a3a97f7d91"
   },
   "steps": [
     {
@@ -37,7 +37,7 @@
         "postGeneration": 1,
         "postTurnNumber": 1,
         "postActivePlayerId": "a-local-player",
-        "postStateHash": "e912fb78268c2eb4",
+        "postStateHash": "4610d8c64f1670b9",
         "minimumActorDistanceMoved": 1,
         "minimumProjectileTraces": 0,
         "minimumProjectileSamples": 0,
@@ -54,7 +54,7 @@
         "postGeneration": 2,
         "postTurnNumber": 1,
         "postActivePlayerId": "a-local-player",
-        "postStateHash": "39eab6e5bcbf7805",
+        "postStateHash": "1e5dff46164b909b",
         "minimumActorDistanceMoved": 0,
         "minimumProjectileTraces": 1,
         "minimumProjectileSamples": 2,
@@ -67,7 +67,7 @@
     "snapshotGeneration": 2,
     "turnNumber": 1,
     "activePlayerId": "a-local-player",
-    "stateHash": "39eab6e5bcbf7805",
+    "stateHash": "1e5dff46164b909b",
     "stateChangedFromInitial": true
   }
 }

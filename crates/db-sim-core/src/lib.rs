@@ -78,7 +78,7 @@ pub const SIMULATION_VERSION: u32 = 7;
 /// that effect carried `magnitude_secondary: 0`, which `displacement.rs` treats as "no
 /// radius test at all" rather than its documented "primary target only", so every shot
 /// shoved every opponent a flat 8 cells regardless of where the shell landed.
-pub const CONTENT_VERSION: u32 = 3;
+pub const CONTENT_VERSION: u32 = 4;
 
 /// Version of the wire protocol.
 pub const PROTOCOL_VERSION: u32 = 1;

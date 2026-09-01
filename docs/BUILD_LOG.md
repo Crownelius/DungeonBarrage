@@ -3386,3 +3386,58 @@ freezes and points turn-handover coverage at the playable maps.
 | `cargo fmt` / `clippy -D warnings` / `test --workspace` / `deny check` | pass |
 | `dotnet format --verify-no-changes` / `dotnet test -c Release` | pass, 65 tests |
 | `godot --export-release` + headless C6 smoke | pass: 3/3 maps, `stackedBlocksFell`, `turnsPlayed: 8` |
+
+## CONTENT_VERSION 4: knockback cut to two cells, because a direct hit was still the whole match
+
+The radius fix stopped shells shoving opponents they never came near, but left the magnitude at
+`2 * BODY_WIDTH` — eight cells against a four-cell perch. Flagged then as an owner call. Measured
+now, driving each stacked map with `bot::decide` rather than a fixed test shot, it was not an edge
+case:
+
+| Map | Before |
+|---|---|
+| `crow-perch` | turn 1, human eliminated, **bot untouched at 200hp** |
+| `broken-battlements` | turn 1, human eliminated, **bot untouched at 200hp** |
+| `twin-spires` | turn 2 |
+
+The bot lands a direct hit, the target clears its perch and leaves the world, and health never
+matters. The earlier verification missed this because it fired a fixed 45°/1500 shot that falls
+short; the bot aims properly and hits.
+
+That is flatly at odds with the content's own tuning. A landed hit deals **62** against **200**
+health — roughly a four-hit kill — and the Ramshot carries three rounds, so the main weapon alone
+cannot finish anyone. The ammo economy assumes the secondary and melee get used. A one-shot
+ejection makes all of that dead content.
+
+Owner chose to cut the shove. `magnitude` is now `RAMSHOT_KNOCKBACK_CELLS * POSITION_SCALE` — two
+cells, half `STACK_BLOCK_WIDTH`. Written in cells rather than `BODY_WIDTH / 2` because this crate
+lints against division (`displacement.rs` avoids `POSITION_SCALE / 4` for the same reason).
+
+Measured after, three seeds per map:
+
+| Map | Turns | Winner's health |
+|---|---|---|
+| `crow-perch` | 4 | 76hp — took two hits |
+| `twin-spires` | 4 | 76hp — took two hits |
+| `broken-battlements` | 3 | 200hp — still a fall, not a trade |
+
+Matches are now decided by an exchange rather than by who shoots first, and the winner arrives
+hurt. Standing next to a drop is still punished, which is the intent.
+
+**Not fixed, and worth an owner's eye:** `broken-battlements` still produces a 0hp-versus-200hp
+blowout in three decisions — someone dies to a fall without ever trading damage. Its spawn ledges
+sit closer to open air than the other two maps. The remedy is map geometry (a floor, or wider
+ledges), not another magnitude change, so it is recorded rather than guessed at.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `cargo fmt` / `clippy -D warnings` / `test --workspace` / `deny check` | pass |
+| `dotnet format --verify-no-changes` / `dotnet test -c Release` | pass, 65 tests |
+| `godot --export-release` + headless C6 smoke | pass: 3/3 maps, `stackedBlocksFell`, `turnsPlayed: 9` |
+
+All five golden vectors and the frozen response corpus regenerated for `CONTENT_VERSION` 4, old
+values recorded beside each constant. The presentation manifest moved with it — that pairing is
+now the third time the manifest has had to follow a content bump, and the C6 smoke is the only
+gate that catches it.
