@@ -38,7 +38,7 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 
 | Claim | Status |
 |---|---|
-| Envelope: no `characterId`/kits; one crow; items as ammo | **implemented** (`SIMULATION_VERSION` 7, `CONTENT_VERSION` 2) |
+| Envelope: no `characterId`/kits; one crow; items as ammo | **implemented** (`SIMULATION_VERSION` 7, `CONTENT_VERSION` 4). Ramshot knockback is two cells. A healthy match runs 3–4 turns and the winner finishes hurt. |
 | FFI `create`/`apply`/`snapshot` hashes equal direct Rust | **implemented** (`ffi_create_apply_snapshot_matches_direct_rust_on_the_duel_blocks_path`) |
 | 3 stacked maps + bot reaches win/lose | **implemented**: bot-to-terminal on all three maps (`maps_bot_outcome`); Godot C6 `mapsCompleted: crow-perch,broken-battlements,twin-spires` |
 | Stacked structures fall in sim state when support is destroyed | **implemented**: `destroying_support_on_each_stacked_map_drops_the_crown`; C6 `stackedBlocksFell: true` |
@@ -47,6 +47,7 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 | C5 human-finishable match + `PLAY.md` | **implemented**: C5 now starts through the picker on `crow-perch`, not the embedded fixture. Windowed C5 shows MATCH COMPLETE. Not a live human sitting at the keyboard. |
 | Leftover C1 kit tests | **not restored** (41 `#[ignore]` kit tests stay kit-shaped). Crow-envelope timeout + preview covered on `crow-perch`. Object-spawn kits (knives/turrets) are not in this catalog. |
 | Steam page | **not started** (after C5 only) |
+| `broken-battlements` spawn ledges | **open owner call**: bot-vs-bot can still end 0hp vs 200hp by a fall. Remedy is floor/wider ledges, not another knockback cut. |
 
 Language boundary (ADR 0006) is unchanged: Godot/C# presents; Rust is the only authority.
 

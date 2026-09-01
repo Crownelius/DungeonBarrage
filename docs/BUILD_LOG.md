@@ -3441,3 +3441,19 @@ All five golden vectors and the frozen response corpus regenerated for `CONTENT_
 values recorded beside each constant. The presentation manifest moved with it — that pairing is
 now the third time the manifest has had to follow a content bump, and the C6 smoke is the only
 gate that catches it.
+
+---
+
+## 2026-08-31 — Godot-free gate for presentation-manifest content version
+
+A content bump that forgets `presentation-manifest-v1.json` used to pass all unit tests and
+only fail when Godot Confirm loaded the file. Validation now lives in
+`DungeonBarrage.Client.Interop.PresentationManifest.Validate` (the same check Confirm runs).
+Godot only reads `res://Settings/presentation-manifest-v1.json`.
+
+`PresentationManifestTests` copies the committed JSON next to the test binary, asserts it
+matches `LocalMatchSession.ContentVersion`, and asserts a stale `contentVersion` is refused.
+`dotnet test -c Release` is 12 + 55 (the two new facts plus the existing 65).
+
+`broken-battlements` fall-kill (0hp vs 200hp in three bot decisions) is still an owner map
+geometry call; this change does not touch map design.

@@ -1,23 +1,24 @@
-using System.Text.Json;
 using DungeonBarrage.Client.Contracts;
+using DungeonBarrage.Client.Interop;
 
 namespace DungeonBarrage.Client.Settings;
 
-internal sealed record PresentationCharacter(
-    string CharacterId,
-    IReadOnlyList<string> SkinIds,
-    IReadOnlyList<string> AbilitySkinIds,
-    IReadOnlyList<string> VictoryPoseIds);
-
-internal sealed record PresentationManifest(
-    uint SchemaVersion,
-    uint ContentVersion,
-    IReadOnlyList<PresentationCharacter> Characters)
+/// <summary>
+/// Godot file loader for the presentation manifest. Version and appearance checks live in
+/// <see cref="DungeonBarrage.Client.Interop.PresentationManifest"/> so they can run without the engine.
+/// </summary>
+internal static class PresentationManifest
 {
-    private const uint SupportedSchemaVersion = 1;
     private const string ResourcePath = "res://Settings/presentation-manifest-v1.json";
 
-    internal static PresentationManifest LoadAndValidate(
+    /// <summary>
+    /// Reads <c>presentation-manifest-v1.json</c> from the Godot project and runs the same
+    /// validation Confirm uses.
+    /// </summary>
+    /// <param name="request">The create envelope about to be submitted.</param>
+    /// <param name="nativeContentVersion">Native <c>CONTENT_VERSION</c>.</param>
+    /// <returns>The decoded manifest.</returns>
+    internal static PresentationManifestDocument LoadAndValidate(
         ClientCreateRequest request,
         uint nativeContentVersion)
     {
@@ -33,68 +34,9 @@ internal sealed record PresentationManifest(
         // overflow that conversion could not exist as a Godot text resource in the first place,
         // so this is a defensive bound rather than a realistic runtime path.
         var bytes = file.GetBuffer(checked((long)file.GetLength()));
-        var manifest = JsonSerializer.Deserialize<PresentationManifest>(bytes, ClientEnvelope.Options)
-            ?? throw new InvalidDataException("The presentation manifest decoded to null.");
-
-        if (manifest.SchemaVersion != SupportedSchemaVersion)
-        {
-            throw new InvalidDataException(
-                $"Presentation schema {manifest.SchemaVersion} is unsupported; expected {SupportedSchemaVersion}.");
-        }
-
-        if (manifest.ContentVersion != request.ContentVersion ||
-            manifest.ContentVersion != nativeContentVersion)
-        {
-            throw new InvalidDataException(
-                $"Presentation content {manifest.ContentVersion}, request content " +
-                $"{request.ContentVersion}, and native content {nativeContentVersion} must match.");
-        }
-
-        var characters = manifest.Characters.ToDictionary(
-            character => character.CharacterId,
-            StringComparer.Ordinal);
-        if (characters.Count != manifest.Characters.Count)
-        {
-            throw new InvalidDataException("The presentation manifest contains a duplicate character ID.");
-        }
-
-        if (!characters.TryGetValue("crow", out var crow))
-        {
-            throw new InvalidDataException("The presentation manifest must include the crow fighter.");
-        }
-
-        foreach (var player in request.Match.Players)
-        {
-            RequireContains(crow.SkinIds, player.Appearance.SkinId, "skin", "crow");
-            RequireContains(
-                crow.VictoryPoseIds,
-                player.Appearance.VictoryPoseId,
-                "victory pose",
-                "crow");
-
-            foreach (var abilitySkinId in player.Appearance.AbilitySkinIds)
-            {
-                RequireContains(
-                    crow.AbilitySkinIds,
-                    abilitySkinId,
-                    "ability skin",
-                    "crow");
-            }
-        }
-
-        return manifest;
-    }
-
-    private static void RequireContains(
-        IReadOnlyList<string> allowed,
-        string selected,
-        string category,
-        string characterId)
-    {
-        if (!allowed.Contains(selected, StringComparer.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"Unknown {category} '{selected}' for character '{characterId}'.");
-        }
+        return DungeonBarrage.Client.Interop.PresentationManifest.Validate(
+            bytes,
+            request,
+            nativeContentVersion);
     }
 }

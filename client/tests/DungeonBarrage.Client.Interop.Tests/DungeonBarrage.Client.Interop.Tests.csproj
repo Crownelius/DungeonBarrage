@@ -36,6 +36,9 @@
     <None Include="..\..\..\tests\fixtures\matches\**\*.json"
           Link="fixtures\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\DungeonBarrage.Client\Settings\presentation-manifest-v1.json"
+          Link="presentation-manifest-v1.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

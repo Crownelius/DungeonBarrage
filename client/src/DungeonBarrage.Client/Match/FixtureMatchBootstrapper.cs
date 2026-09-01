@@ -36,7 +36,9 @@ internal static class FixtureMatchBootstrapper
 
     private static MatchBootstrapResult StartFromRequest(ClientCreateRequest request, byte[] requestBytes)
     {
-        _ = PresentationManifest.LoadAndValidate(request, LocalMatchSession.ContentVersion);
+        _ = DungeonBarrage.Client.Settings.PresentationManifest.LoadAndValidate(
+            request,
+            LocalMatchSession.ContentVersion);
 
         LocalMatchSession? session = null;
         try
