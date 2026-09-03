@@ -3776,6 +3776,51 @@ switching, aim elevation trajectory alignment, distinct weapon silhouettes (`Can
 | Headless & Windowed C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
 | Headless & Windowed C7 smoke | pass: `success: true`, all 6 quality checks verified |
 
+---
+
+## 2026-09-03 — Tactical Match HUD: Wind Anemometer Gauge & Floating Character Status Plates
+
+This checkpoint delivers the tactical match HUD improvements planned in `docs/CLIENT_SPEC.md` §1.2 & §9:
+providing an intuitive wind anemometer widget in the match HUD and floating status plates above combatants.
+
+### Delivered
+
+- **Tactical HUD Model (`TacticalHudModel.cs`):**
+  - Pure C#, Godot-free domain records: `WindDisplayModel` and `PlayerStatusPlateModel`.
+  - `WindDisplayModel`: maps authoritative `wind_per_tick` to directional flow (`BlowingLeft`, `BlowingRight`, `Calm`),
+    normalized velocity intensity ($0.0 \dots 1.0$), human-readable compass labeling (`WEST`, `EAST`, `CALM`),
+    and weapon wind sensitivity tiers (`Immune`, `Resistant`, `Standard`, `High`).
+  - `PlayerStatusPlateModel`: computes health fill fraction, low-health threshold alerting ($\le 25\%$),
+    trinket charge tracking ($0 \dots 2$ pips with ready status), remaining ammunition, and combat cue badges.
+- **Client Integration (`Main.cs`):**
+  - Top-HUD graphical wind anemometer gauge (`DrawWindAnemometer`) displaying dynamic wind vane arrow,
+    speed readout, and active weapon sensitivity badge (`[IMMUNE]`, `[HEAVY]`, `[STD]`, `[LIGHT]`).
+  - Floating character status plate in `DrawPlayer` rendering a segmented health bar (green $\rightarrow$ gold $\rightarrow$ red),
+    trinket charge pips, ammunition counter, and combat cue labels naturally anchored to the bobbing paper-doll.
+- **Unit Test Suite (`TacticalHudModelTests.cs`):**
+  - Tested wind categorization across zero, positive, negative, and clamped extreme winds.
+  - Tested weapon sensitivity resolution across `service-pistol`, `mole-drill`, `ramshot-cannon`, and `recurve-bow`.
+  - Tested status plate health calculation, low-health alerting, trinket charge progression, and combat cue mapping.
+  - .NET test suite expanded to 12 contracts + 121 interop = 133 tests.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 passed, 41 ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 passed, 1 ignored |
+| `cargo deny check` | pass |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 121 interop = 133 passed |
+| Godot 4.7.1 .NET release export | pass (`export/windows/DungeonBarrage.exe`) |
+| Headless & Windowed C5 smoke | pass: `success: true`, real damage, fire/hit/impact cues |
+| Headless & Windowed C6 smoke | pass: `success: true`, 3/3 maps, collapse, bot/human, rematch |
+| Headless & Windowed C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
+| Headless & Windowed C7 smoke | pass: `success: true`, all 6 quality checks verified |
+
+
 
 
 

@@ -1569,9 +1569,12 @@ public partial class Main : Node2D
         DrawString(
             font,
             new Vector2(8, hudY),
-            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   slot [{_selectedAbilitySlot}]   wind {snapshot.WindPerTick}   {TrinketHud(snapshot)}",
+            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   slot [{_selectedAbilitySlot}]   {TrinketHud(snapshot)}",
             fontSize: 14,
             modulate: MenuTextColor);
+
+        var anemometerX = (GetViewportRect().Size.X - 210f) * 0.5f;
+        DrawWindAnemometer(snapshot, new Vector2(anemometerX, 6f));
 
         if (_isAiming)
         {
@@ -2066,23 +2069,105 @@ public partial class Main : Node2D
         DrawCircle(eyePos, radius * 0.14f, Colors.White);
         DrawCircle(eyePos, radius * 0.06f, Colors.Black);
 
+        // Floating character status plate
+        var activeItemName = model.WeaponAccent?.ItemId ?? player.Loadout.Main;
+        var plate = PlayerStatusPlateModel.Create(player, cue, activeItemName);
+
+        var barW = radius * 2.6f;
+        var barH = 5f;
+        var barPos = center + new Vector2(-barW * 0.5f, -radius - 14f);
+
+        // Background
+        DrawRect(new Rect2(barPos, new Vector2(barW, barH)), new Color(0.08f, 0.10f, 0.14f, 0.90f));
+
+        // Health fill
+        var fillW = Math.Max(0f, barW * plate.HealthFraction);
+        var hpColor = plate.IsLowHealth
+            ? Colors.Crimson
+            : (plate.HealthFraction > 0.5f ? Colors.ForestGreen : Colors.Goldenrod);
+        if (fillW > 0f)
+        {
+            DrawRect(new Rect2(barPos, new Vector2(fillW, barH)), hpColor);
+        }
+        DrawRect(new Rect2(barPos, new Vector2(barW, barH)), Colors.Black, filled: false, width: 1f);
+
+        // Trinket charge pips below health bar
+        var pipY = barPos.Y + barH + 3.5f;
+        for (var p = 0; p < plate.TrinketMaxCharge; p++)
+        {
+            var pipX = barPos.X + (p * 8f) + 4f;
+            var pipColor = (p < plate.TrinketCharge) ? Colors.Gold : new Color(0.3f, 0.3f, 0.35f, 0.8f);
+            DrawCircle(new Vector2(pipX, pipY), 2.5f, pipColor);
+        }
+
+        // Text label: item name & ammo
         var font = ThemeDB.FallbackFont;
-        var labelY = -radius - 6 - (index * 16);
+        var labelPos = center + new Vector2(-barW * 0.5f, -radius - 18f);
+        var cueSuffix = plate.CueLabel is not null ? $" [{plate.CueLabel}]" : string.Empty;
+        var labelText = $"{plate.ActiveItemName} ({plate.AmmoRemaining}){cueSuffix}";
         DrawString(
             font,
-            center + new Vector2(-radius, labelY),
-            $"{player.Loadout.Main} {player.Health}/{player.MaxHealth}  ammo {(player.Ammo.Count > 0 ? player.Ammo[0].Remaining : 0)}{CueLabel(cue)}",
-            fontSize: 12,
+            labelPos,
+            labelText,
+            fontSize: 11,
             modulate: MenuTextColor);
     }
 
-    private static string CueLabel(ActorPresentationCue? cue) => cue?.Kind switch
+    private void DrawWindAnemometer(ClientMatchSnapshot snapshot, Vector2 pos)
     {
-        ActorPresentationCueKind.Fire => "  FIRE",
-        ActorPresentationCueKind.Hit => "  HIT",
-        ActorPresentationCueKind.Defeat => "  DEFEATED",
-        _ => string.Empty,
-    };
+        var activePlayer = ActivePlayer(snapshot);
+        var activeWeapon = activePlayer?.Loadout.Main;
+        var wind = WindDisplayModel.Create(snapshot.WindPerTick, activeWeapon);
+
+        var width = 210f;
+        var height = 26f;
+        var rect = new Rect2(pos, new Vector2(width, height));
+        DrawRect(rect, new Color(0.04f, 0.06f, 0.10f, 0.88f));
+        DrawRect(rect, new Color(0.3f, 0.4f, 0.55f, 0.6f), filled: false, width: 1.5f);
+
+        var font = ThemeDB.FallbackFont;
+
+        // Draw wind vane icon/arrow
+        var iconCenter = pos + new Vector2(18f, height * 0.5f);
+        if (wind.Direction == WindDirection.Calm)
+        {
+            DrawCircle(iconCenter, 3.5f, Colors.LightGray);
+        }
+        else
+        {
+            var arrowDir = wind.Direction == WindDirection.BlowingLeft ? -1f : 1f;
+            var arrowColor = wind.NormalizedIntensity > 0.6f ? Colors.Orange : Colors.Cyan;
+            var arrowStart = iconCenter - new Vector2(arrowDir * 8f, 0);
+            var arrowEnd = iconCenter + new Vector2(arrowDir * 8f, 0);
+            DrawLine(arrowStart, arrowEnd, arrowColor, width: 2.5f);
+            DrawLine(arrowEnd, arrowEnd + new Vector2(-arrowDir * 4f, -3.5f), arrowColor, width: 2f);
+            DrawLine(arrowEnd, arrowEnd + new Vector2(-arrowDir * 4f, 3.5f), arrowColor, width: 2f);
+        }
+
+        // Speed text
+        DrawString(
+            font,
+            pos + new Vector2(34f, 17f),
+            wind.FormattedText,
+            fontSize: 12,
+            modulate: Colors.White);
+
+        // Sensitivity badge on the right
+        var badgeColor = wind.Sensitivity switch
+        {
+            WindSensitivityTier.Immune => Colors.LightGreen,
+            WindSensitivityTier.Resistant => Colors.DeepSkyBlue,
+            WindSensitivityTier.Standard => Colors.Khaki,
+            WindSensitivityTier.High => Colors.LightCoral,
+            _ => Colors.White,
+        };
+        DrawString(
+            font,
+            pos + new Vector2(width - 52f, 17f),
+            $"[{wind.SensitivityBadge}]",
+            fontSize: 11,
+            modulate: badgeColor);
+    }
 
     private void DrawActorCue(Vector2 center, float radius, ActorPresentationCue? cue, float facing)
     {
