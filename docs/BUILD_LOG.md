@@ -3646,4 +3646,52 @@ character presentation model anchoring sockets and dynamic facing to the authori
 | Renderer-backed C5 smoke | pass: 1280×720 fire, impact, and post-shot captures |
 | Renderer-backed C6 smoke | pass: 1280×720 setup, loadout select, hover, and result captures |
 
+---
+
+## 2026-09-03 — Tiered, disposal-safe combat effect system
+
+This checkpoint implements item 3 from `docs/OPENBOUND_CLEAN_ROOM_AUDIT.md` sequenced follow-up:
+a Godot-free combat effect system providing bounded, pool-recycled shockwaves, sparks, and particles
+scaled across graphics tiers (`Low`, `Medium`, `High`) and `ReduceMotion`, while guaranteeing persistent
+tactical visibility for target and hit markers.
+
+### Delivered
+
+- **`CombatEffectSystem` (`DungeonBarrage.Client.Interop`):** Pure C# effect manager using pre-allocated,
+  bounded object pools to prevent runtime heap allocations:
+  - `EffectParticle`: sparks and smoke with damping velocity and alpha fade.
+  - `ShockwaveRing`: expanding concentric shockwave rings with smoothed duration.
+  - `TargetMarker`: persistent crater reticles and crosshairs ensuring tactical clarity.
+  - Performance scaling: `Low` suppresses high-velocity particles to prevent lag, `Medium` renders 6 particles,
+    `High` renders 14 spread particles with dual shockwave rings.
+  - Motion reduction: `ReduceMotion = true` suppresses particle velocity/jitter and scales shockwave speed,
+    while guaranteeing full target marker visibility.
+  - Lifecycle management: `Update(deltaSeconds)` recycles expired effects; `Clear()` resets all pools.
+- **Client Integration (`Main.cs`):**
+  - Continuous effect updates in `_Process` with frame-skipping redraw requests only when effects are active.
+  - Spawns muzzle fire on actor fire cues, hit sparks on actor hit cues, and multi-tier shockwaves on impact cues.
+  - Renders active combat effects in `DrawMatch` and during playback via `DrawCombatEffects()`.
+  - Clean pool disposal on match setup and rematch.
+- **Unit Test Suite:**
+  - Added `CombatEffectSystemTests` (target marker visibility in low tier/reduced motion, tier scaling, shockwave expansion/expiration, bounded capacity recycling, and clear).
+  - .NET test suite expanded to 12 contracts + 105 interop = 117 tests.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 passed, 41 ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 passed, 1 ignored |
+| `cargo deny check` | pass |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 105 interop = 117 passed |
+| Godot 4.7.1 .NET release export | pass (`export/windows/DungeonBarrage.exe`) |
+| Headless C5 smoke | pass: `success: true`, real damage, all cues observed |
+| Headless C6 smoke | pass: `success: true`, 3/3 maps, collapse, bot/human actions, rematch |
+| Renderer-backed C5 smoke | pass: 1280×720 fire, impact, and post-shot captures |
+| Renderer-backed C6 smoke | pass: 1280×720 setup, loadout select, hover, and result captures |
+
+
 

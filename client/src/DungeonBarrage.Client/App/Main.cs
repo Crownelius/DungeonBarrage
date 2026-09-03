@@ -107,6 +107,7 @@ public partial class Main : Node2D
     private int _lastPreviewPower = int.MinValue;
     private ShotPlayback? _playback;
     private readonly CameraDirector _camera = new();
+    private readonly CombatEffectSystem _effects = new();
     private float _cellSize = 12f;
     private Vector2 _worldOrigin = Vector2.Zero;
     private readonly List<string> _combatLog = [];
@@ -200,6 +201,12 @@ public partial class Main : Node2D
     /// <inheritdoc />
     public override void _Process(double delta)
     {
+        _effects.Update((float)delta);
+        if (_effects.ActiveParticles.Count > 0 || _effects.ActiveShockwaves.Count > 0 || _effects.ActiveTargetMarkers.Count > 0)
+        {
+            QueueRedraw();
+        }
+
         if (_live is not null && IsInputLocked() != _wasLockedLastFrame)
         {
             _wasLockedLastFrame = IsInputLocked();
@@ -819,6 +826,7 @@ public partial class Main : Node2D
             _live = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(request));
             _menuError = null;
             _camera.Reset();
+            _effects.Clear();
             _combatLog.Clear();
         }
         catch (Exception exception)
@@ -1683,6 +1691,8 @@ public partial class Main : Node2D
                 opponentX);
         }
 
+        DrawCombatEffects();
+
         var font = ThemeDB.FallbackFont;
         DrawString(
             font,
@@ -2034,11 +2044,28 @@ public partial class Main : Node2D
         {
             case ActorPresentationCueKind.Fire:
                 var origin = center - new Vector2(facing * radius * 1.1f, radius * 0.06f);
+                if (activeCue.Age01 < 0.06f)
+                {
+                    _effects.SpawnMuzzleFire(
+                        new PresentationPoint(origin.X, origin.Y),
+                        facing,
+                        _cellSize,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
                 var plume = origin - new Vector2(facing * radius * (0.75f + (0.35f * intensity)), 0);
                 DrawLine(origin, plume, new Color(1f, 0.78f, 0.15f, 0.85f * intensity), width: 3f);
                 DrawCircle(origin, radius * (0.20f + (0.10f * intensity)), new Color(1f, 0.86f, 0.35f, 0.7f * intensity));
                 break;
             case ActorPresentationCueKind.Hit:
+                if (activeCue.Age01 < 0.06f)
+                {
+                    _effects.SpawnHitSparks(
+                        new PresentationPoint(center.X, center.Y),
+                        _cellSize,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
                 DrawArc(
                     center,
                     radius * (1.08f + (0.14f * intensity)),
@@ -2182,7 +2209,55 @@ public partial class Main : Node2D
 
         for (var index = 0; index < presentation.ImpactCues.Count; index++)
         {
-            DrawImpactCue(presentation.ImpactCues[index], scale);
+            var cue = presentation.ImpactCues[index];
+            if (cue.Age01 < 0.08f)
+            {
+                var hitPos = ToPixels(cue.Position, scale);
+                _effects.SpawnImpact(
+                    new PresentationPoint(hitPos.X, hitPos.Y),
+                    _cellSize,
+                    _settings.Performance.Tier,
+                    _settings.Accessibility.ReduceMotion);
+            }
+
+            DrawImpactCue(cue, scale);
+        }
+    }
+
+    private void DrawCombatEffects()
+    {
+        // 1. Target Markers (crater reticles and hit crosses, guaranteed tactical visibility)
+        foreach (var marker in _effects.ActiveTargetMarkers)
+        {
+            var pos = new Vector2(marker.Position.X, marker.Position.Y);
+            var color = Color.FromHtml(marker.ColorHex);
+            var colWithAlpha = new Color(color.R, color.G, color.B, marker.Alpha * 0.85f);
+            DrawArc(pos, marker.Radius, 0, MathF.Tau, 16, colWithAlpha, width: 2f);
+            DrawLine(pos - new Vector2(marker.Radius * 0.6f, 0), pos + new Vector2(marker.Radius * 0.6f, 0), colWithAlpha, width: 1.5f);
+            DrawLine(pos - new Vector2(0, marker.Radius * 0.6f), pos + new Vector2(0, marker.Radius * 0.6f), colWithAlpha, width: 1.5f);
+        }
+
+        // 2. Shockwaves
+        foreach (var shock in _effects.ActiveShockwaves)
+        {
+            var center = new Vector2(shock.Center.X, shock.Center.Y);
+            var color = Color.FromHtml(shock.ColorHex);
+            DrawArc(
+                center,
+                shock.CurrentRadius,
+                0,
+                MathF.Tau,
+                24,
+                new Color(color.R, color.G, color.B, shock.Alpha * 0.9f),
+                width: 2.5f);
+        }
+
+        // 3. Particles (sparks, embers)
+        foreach (var p in _effects.ActiveParticles)
+        {
+            var pos = new Vector2(p.Position.X, p.Position.Y);
+            var color = Color.FromHtml(p.ColorHex);
+            DrawCircle(pos, p.Size, new Color(color.R, color.G, color.B, p.Alpha));
         }
     }
 
