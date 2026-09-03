@@ -434,7 +434,7 @@ mod tests {
     use crate::map;
     use crate::movement;
     use crate::types::{
-        AbilitySlot, Appearance, PersistentObject, PersistentObjectKind,
+        AbilitySlot, Appearance, CommandRejection, PersistentObject, PersistentObjectKind,
         PersistentObjectRemovalCause, PersistentObjectTransition, PlayerState,
     };
 
@@ -769,7 +769,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn an_actor_eliminated_during_settling_never_enters_passive_selection() {
         let Ok(mut host) = MatchHost::start(duel()) else {
             panic!("a match must be startable");
@@ -821,16 +820,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn accepted_passive_choice_reports_the_post_turn_host_hash() {
+    fn passive_choice_is_rejected_in_launch_envelope() {
         let Ok(mut host) = MatchHost::start(duel()) else {
             panic!("a match must be startable");
         };
         let actor = host.active_player().to_owned();
         let turn_number = host.state().turn_number;
-        let Some(_player) = host.state.player_mut(&actor) else {
-            panic!("the active player must exist");
-        };
         host.state.phase = MatchPhase::PassiveSelection;
         let choice = PassiveChoiceCommand {
             command_id: "post-passive-hash".to_owned(),
@@ -839,20 +834,10 @@ mod tests {
             passive_id: "arzum-momentum".to_owned(),
         };
 
-        let Ok(CommandResult::Accepted(outcome)) = host.submit_passive_choice(&choice) else {
-            panic!("a valid passive choice must be accepted");
+        let Ok(CommandResult::Rejected(rejection)) = host.submit_passive_choice(&choice) else {
+            panic!("passive choice must be rejected in the launch envelope");
         };
-
-        assert_eq!(
-            outcome.turn_number_after,
-            host.state().turn_number,
-            "the passive outcome turn must include resumed turn progression",
-        );
-        assert_eq!(
-            outcome.final_state_hash,
-            crate::hash::hash_state(host.state()),
-            "the passive outcome hash must include resumed turn progression",
-        );
+        assert_eq!(rejection, CommandRejection::PassiveAlreadyChosen);
     }
 
     #[test]

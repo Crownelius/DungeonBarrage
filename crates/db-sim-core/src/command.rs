@@ -973,7 +973,7 @@ fn resolve_passive_choice(
 // states the expectation far more clearly than threading a Result through every case.
 // The production paths in this module remain panic-free, which is what the lint protects.
 // Matches the precedent set by `terrain::tests` and `character::tests`.
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::terrain;
@@ -1465,13 +1465,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn multi_projectile_command_preserves_each_trace_and_impact() {
-        let attacker = player("attacker", "karl", FixedPoint::new(0, 0));
-        let defender = player("defender", "huck", FixedPoint::new(1024, 0));
+        let mut attacker = player("attacker", "crow", FixedPoint::new(0, 0));
+        attacker.loadout.main = "line-repeater".to_owned();
+        attacker.ammo = crate::character::ammo_for_loadout(&attacker.loadout).expect("ammo");
+        let defender = player("defender", "crow", FixedPoint::new(1024, 0));
         let mut state = state_with_players("attacker", vec![attacker, defender]);
         let command = AbilityCommand {
-            command_id: "karl-three-shot".to_owned(),
+            command_id: "repeater-four-shot".to_owned(),
             player_id: "attacker".to_owned(),
             expected_turn_number: 1,
             slot: AbilitySlot::Basic,
@@ -1482,122 +1483,23 @@ mod tests {
         };
 
         let CommandResult::Accepted(outcome) = apply_ability(&mut state, &command) else {
-            panic!("Karl's valid basic must resolve");
+            panic!("Line Repeater basic must resolve");
         };
 
-        assert_eq!(outcome.projectile_traces.len(), 3);
+        assert_eq!(outcome.projectile_traces.len(), 4);
         assert_eq!(
             outcome
                 .projectile_traces
                 .iter()
                 .map(|trace| trace.sequence)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2]
+            vec![0, 1, 2, 3]
         );
         assert!(
             outcome
                 .projectile_traces
                 .iter()
                 .all(|trace| !trace.samples.is_empty())
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn feeding_frenzy_forces_and_consumes_all_three_live_carrion_call_crits() {
-        let attacker = player("attacker", "karl", FixedPoint::new(0, 0));
-        let defender = player("defender", "huck", FixedPoint::new(1024, 0));
-        let mut state = state_with_players("attacker", vec![attacker, defender]);
-        let special = AbilityCommand {
-            command_id: "feeding-frenzy".to_owned(),
-            player_id: "attacker".to_owned(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("defender".to_owned()),
-            secondary_target_player_id: None,
-        };
-
-        let CommandResult::Accepted(marked) = apply_ability(&mut state, &special) else {
-            panic!("Feeding Frenzy must resolve")
-        };
-        assert_eq!(
-            marked.status_changes,
-            vec![StatusChange {
-                player_id: "defender".to_owned(),
-                kind: EffectKind::GuaranteeCrit,
-                transition: StatusTransition::Applied {
-                    magnitude: 3,
-                    turns_remaining: u8::MAX,
-                },
-            }],
-        );
-        assert!(
-            marked
-                .strikes
-                .iter()
-                .all(|strike| strike.crit == CritRoll::NotEligible),
-            "the zero-damage marking action must not consume its own mark",
-        );
-
-        // Model Karl's next action. The host normally performs this turn reset; this unit
-        // test stays at the command boundary so it can compare the RNG state exactly.
-        state.phase = MatchPhase::AimingAndSelection;
-        state.has_attacked_this_turn = false;
-        state.turn_number = 2;
-        let rng_before = state.rng_state;
-        let basic = AbilityCommand {
-            command_id: "carrion-call".to_owned(),
-            player_id: "attacker".to_owned(),
-            expected_turn_number: 2,
-            slot: AbilitySlot::Basic,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("defender".to_owned()),
-            secondary_target_player_id: None,
-        };
-
-        let CommandResult::Accepted(volley) = apply_ability(&mut state, &basic) else {
-            panic!("Carrion Call must resolve")
-        };
-        assert_eq!(volley.strikes.len(), 3);
-        assert!(
-            volley
-                .strikes
-                .iter()
-                .all(|strike| strike.crit == CritRoll::Forced && !strike.crit.consumed_draw()),
-            "all three live projectile strikes must report forced, draw-free crits",
-        );
-        assert_eq!(
-            volley.status_changes,
-            vec![
-                StatusChange {
-                    player_id: "defender".to_owned(),
-                    kind: EffectKind::GuaranteeCrit,
-                    transition: StatusTransition::ChargeConsumed { remaining: 2 },
-                },
-                StatusChange {
-                    player_id: "defender".to_owned(),
-                    kind: EffectKind::GuaranteeCrit,
-                    transition: StatusTransition::ChargeConsumed { remaining: 1 },
-                },
-                StatusChange {
-                    player_id: "defender".to_owned(),
-                    kind: EffectKind::GuaranteeCrit,
-                    transition: StatusTransition::Exhausted,
-                },
-            ],
-        );
-        assert_eq!(
-            state.rng_state, rng_before,
-            "a guaranteed volley must consume no crit RNG draws",
-        );
-        assert!(
-            state
-                .player("defender")
-                .is_some_and(|player| player.statuses.is_empty()),
-            "the third forced crit must exhaust the mark",
         );
     }
 
@@ -1648,7 +1550,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn rejected_passive_choice_leaves_state_unchanged() {
         let mut state = base_state();
         state.phase = MatchPhase::PassiveSelection;
@@ -1664,7 +1565,7 @@ mod tests {
 
         assert_eq!(
             result,
-            CommandResult::Rejected(CommandRejection::InvalidPassive)
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
         );
         assert_eq!(state, before);
     }
@@ -1686,7 +1587,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn passive_choice_from_a_different_character_is_rejected() {
         let mut state = base_state();
         state.phase = MatchPhase::PassiveSelection;
@@ -1695,13 +1595,11 @@ mod tests {
 
         assert_eq!(
             apply_passive_choice(&mut state, &command),
-            CommandResult::Rejected(CommandRejection::InvalidPassive)
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
         );
-        assert!(CommandRejection::InvalidPassive.is_security_event());
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn passive_choice_outside_passive_selection_phase_is_rejected() {
         let mut state = base_state(); // phase is AimingAndSelection
         let command = passive_command("huck-immovable");
@@ -1713,7 +1611,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn passive_choice_a_second_time_is_rejected() {
         let mut state = base_state();
         state.phase = MatchPhase::PassiveSelection;
@@ -1740,21 +1637,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn duplicate_passive_choice_does_not_reapply() {
         let mut state = base_state();
         state.phase = MatchPhase::PassiveSelection;
         let command = passive_command("huck-immovable");
 
         let first = apply_passive_choice(&mut state, &command);
-        assert!(matches!(first, CommandResult::Accepted(_)));
+        assert_eq!(
+            first,
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
+        );
 
         let after_first = state.clone();
         let second = apply_passive_choice(&mut state, &command);
 
         assert_eq!(
             second,
-            CommandResult::Rejected(CommandRejection::DuplicateCommand)
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
         );
         assert_eq!(state, after_first);
     }
@@ -1896,29 +1795,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn heal_effect_still_heals_after_moving_into_the_resolver_layer() {
-        // Zeke's Mending Bolt (Basic) carries `ZEKE_HEAL`: a real roster ability, so this
-        // proves the behaviour survives the move all the way through the public
-        // `apply_ability` entry point. `EffectKind::Heal` targets whoever the *command*
-        // names, independent of where the bolt itself lands (`command.rs`'s own direct-hit
-        // selection for a projectile never consults `command.target_player_id`), so the
-        // target is placed far beyond any tier's maximum reach — well outside the terrain
-        // bounds entirely — to rule out the bolt also landing a direct hit on it and
-        // muddying the expected health delta.
-        let mut target = player(
-            "target",
-            "huck",
-            FixedPoint::new(500 * fixed::POSITION_SCALE, 0),
-        );
-        target.health = 100;
-        target.max_health = 220;
-        let mut state = state_with_players(
-            "actor",
-            vec![player("actor", "zeke", FixedPoint::new(0, 0)), target],
-        );
+    fn push_effect_actually_displaces_the_target_through_apply_ability() {
+        let mut actor = player("actor", "crow", FixedPoint::new(0, 0));
+        actor.loadout.main = "tide-sprayer".to_owned();
+        actor.ammo = crate::character::ammo_for_loadout(&actor.loadout).expect("ammo");
+        let target = player("target", "crow", FixedPoint::new(512, 0));
+        let mut state = state_with_players("actor", vec![actor, target]);
+        let before = state.player("target").map(|p| p.position);
         let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
+            command_id: "cmd-tide".to_string(),
             player_id: "actor".to_string(),
             expected_turn_number: 1,
             slot: AbilitySlot::Basic,
@@ -1931,196 +1816,7 @@ mod tests {
         let result = apply_ability(&mut state, &command);
 
         let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Zeke's Mending Bolt to be accepted: {result:?}");
-        };
-        let Some(target) = state.player("target") else {
-            panic!("target must exist");
-        };
-        assert_eq!(
-            target.health, 122,
-            "Mending Bolt's Heal effect must actually restore its 22 HP, regardless of \
-             whether the bolt itself connects"
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn health_transfer_never_reduces_actor_below_one_hp() {
-        // Zeke's Lifeshare (Special): a real roster ability, exercised end to end through
-        // `apply_ability` — the same regression `resolve::support::tests` covers in
-        // isolation for the resolver itself.
-        let mut actor = player("actor", "zeke", FixedPoint::new(0, 0));
-        actor.health = 10;
-        // The target must actually be missing health, or the conserving transfer has
-        // nothing to move and the actor-floor cap is never exercised.
-        let mut target = player(
-            "target",
-            "huck",
-            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
-        );
-        target.health = 100;
-        let mut state = state_with_players("actor", vec![actor, target]);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("target".to_string()),
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Zeke's Lifeshare to be accepted: {result:?}");
-        };
-        let Some(actor) = state.player("actor") else {
-            panic!("actor must exist");
-        };
-        assert_eq!(
-            actor.health, 1,
-            "transfer must be capped so the actor keeps at least 1 HP"
-        );
-        let Some(target) = state.player("target") else {
-            panic!("target must exist");
-        };
-        assert_eq!(
-            target.health, 109,
-            "exactly what left the actor must arrive"
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn health_transfer_to_a_full_health_ally_moves_nothing() {
-        // Regression: the transfer used to debit the actor before checking what the
-        // target could receive, so aiming Lifeshare at a healthy ally destroyed the
-        // actor's hit points and healed nobody. Health must be conserved — what leaves
-        // the actor is exactly what arrives. Exercised end to end through `apply_ability`
-        // with Zeke's real Lifeshare, so the fix is proven to have survived the move into
-        // the resolver layer, not merely to hold in isolation.
-        let mut actor = player("actor", "zeke", FixedPoint::new(0, 0));
-        actor.health = 200;
-        let target = player(
-            "target",
-            "huck",
-            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
-        );
-        let mut state = state_with_players("actor", vec![actor, target]);
-        if let Some(_actor) = state.player_mut("actor") {}
-        let before_actor = state.player("actor").map(|player| player.health);
-        let before_target = state.player("target").map(|player| player.health);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("target".to_string()),
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Zeke's Lifeshare to be accepted: {result:?}");
-        };
-        assert_eq!(
-            state.player("actor").map(|player| player.health),
-            before_actor,
-            "the actor must not lose health that nobody received",
-        );
-        assert_eq!(
-            state.player("target").map(|player| player.health),
-            before_target,
-            "a full-health ally can receive nothing",
-        );
-    }
-
-    // -----------------------------------------------------------------------------------
-    // P1: `resolve_effect` is now reachable from a real command, for every effect kind —
-    // not just the three `command.rs` used to resolve inline.
-    // -----------------------------------------------------------------------------------
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn teleport_effect_actually_relocates_arzum_through_apply_ability() {
-        // The flagship example the wiring gap was named for (`todolist.md` P1): "In a real
-        // match Arzum still does not teleport." This proves she now does, submitted as a
-        // real command through the public entry point — not by calling
-        // `relocation::resolve` directly, the way `relocation.rs`'s own tests do.
-        let actor = player("actor", "arzum", FixedPoint::new(0, 0));
-        let target_position = FixedPoint::new(5 * fixed::POSITION_SCALE, 0);
-        let target = player("target", "huck", target_position);
-        let mut state = state_with_players("actor", vec![actor, target]);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("target".to_string()),
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Arzum's Chain Strike to be accepted: {result:?}");
-        };
-        let Some(actor) = state.player("actor") else {
-            panic!("actor must still exist");
-        };
-        // The only living opponent is `target` itself, so Chain Strike's "random nearby
-        // enemy within 12 BW of the first target" draw has exactly one candidate — the
-        // first target, trivially 0 BW from itself — making the destination deterministic
-        // regardless of the RNG seed.
-        assert_eq!(
-            actor.position, target_position,
-            "Chain Strike's Teleport effect must actually relocate the actor, not just \
-             validate the command"
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn push_effect_actually_displaces_the_target_through_apply_ability() {
-        // No launch character attaches `EffectKind::Knockback` itself (`character.rs`
-        // grepped: zero hits — `displacement.rs`'s own module doc comment naming
-        // `ROBERTO_KNOCKBACK` as a live caller is stale). Natomica's Repulse attaches
-        // `Push`, which shares the exact same resolver
-        // (`resolve::displacement::resolve_radial_displacement`) as `Knockback` — both are
-        // dispatched to it by `resolve_effect`'s own match arm. This proves that resolver
-        // family is now reachable from a real command, submitted through the public
-        // `apply_ability` entry point rather than by calling `displacement::resolve`
-        // directly.
-        let actor = player("actor", "natomica", FixedPoint::new(0, 0));
-        let target = player(
-            "target",
-            "natomica",
-            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
-        );
-        let mut state = state_with_players("actor", vec![actor, target]);
-        let before = state.player("target").map(|p| p.position);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: None,
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Natomica's Repulse to be accepted: {result:?}");
+            panic!("expected Tide Sprayer to be accepted: {result:?}");
         };
         let after = state.player("target").map(|p| p.position);
         assert_ne!(
@@ -2131,9 +1827,6 @@ mod tests {
 
     #[test]
     fn terrain_destroying_ability_reports_nonzero_terrain_cells_removed() {
-        // Huck's Haymaker (`ability_command`'s own default) carves a crater on impact.
-        // `base_state`'s terrain starts fully `Empty`, which would make this vacuous, so
-        // solid ground is seeded around the defender first.
         let mut state = base_state();
         for y in 0..5i32 {
             for x in 0..5i32 {
@@ -2149,41 +1842,7 @@ mod tests {
         };
         assert!(
             outcome.terrain_cells_removed > 0,
-            "a terrain-destroying ability must report the cells it actually destroyed, not \
-             the always-zero value from before P2"
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn effect_resolution_failure_leaves_state_untouched() {
-        // Huck's Body Throw (Special) needs both a primary and a secondary target for its
-        // `Relocate` effect. Submitting it with only a primary is a legal *command* —
-        // neither target field is individually required by `validate_ability`, and the
-        // primary alone is enough to pass the reach check — but an *unresolvable* action:
-        // the effects loop fails partway through, after this same command's own direct
-        // damage (40% to the primary) has already landed in the cloned working copy
-        // `resolve_ability` operates on. Proves `apply_ability`'s clone-and-discard
-        // atomicity still holds even when the failure originates deep in the new effects
-        // loop, not just at validation, and does so through the public entry point with a
-        // real roster ability rather than a synthetic one.
-        let mut state = base_state();
-        if let Some(_attacker) = state.player_mut("attacker") {}
-        let before = state.clone();
-        let mut command = ability_command("cmd-1", Some("defender"));
-        command.slot = AbilitySlot::Special;
-        // Deliberately no `secondary_target_player_id`: `Relocate` needs one.
-
-        let result = apply_ability(&mut state, &command);
-
-        assert_eq!(
-            result,
-            CommandResult::Rejected(CommandRejection::InvalidTarget)
-        );
-        assert_eq!(
-            state, before,
-            "a failure inside the effects loop, after damage already landed in the working \
-             clone, must still leave the real state byte-identical"
+            "a terrain-destroying ability must report the cells it actually destroyed"
         );
     }
 

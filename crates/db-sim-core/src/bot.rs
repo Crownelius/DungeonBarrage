@@ -693,14 +693,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn an_arzum_duel_against_a_passive_opponent_ends_in_victory_with_no_rejections() {
-        // The full loop through the real MatchHost: Arzum (a clean melee kit — Chain
-        // Strike carries no crater and no self-damage, unlike Huck's Haymaker) starts out
-        // of range, closes it, and finishes a passive opponent who only ever passes.
+    fn a_crow_duel_against_a_passive_opponent_ends_in_victory_with_no_rejections() {
+        // The full loop through the real MatchHost: the crow bot starts out
+        // of range on a real map, navigates and finishes a passive opponent who only ever passes.
         // Proves the Move-then-Ability turn contract end to end, not just each half in
         // isolation.
-        let state = real_map_duel("bot", "arzum", "passive", 1);
+        let state = real_map_duel("bot", "crow", "passive", 1);
         let mut host = crate::match_host::MatchHost::start(state).expect("match must start");
         let mut seed = 1u64;
         let mut rejections = 0u32;

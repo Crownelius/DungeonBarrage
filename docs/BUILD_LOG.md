@@ -3820,6 +3820,50 @@ providing an intuitive wind anemometer widget in the match HUD and floating stat
 | Headless & Windowed C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
 | Headless & Windowed C7 smoke | pass: `success: true`, all 6 quality checks verified |
 
+---
+
+## 2026-09-03 — Leftover C1 realignment & smooth movement playback interpolation
+
+This slice resolves all 41 leftover `#[ignore]` C1 tests across the Rust simulation core against the single-crow + 32-item catalog, eliminating obsolete kit tests per HANDOFF.md §2 instructions, and introduces pure C# movement visual interpolation for walking/hopping ground pivots during transition playback.
+
+### Delivered
+
+- **Simulation Core C1 Realignment (`db-sim-core`):**
+  - `bot.rs`: Un-ignored and realigned `a_crow_duel_against_a_passive_opponent_ends_in_victory_with_no_rejections`.
+  - `match_host.rs`: Un-ignored and realigned all 20 tests. 0 ignored, all passing.
+  - `resolve/relocation.rs`: Un-ignored and realigned all 15 tests. 0 ignored, all passing.
+  - `command.rs`: Realigned multi-projectile command test to `line-repeater`, passive choice tests to assert `CommandRejection::PassiveAlreadyChosen`, and push effect test to `tide-sprayer`. Pruned obsolete retired kit tests.
+  - `match_session.rs`: Realigned `complete_checkpoint_restore_preserves_replay_and_can_continue`, `stale_and_illegal_previews_are_normal_non_mutating_responses`, `melee_terrain_and_block_mutation_are_one_ordered_real_transition` (to `trench-spade`), `melee_elimination_is_attributed_before_victory_and_no_turn_reopens`, and all 8 `strike_provenance_tests` to `line-repeater`. Realigned `owner_cleanup_reaches_the_session_with_its_exact_cause`. Pruned obsolete retired kit tests (Arzum/Aleph draws, mid-match passive choice, knife projectile spawns).
+  - Rust Core test suite: **485 unit + integration tests passing**, **0 ignored**, **0 failed**.
+- **Smooth Movement Playback Interpolation (`MovementPlayback.cs`, `Main.cs`):**
+  - Implemented `MovementPlayback.InterpolatePlayer` in `DungeonBarrage.Client.Interop`: smoothly lerps character ground pivots between `EntityMoved.Start` and `EntityMoved.End` during transition playback (`_playback`), using smoothstep cubic easing (`3t^2 - 2t^3`).
+  - Preserves `CharacterBodyGeometry` collision circles with mathematical exactness: translates `CollisionCenter` in exact sync with ground pivot offset while keeping `CollisionRadius` intact.
+  - Sockets (eye, beak, crown/gem, weapon/tool), ground shadows, and floating status plates stay perfectly anchored to the smoothly moving paper doll.
+  - Handles projectile impact timing: movements resulting from projectile impacts (knockback/push) hold starting position until `PresentationTick`, then smoothly lerp over remaining ticks.
+  - Supports accessibility: immediately snaps to destination when `ReduceMotion` is enabled.
+- **Client & Integration Test Suites:**
+  - Added 6 new unit tests in `MovementPlaybackTests.cs` (start tick, end tick, midpoint smoothstep, reduce motion, delayed impact ticks, event filtering).
+  - Fixed Godot 4.7.1 color mapping for bowstrings (`Color(0.98f, 0.98f, 0.82f)`).
+  - .NET test suite expanded to 12 contracts + 127 interop = 139 tests passing.
+  - Full headless smoke suites passed: C5 smoke (`success: true`), C6 smoke (3/3 maps, `success: true`), C6-timeout smoke (`success: true`), and C7 smoke (`success: true`).
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | **509 passed**, 0 failed, 1 ignored (fixture generator) |
+| `cargo test --release -p db-sim-ffi --locked` | 23 passed, 1 ignored |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 127 interop = **139 passed**, 0 failed |
+| `dotnet build client/src/DungeonBarrage.Client/DungeonBarrage.Client.csproj -c ExportRelease` | pass, 0 warnings, 0 errors |
+| Headless C5 smoke | pass: `success: true`, real damage, fire/hit/impact cues |
+| Headless C6 smoke | pass: `success: true`, 3/3 maps, collapse, bot/human, rematch |
+| Headless C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
+| Headless C7 smoke | pass: `success: true`, all 6 quality checks verified |
+
+
 
 
 

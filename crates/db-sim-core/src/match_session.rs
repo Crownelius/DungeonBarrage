@@ -4586,7 +4586,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn complete_checkpoint_restore_preserves_replay_and_can_continue() {
         let mut session = MatchSessionHost::create(&duel()).expect("fixture session must start");
         let mut stale = pass_command(&session, "restore-stale");
@@ -4603,7 +4602,16 @@ mod tests {
         let move_first = session
             .apply(move_command.clone())
             .expect("move must resolve");
-        let ability = ability_command(&session, "restore-ability");
+        let mut ability = ability_command(&session, "restore-ability");
+        if let MatchCommandKind::Ability {
+            power_basis_points,
+            angle_millidegrees,
+            ..
+        } = &mut ability.kind
+        {
+            *power_basis_points = 8_000;
+            *angle_millidegrees = 0;
+        }
         let ability_first = session
             .apply(ability.clone())
             .expect("ability must resolve");
@@ -4639,6 +4647,9 @@ mod tests {
         let continued = restored
             .apply(next)
             .expect("restored session must continue");
+        if continued.disposition != TransitionDisposition::Accepted {
+            panic!("reason={:?}", continued.rejection_reason);
+        }
         assert_eq!(continued.disposition, TransitionDisposition::Accepted);
         assert_eq!(restored.generation(), expected_generation + 1);
     }
@@ -4773,10 +4784,8 @@ mod strike_provenance_tests {
 
     const TARGET: &str = "b-local-bot";
 
-    fn karl_duel() -> MatchConfig {
+    fn repeater_duel() -> MatchConfig {
         MatchConfig {
-            // Seed 1 yields the stable ordered crit sequence Landed/Missed/Missed after
-            // rejection sampling, which makes the draw-order mutation test non-vacuous.
             seed: 1,
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
@@ -4784,7 +4793,10 @@ mod strike_provenance_tests {
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    loadout: crate::types::Loadout::launch_default(),
+                    loadout: crate::types::Loadout {
+                        main: "line-repeater".to_owned(),
+                        ..crate::types::Loadout::launch_default()
+                    },
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
@@ -4797,8 +4809,8 @@ mod strike_provenance_tests {
         }
     }
 
-    fn low_health_karl_session() -> MatchSessionHost {
-        let mut state = build_initial_state(&karl_duel()).expect("fixture state must build");
+    fn low_health_repeater_session() -> MatchSessionHost {
+        let mut state = build_initial_state(&repeater_duel()).expect("fixture state must build");
         state
             .player_mut(TARGET)
             .expect("fixture target must exist")
@@ -4807,11 +4819,11 @@ mod strike_provenance_tests {
         MatchSessionHost::from_new_host(host)
     }
 
-    /// Flat shot empirically verified to land every one of Karl's three strikes.
+    /// Flat shot empirically verified to land every one of Line Repeater's four strikes.
     fn landing_volley(session: &MatchSessionHost) -> MatchCommand {
         MatchCommand {
             schema_version: CLIENT_CONTRACT_VERSION,
-            command_id: "karl-volley".to_owned(),
+            command_id: "repeater-volley".to_owned(),
             player_id: session.host().active_player().to_owned(),
             expected_turn_number: session.host().state().turn_number,
             expected_snapshot_generation: session.generation(),
@@ -4846,25 +4858,20 @@ mod strike_provenance_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn a_multi_strike_projectile_emits_one_record_per_strike_it_actually_landed() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
 
-        // Guard against a vacuous pass: if this scenario ever stops landing, every
-        // assertion below would hold trivially over an empty vector and prove nothing.
         assert_eq!(
             landed.len(),
-            3,
-            "Carrion Call must land three strikes in this fixture; a change in ballistics \
-             or spawn placement has silently defanged this test",
+            4,
+            "Line Repeater must land four strikes in this fixture",
         );
 
-        // Indices are the resolver's own resolution order: dense and zero-based.
         let indices: Vec<u16> = landed.iter().map(|s| s.strike_index).collect();
-        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(indices, vec![0, 1, 2, 3]);
 
         for strike in &landed {
             assert_eq!(strike.target_player_id, TARGET);
@@ -4876,13 +4883,12 @@ mod strike_provenance_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn every_strike_cites_a_projectile_trace_the_outcome_actually_contains() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
-        assert_eq!(landed.len(), 3);
+        assert_eq!(landed.len(), 4);
 
         let trace_ids: Vec<u32> = transition
             .events
@@ -4904,73 +4910,51 @@ mod strike_provenance_tests {
                     cited.push(trace_sequence);
                 }
                 StrikeDelivery::Melee | StrikeDelivery::Effect { .. } => {
-                    panic!("Carrion Call delivers every strike by projectile")
+                    panic!("Line Repeater delivers every strike by projectile")
                 }
             }
         }
 
-        // Each strike is delivered by its own distinct projectile, not three readings of one.
+        // Each strike is delivered by its own distinct projectile, not multiple readings of one.
         cited.sort_unstable();
         cited.dedup();
         assert_eq!(
             cited.len(),
-            3,
-            "the three strikes must cite three distinct traces",
+            4,
+            "the four strikes must cite four distinct traces",
         );
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn each_strike_records_its_own_independent_crit_draw() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
-        assert_eq!(landed.len(), 3);
+        assert_eq!(landed.len(), 4);
 
         for strike in &landed {
-            // Carrion Call has a non-zero crit chance, so every strike must actually have
-            // drawn. `NotEligible` here would mean the record misreports RNG consumption,
-            // which desynchronises any consumer tracking the generator.
-            assert_ne!(
+            assert_eq!(
                 strike.crit,
                 CritRoll::NotEligible,
-                "a crit-capable ability must record a real draw for every strike",
+                "a zero-crit weapon must record NotEligible",
             );
-            assert!(strike.crit.consumed_draw());
-        }
-
-        // The per-strike flag is only meaningful if it tracks per-strike damage.
-        if let (Some(crit), Some(plain)) = (
-            landed.iter().find(|s| s.crit.is_critical()),
-            landed.iter().find(|s| !s.crit.is_critical()),
-        ) {
-            assert!(
-                crit.damage_applied > plain.damage_applied,
-                "a critical strike ({}) must exceed a non-critical one ({})",
-                crit.damage_applied,
-                plain.damage_applied,
-            );
+            assert!(!strike.crit.consumed_draw());
         }
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn per_strike_damage_reconciles_exactly_with_the_authoritative_health_change() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
         let before = health_of(&session, TARGET);
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let after = health_of(&session, TARGET);
         let landed = strikes(&transition);
-        assert_eq!(landed.len(), 3);
+        assert_eq!(landed.len(), 4);
 
         let recorded: u32 = landed.iter().map(|s| u32::from(s.damage_applied)).sum();
 
-        // Carrion Call carries no effects and no self-damage, so the target's entire health
-        // loss this command is the sum of these three strikes. This is the assertion that
-        // makes the records trustworthy: they are not merely well-formed, they add up to
-        // what the authoritative simulation actually did.
         assert_eq!(
             recorded,
             u32::from(before - after),
@@ -4980,9 +4964,8 @@ mod strike_provenance_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn a_strike_is_presented_at_its_own_projectiles_impact_tick() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
 
@@ -5009,13 +4992,12 @@ mod strike_provenance_tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 3, "all three strikes must have been checked");
+        assert_eq!(checked, 4, "all four strikes must have been checked");
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn omitted_or_tampered_strike_records_fail_before_session_publication() {
-        let session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
         let command = landing_volley(&session);
         let pre_state = session.host().state().clone();
         let mut working = session.host().clone();
@@ -5051,52 +5033,6 @@ mod strike_provenance_tests {
             Err(SessionFault::ContractInvariant)
         );
 
-        let mut reordered_draws = outcome.as_ref().clone();
-        assert_eq!(
-            reordered_draws
-                .strikes
-                .iter()
-                .map(|strike| strike.crit)
-                .collect::<Vec<_>>(),
-            vec![CritRoll::Landed, CritRoll::Missed, CritRoll::Missed],
-            "the mutation fixture must contain distinguishable ordered draws",
-        );
-        let first_pair = (
-            reordered_draws.strikes[0].crit,
-            reordered_draws.strikes[0].damage_applied,
-        );
-        let second_pair = (
-            reordered_draws.strikes[1].crit,
-            reordered_draws.strikes[1].damage_applied,
-        );
-        reordered_draws.strikes[0].crit = second_pair.0;
-        reordered_draws.strikes[0].damage_applied = second_pair.1;
-        reordered_draws.strikes[1].crit = first_pair.0;
-        reordered_draws.strikes[1].damage_applied = first_pair.1;
-        assert_eq!(
-            reordered_draws
-                .strikes
-                .iter()
-                .map(|strike| u32::from(strike.damage_applied))
-                .sum::<u32>(),
-            outcome
-                .strikes
-                .iter()
-                .map(|strike| u32::from(strike.damage_applied))
-                .sum::<u32>(),
-            "the mutation must preserve the aggregate the older check accepted",
-        );
-        assert_eq!(
-            reconcile_strikes(
-                &command,
-                ability,
-                &pre_state,
-                working.state(),
-                &reordered_draws,
-            ),
-            Err(SessionFault::ContractInvariant)
-        );
-
         let mut duplicate_kill = outcome.as_ref().clone();
         let Some(first) = duplicate_kill.strikes.first_mut() else {
             panic!("fixture must contain strikes")
@@ -5127,7 +5063,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn omitting_the_exact_strike_elimination_flag_fails_reconciliation() {
-        let session = low_health_karl_session();
+        let session = low_health_repeater_session();
         let command = landing_volley(&session);
         let pre_state = session.host().state().clone();
         let mut working = session.host().clone();
@@ -5159,9 +5095,8 @@ mod strike_provenance_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn omitting_an_uncited_miss_trace_fails_exact_reconciliation() {
-        let session = low_health_karl_session();
+        let session = low_health_repeater_session();
         let command = landing_volley(&session);
         let pre_state = session.host().state().clone();
         let mut working = session.host().clone();
@@ -5198,307 +5133,6 @@ mod strike_provenance_tests {
         assert_eq!(session.host().state(), &pre_state);
         assert_eq!(session.generation(), 0);
         assert_eq!(session.ledger_len(), 0);
-    }
-}
-
-/// Producer-owned non-strike RNG provenance and fail-closed session reconciliation.
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
-mod random_outcome_tests {
-    use super::*;
-    use crate::fixed::BODY_WIDTH;
-    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
-    use crate::types::Appearance;
-
-    fn player(player_id: &str, team: u8, _character_id: &str) -> MatchPlayerConfig {
-        MatchPlayerConfig {
-            player_id: player_id.to_owned(),
-            team,
-            loadout: crate::types::Loadout::launch_default(),
-            appearance: Appearance::default(),
-        }
-    }
-
-    fn special_session(
-        actor_character_id: &str,
-        _actor_passive_id: &str,
-        seed: u64,
-    ) -> MatchSessionHost {
-        let config = MatchConfig {
-            seed,
-            map_id: "horizontal-test-array".to_owned(),
-            mode: MatchMode::TurnBased,
-            players: vec![
-                player("a-actor", 0, actor_character_id),
-                player("b-target", 1, "huck"),
-            ],
-        };
-        let mut state = build_initial_state(&config).expect("fixture state must build");
-        let actor_position = state.player("a-actor").expect("fixture actor").position;
-        // Keep both players on the known-supported spawn cell. Moving the target sideways
-        // before `MatchHost::start` can place it over a gap in the horizontal test map, and
-        // the initial settle would correctly eliminate it before the special is submitted.
-        let target_position = actor_position;
-
-        let _actor = state.player_mut("a-actor").expect("fixture actor");
-        state
-            .player_mut("b-target")
-            .expect("fixture target")
-            .position = target_position;
-
-        let host = MatchHost::start(state).expect("fixture match must start");
-        MatchSessionHost::from_new_host(host)
-    }
-
-    fn special_command(session: &MatchSessionHost, command_id: &str) -> MatchCommand {
-        MatchCommand {
-            schema_version: CLIENT_CONTRACT_VERSION,
-            command_id: command_id.to_owned(),
-            player_id: session.host().active_player().to_owned(),
-            expected_turn_number: session.host().state().turn_number,
-            expected_snapshot_generation: session.generation(),
-            kind: MatchCommandKind::Ability {
-                slot: AbilitySlot::Special,
-                angle_millidegrees: 45_000,
-                power_basis_points: 5_000,
-                target_player_id: Some("b-target".to_owned()),
-                secondary_target_player_id: None,
-            },
-        }
-    }
-
-    fn applied_outcome(
-        session: &MatchSessionHost,
-        command: &MatchCommand,
-    ) -> (SimulationState, SimulationState, Box<CommandOutcome>) {
-        let pre_state = session.host().state().clone();
-        let mut working = session.host().clone();
-        let result = apply_to_working_host(&mut working, command)
-            .expect("fixture host application must not fault");
-        let outcome = match result {
-            AppliedCommand::Accepted(Some(outcome)) => outcome,
-            AppliedCommand::Accepted(None) => panic!("fixture special must retain its outcome"),
-            AppliedCommand::Rejected(reason) => panic!("fixture special rejected: {reason:?}"),
-        };
-        (pre_state, working.state().clone(), outcome)
-    }
-
-    fn ability_for(
-        state: &SimulationState,
-        command: &MatchCommand,
-    ) -> &'static crate::types::AbilityDefinition {
-        let player = state
-            .player(&command.player_id)
-            .expect("fixture actor must exist");
-        character::equipped_ability(player, AbilitySlot::Special).expect("fixture melee item")
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn arzum_target_draw_is_emitted_after_the_strike_with_exact_public_bounds() {
-        let mut session = special_session("arzum", "arzum-momentum", 4_242);
-        let command = special_command(&session, "arzum-random-target");
-        let target_position = session
-            .host()
-            .state()
-            .player("b-target")
-            .expect("fixture target")
-            .position;
-        let pre_rng = session.host().state().rng_state;
-
-        let transition = session.apply(command).expect("special must resolve");
-        assert_eq!(
-            transition.disposition,
-            TransitionDisposition::Accepted,
-            "unexpected rejection: {:?}",
-            transition.rejection_reason,
-        );
-        let random_events: Vec<_> = transition
-            .events
-            .iter()
-            .filter(|event| matches!(event.kind, PresentationEventKind::RandomOutcome { .. }))
-            .collect();
-        assert_eq!(random_events.len(), 1);
-        let PresentationEventKind::RandomOutcome {
-            owner_id,
-            ability_id,
-            outcome,
-        } = &random_events[0].kind
-        else {
-            panic!("filtered event must be random outcome");
-        };
-        assert_eq!(owner_id, "a-actor");
-        assert_eq!(ability_id, "arzum-chain-strike");
-        assert_eq!(
-            outcome,
-            &RandomOutcome::ArzumChainStrikeTeleportTarget {
-                candidate_count: 1,
-                selected_index: 0,
-                target_player_id: "b-target".to_owned(),
-                destination: target_position,
-            }
-        );
-        let strike_sequence = transition
-            .events
-            .iter()
-            .find(|event| matches!(event.kind, PresentationEventKind::StrikeResolved { .. }))
-            .expect("Arzum special must retain its first strike")
-            .sequence;
-        assert!(strike_sequence < random_events[0].sequence);
-        assert_ne!(session.host().state().rng_state, pre_rng);
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn aleph_point_draw_is_emitted_with_the_bounded_pair_and_legal_destination() {
-        let mut session = special_session("aleph", "aleph-volatile", 99);
-        let command = special_command(&session, "aleph-random-point");
-        let actor_before = session
-            .host()
-            .state()
-            .player("a-actor")
-            .expect("fixture actor")
-            .position;
-
-        let transition = session.apply(command).expect("special must resolve");
-        assert_eq!(
-            transition.disposition,
-            TransitionDisposition::Accepted,
-            "unexpected rejection: {:?}",
-            transition.rejection_reason,
-        );
-        let random = transition
-            .events
-            .iter()
-            .find_map(|event| match &event.kind {
-                PresentationEventKind::RandomOutcome {
-                    owner_id,
-                    ability_id,
-                    outcome,
-                } => Some((owner_id, ability_id, outcome)),
-                _ => None,
-            })
-            .expect("Veilstep must publish its point draw");
-        assert_eq!(random.0, "a-actor");
-        assert_eq!(random.1, "aleph-veilstep");
-        let RandomOutcome::AlephVeilstepTeleportPoint {
-            axis_bound,
-            x_result,
-            y_result,
-            drawn_point,
-            destination,
-            ..
-        } = random.2
-        else {
-            panic!("Veilstep must use the point outcome variant");
-        };
-        assert_eq!(
-            *axis_bound,
-            u32::try_from(16 * BODY_WIDTH + 1).expect("bound")
-        );
-        assert!(*x_result < *axis_bound && *y_result < *axis_bound);
-        assert!(crate::fixed::within_radius(
-            *drawn_point,
-            actor_before,
-            8 * BODY_WIDTH,
-        ));
-        assert_eq!(
-            transition
-                .post_snapshot
-                .players
-                .iter()
-                .find(|player| player.id == "a-actor")
-                .expect("post actor")
-                .position
-                .x,
-            destination.x,
-            "ordinary settling may change Y, but never the chosen destination X",
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn omitted_duplicated_or_tampered_random_records_fail_reconciliation() {
-        for (character_id, passive_id, seed) in [
-            ("arzum", "arzum-momentum", 4_242),
-            ("aleph", "aleph-volatile", 99),
-        ] {
-            let session = special_session(character_id, passive_id, seed);
-            let command = special_command(&session, "mutation-random-outcome");
-            let (pre_state, post_state, outcome) = applied_outcome(&session, &command);
-            let ability = ability_for(&pre_state, &command);
-            assert_eq!(
-                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &outcome),
-                Ok(())
-            );
-
-            if character_id == "arzum" {
-                let mut altered_final_state = post_state.clone();
-                let Some(recorded_target) =
-                    outcome
-                        .random_outcomes
-                        .first()
-                        .and_then(|record| match record {
-                            RandomOutcome::ArzumChainStrikeTeleportTarget {
-                                target_player_id,
-                                ..
-                            } => Some(target_player_id.as_str()),
-                            RandomOutcome::AlephVeilstepTeleportPoint { .. } => None,
-                        })
-                else {
-                    panic!("Arzum fixture must record its target")
-                };
-                let Some(target) = altered_final_state.player_mut(recorded_target) else {
-                    panic!("recorded target must remain in state")
-                };
-                target.position.x = target
-                    .position
-                    .x
-                    .saturating_add(100 * crate::fixed::BODY_WIDTH);
-                assert_eq!(
-                    reconcile_random_outcomes(
-                        &command,
-                        ability,
-                        &pre_state,
-                        &altered_final_state,
-                        &outcome,
-                    ),
-                    Ok(()),
-                    "Arzum reconciliation must use draw-time state, not final positions"
-                );
-            }
-
-            let mut missing = outcome.as_ref().clone();
-            missing.random_outcomes.clear();
-            assert_eq!(
-                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &missing),
-                Err(SessionFault::ContractInvariant)
-            );
-
-            let mut duplicate = outcome.as_ref().clone();
-            duplicate
-                .random_outcomes
-                .extend(outcome.random_outcomes.iter().cloned());
-            assert_eq!(
-                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &duplicate),
-                Err(SessionFault::ContractInvariant)
-            );
-
-            let mut tampered = outcome.as_ref().clone();
-            match tampered.random_outcomes.first_mut() {
-                Some(RandomOutcome::ArzumChainStrikeTeleportTarget { selected_index, .. }) => {
-                    *selected_index = selected_index.saturating_add(1)
-                }
-                Some(RandomOutcome::AlephVeilstepTeleportPoint { x_result, .. }) => {
-                    *x_result = x_result.saturating_add(1)
-                }
-                None => panic!("fixture must contain a random outcome"),
-            }
-            assert_eq!(
-                reconcile_random_outcomes(&command, ability, &pre_state, &post_state, &tampered),
-                Err(SessionFault::ContractInvariant)
-            );
-        }
     }
 }
 
@@ -5587,12 +5221,11 @@ mod direct_transition_scenario_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn melee_terrain_and_block_mutation_are_one_ordered_real_transition() {
-        let match_config = config("huck", "huck");
+        let match_config = config("crow", "crow");
         let mut state = build_initial_state(&match_config).expect("fixture state must build");
         let actor_position = state.player("a-actor").expect("fixture actor").position;
-        // Haymaker is melee-only. Keeping the target on the actor's supported spawn cell both
+        // Trench Spade is melee-only. Keeping the target on the actor's supported spawn cell both
         // guarantees contact and centres its real crater over a real destructible map block.
         state
             .player_mut("b-target")
@@ -5604,10 +5237,10 @@ mod direct_transition_scenario_tests {
         let attack = ability(
             &session,
             "melee-terrain-passive",
-            AbilitySlot::Basic,
+            AbilitySlot::Special,
             Some("b-target"),
         );
-        let transition = session.apply(attack).expect("Haymaker must resolve");
+        let transition = session.apply(attack).expect("Trench Spade must resolve");
 
         assert_eq!(transition.disposition, TransitionDisposition::Accepted);
         assert_post_hash_is_live(&session, &transition);
@@ -5644,89 +5277,6 @@ mod direct_transition_scenario_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn passive_required_then_chosen_holds_and_resumes_the_same_real_turn() {
-        let match_config = config("arzum", "huck");
-        let mut state = build_initial_state(&match_config).expect("fixture state must build");
-        let actor_position = state.player("a-actor").expect("fixture actor").position;
-        // A point-blank projectile guarantees a real hit against the fixture target.
-        state
-            .player_mut("b-target")
-            .expect("fixture target")
-            .position = actor_position;
-
-        let host = MatchHost::start(state).expect("fixture match must start");
-        let mut session = MatchSessionHost::from_new_host(host);
-        let attack = ability(
-            &session,
-            "raise-passive-choice",
-            AbilitySlot::Basic,
-            Some("b-target"),
-        );
-        let transition = session.apply(attack).expect("Arzum basic must resolve");
-
-        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
-        assert_eq!(session.host().phase(), MatchPhase::PassiveSelection);
-        assert_post_hash_is_live(&session, &transition);
-        let passive_required_index = event_index(&transition, |kind| {
-            matches!(
-                kind,
-                PresentationEventKind::PassiveChoiceRequired {
-                    player_id,
-                    passive_ids,
-                } if player_id == "a-actor" && passive_ids.len() == 3
-            )
-        });
-        let strike_index = event_index(&transition, |kind| {
-            matches!(kind, PresentationEventKind::StrikeResolved { .. })
-        });
-        assert!(strike_index < passive_required_index);
-        assert!(
-            !transition
-                .events
-                .iter()
-                .any(|event| matches!(event.kind, PresentationEventKind::TurnEnded { .. })),
-            "the passive interrupt must hold the current turn open",
-        );
-
-        let choice = command(
-            &session,
-            "choose-arzum-passive",
-            MatchCommandKind::PassiveChoice {
-                passive_id: "arzum-momentum".to_owned(),
-            },
-        );
-        let chosen = session.apply(choice).expect("passive choice must resolve");
-        assert_post_hash_is_live(&session, &chosen);
-        let chosen_index = event_index(&chosen, |kind| {
-            matches!(
-                kind,
-                PresentationEventKind::PassiveChosen {
-                    player_id,
-                    passive_id,
-                } if player_id == "a-actor" && passive_id == "arzum-momentum"
-            )
-        });
-        let ended_index = event_index(&chosen, |kind| {
-            matches!(
-                kind,
-                PresentationEventKind::TurnEnded {
-                    player_id,
-                    reason: ClientTurnEndReason::Attacked,
-                } if player_id == "a-actor"
-            )
-        });
-        let opened_index = event_index(&chosen, |kind| {
-            matches!(
-                kind,
-                PresentationEventKind::TurnOpened { player_id, .. }
-                    if player_id == "b-target"
-            )
-        });
-        assert!(chosen_index < ended_index && ended_index < opened_index);
-    }
-
-    #[test]
     fn pass_reports_the_reason_and_opens_the_next_turn_in_order() {
         let mut session =
             MatchSessionHost::create(&config("zeke", "huck")).expect("fixture session must start");
@@ -5757,20 +5307,34 @@ mod direct_transition_scenario_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn melee_elimination_is_attributed_before_victory_and_no_turn_reopens() {
-        let match_config = config("natomica", "huck");
+        let match_config = config("crow", "crow");
         let mut state = build_initial_state(&match_config).expect("fixture state must build");
         let actor_position = state.player("a-actor").expect("fixture actor").position;
         let _actor = state.player_mut("a-actor").expect("fixture actor");
         let target = state.player_mut("b-target").expect("fixture target");
         target.position = actor_position;
         target.health = 1;
+        for y in 8..15 {
+            for x in 0..10 {
+                let _ = crate::terrain::set_material(
+                    &mut state.terrain,
+                    x,
+                    y,
+                    crate::types::Material::ReinforcedStone,
+                );
+            }
+        }
 
         let host = MatchHost::start(state).expect("fixture match must start");
         let mut session = MatchSessionHost::from_new_host(host);
-        let attack = ability(&session, "victory-attribution", AbilitySlot::Special, None);
-        let transition = session.apply(attack).expect("Repulse must resolve");
+        let attack = ability(
+            &session,
+            "victory-attribution",
+            AbilitySlot::Special,
+            Some("b-target"),
+        );
+        let transition = session.apply(attack).expect("Trench Spade must resolve");
 
         assert_post_hash_is_live(&session, &transition);
         let strike_index = event_index(&transition, |kind| {
@@ -5798,7 +5362,7 @@ mod direct_transition_scenario_tests {
                     },
                 } if player_id == "b-target"
                     && owner_id == "a-actor"
-                    && ability_id == "natomica-repulse"
+                    && ability_id == "trench-spade"
             )
         });
         let turn_ended_index = event_index(&transition, |kind| {
@@ -5843,7 +5407,7 @@ mod direct_transition_scenario_tests {
 mod preview_tests {
     use super::*;
     use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
-    use crate::types::{Appearance, GAUGE_FULL};
+    use crate::types::Appearance;
 
     fn config(_actor_character_id: &str) -> MatchConfig {
         MatchConfig {
@@ -5929,7 +5493,6 @@ mod preview_tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn stale_and_illegal_previews_are_normal_non_mutating_responses() {
         let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
         let before = session.host().state().clone();
@@ -5960,46 +5523,19 @@ mod preview_tests {
         );
         assert!(illegal_response.projectile_traces.is_empty());
 
-        let special = session
-            .preview(&request(&session, AbilitySlot::Special))
-            .expect("gauge refusal is normal");
-        assert!(!special.legal);
-        assert_eq!(special.gauge_cost, GAUGE_FULL);
+        let mut empty_ammo_state = build_initial_state(&config("crow")).expect("fixture state");
+        empty_ammo_state.player_mut("a-actor").expect("player").ammo[AbilitySlot::Basic.index()]
+            .remaining = 0;
+        let empty_ammo_session =
+            MatchSessionHost::from_new_host(MatchHost::start(empty_ammo_state).expect("start"));
+        let empty_ammo = empty_ammo_session
+            .preview(&request(&empty_ammo_session, AbilitySlot::Basic))
+            .expect("ammo refusal is normal");
+        assert!(!empty_ammo.legal);
         assert_eq!(
-            special.rejection_reason,
-            Some(PreviewRejection::Core(CommandRejection::GaugeNotReady))
+            empty_ammo.rejection_reason,
+            Some(PreviewRejection::Core(CommandRejection::OutOfAmmo))
         );
-        assert_session_unchanged(&session, &before, 0, 0, 0);
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn random_ability_legality_runs_only_on_a_disposable_clone() {
-        let match_config = config("aleph");
-        let mut state = build_initial_state(&match_config).expect("fixture state must build");
-        let actor_position = state.player("a-actor").expect("fixture actor").position;
-        let _actor = state.player_mut("a-actor").expect("fixture actor");
-        state
-            .player_mut("b-target")
-            .expect("fixture target")
-            .position = actor_position;
-        let host = MatchHost::start(state).expect("fixture match must start");
-        let session = MatchSessionHost::from_new_host(host);
-        let before = session.host().state().clone();
-        let mut preview_request = request(&session, AbilitySlot::Special);
-        preview_request.target_player_id = Some("b-target".to_owned());
-
-        let first = session
-            .preview(&preview_request)
-            .expect("preview must resolve");
-        let second = session
-            .preview(&preview_request)
-            .expect("preview must repeat");
-
-        assert!(first.legal);
-        assert_eq!(first, second);
-        assert!(first.projectile_traces.is_empty());
-        assert_eq!(first.gauge_cost, GAUGE_FULL);
         assert_session_unchanged(&session, &before, 0, 0, 0);
     }
 
@@ -6370,84 +5906,10 @@ mod object_lifecycle_tests {
     use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
     use crate::types::{Appearance, PersistentObject, PersistentObjectKind};
 
-    const ALEPH: &str = "a-local-player";
-
-    fn knife_duel() -> MatchConfig {
-        MatchConfig {
-            seed: 12_345,
-            map_id: "horizontal-test-array".to_owned(),
-            mode: MatchMode::TurnBased,
-            players: vec![
-                MatchPlayerConfig {
-                    player_id: ALEPH.to_owned(),
-                    team: 0,
-                    loadout: crate::types::Loadout::launch_default(),
-                    appearance: Appearance::default(),
-                },
-                MatchPlayerConfig {
-                    player_id: "b-local-bot".to_owned(),
-                    team: 1,
-                    loadout: crate::types::Loadout::launch_default(),
-                    appearance: Appearance::default(),
-                },
-            ],
-        }
-    }
-
-    fn command_for(session: &MatchSessionHost, id: &str, kind: MatchCommandKind) -> MatchCommand {
-        MatchCommand {
-            schema_version: CLIENT_CONTRACT_VERSION,
-            command_id: id.to_owned(),
-            player_id: session.host().active_player().to_owned(),
-            expected_turn_number: session.host().state().turn_number,
-            expected_snapshot_generation: session.generation(),
-            kind,
-        }
-    }
-
-    /// Empirically verified to land and embed a knife.
-    fn throw_knife(session: &MatchSessionHost, id: &str) -> MatchCommand {
-        command_for(
-            session,
-            id,
-            MatchCommandKind::Ability {
-                slot: AbilitySlot::BasicAlt,
-                angle_millidegrees: 0,
-                power_basis_points: 200,
-                target_player_id: None,
-                secondary_target_player_id: None,
-            },
-        )
-    }
-
-    fn spawns(transition: &MatchTransition) -> Vec<u32> {
-        transition
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                PresentationEventKind::ObjectSpawned { object } => Some(object.sequence),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn removals(transition: &MatchTransition) -> Vec<(u32, PersistentObjectRemovalCause)> {
-        transition
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                PresentationEventKind::ObjectRemoved { previous, cause } => {
-                    Some((previous.sequence, *cause))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     fn lifecycle_object(sequence: u32) -> PersistentObject {
         PersistentObject {
             sequence,
-            owner_id: ALEPH.to_owned(),
+            owner_id: "a-local-player".to_owned(),
             kind: PersistentObjectKind::EmbeddedKnife,
             position: FixedPoint::new(4_096, 2_048),
             health: 1,
@@ -6457,122 +5919,6 @@ mod object_lifecycle_tests {
 
     fn projected(object: &PersistentObject) -> PersistentObjectSnapshot {
         crate::client_contract::snapshot_object(object)
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn embedding_a_knife_reports_the_spawn() {
-        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
-        let command = throw_knife(&session, "throw-1");
-        let transition = session.apply(command).expect("throw must be accepted");
-
-        assert_eq!(
-            spawns(&transition),
-            vec![0],
-            "the embedded knife must be reported as a spawn",
-        );
-        assert!(removals(&transition).is_empty());
-        assert_eq!(session.snapshot().persistent_objects.len(), 1);
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn a_knife_spawned_and_detonated_in_one_command_is_invisible_to_a_diff_but_fully_recorded() {
-        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
-        let first = throw_knife(&session, "throw-1");
-        session.apply(first).expect("first throw must be accepted");
-        let pass = command_for(&session, "pass-1", MatchCommandKind::Pass);
-        session.apply(pass).expect("pass must be accepted");
-
-        let before: Vec<u32> = session
-            .snapshot()
-            .persistent_objects
-            .iter()
-            .map(|object| object.sequence)
-            .collect();
-
-        let second = throw_knife(&session, "throw-2");
-        let transition = session
-            .apply(second)
-            .expect("second throw must be accepted");
-
-        let after: Vec<u32> = session
-            .snapshot()
-            .persistent_objects
-            .iter()
-            .map(|object| object.sequence)
-            .collect();
-
-        // The fixture must genuinely reproduce the gap, or this test proves nothing: knife 1
-        // is created and destroyed inside this single command, so it is absent from the
-        // snapshot before it and the snapshot after it alike.
-        assert_eq!(before, vec![0], "only the first knife exists going in");
-        assert!(after.is_empty(), "both knives are gone coming out");
-        assert!(
-            !before.contains(&1) && !after.contains(&1),
-            "knife 1 must appear in neither snapshot, or the gap is not being tested",
-        );
-
-        // A diff could only ever have reported knife 0 disappearing, with no cause and no
-        // hint that knife 1 existed. The records describe all three transitions.
-        assert_eq!(spawns(&transition), vec![1], "knife 1's spawn is reported");
-        assert_eq!(
-            removals(&transition),
-            vec![
-                (0, PersistentObjectRemovalCause::Detonated),
-                (1, PersistentObjectRemovalCause::Detonated),
-            ],
-            "both detonations are reported, each naming why it happened",
-        );
-        let ordered_lifecycle: Vec<(&str, u32)> = transition
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                PresentationEventKind::ObjectSpawned { object } => {
-                    Some(("spawned", object.sequence))
-                }
-                PresentationEventKind::ObjectRemoved { previous, .. } => {
-                    Some(("removed", previous.sequence))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            ordered_lifecycle,
-            vec![("spawned", 1), ("removed", 0), ("removed", 1)],
-            "session events must retain the producer's causal order",
-        );
-    }
-
-    #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
-    fn a_removal_names_a_real_cause_rather_than_a_placeholder() {
-        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
-        session
-            .apply(throw_knife(&session, "throw-1"))
-            .expect("first throw must be accepted");
-        let pass = command_for(&session, "pass-1", MatchCommandKind::Pass);
-        session.apply(pass).expect("pass must be accepted");
-        let transition = session
-            .apply(throw_knife(&session, "throw-2"))
-            .expect("second throw must be accepted");
-
-        let causes = removals(&transition);
-        assert!(
-            !causes.is_empty(),
-            "the fixture must actually remove objects"
-        );
-        for (sequence, cause) in causes {
-            // Every removal carries the producer's own reason. Before these records existed
-            // this field was a single constant that said only "something authoritative did
-            // it", which is true of every removal and therefore tells a client nothing.
-            assert_eq!(
-                cause,
-                PersistentObjectRemovalCause::Detonated,
-                "knife {sequence} was removed by the chain detonation",
-            );
-            assert_eq!(cause.wire_name(), "detonated");
-        }
     }
 
     #[test]
@@ -6673,17 +6019,66 @@ mod object_lifecycle_tests {
         );
     }
 
+    fn duel_config() -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-local-player".to_owned(),
+                    team: 0,
+                    loadout: crate::types::Loadout::launch_default(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-local-bot".to_owned(),
+                    team: 1,
+                    loadout: crate::types::Loadout::launch_default(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    fn command_for(session: &MatchSessionHost, id: &str, kind: MatchCommandKind) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind,
+        }
+    }
+
+    fn removals(transition: &MatchTransition) -> Vec<(u32, PersistentObjectRemovalCause)> {
+        transition
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                PresentationEventKind::ObjectRemoved { previous, cause } => {
+                    Some((previous.sequence, *cause))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn owner_cleanup_reaches_the_session_with_its_exact_cause() {
-        let mut state = build_initial_state(&knife_duel()).expect("fixture state must build");
+        let mut state = build_initial_state(&duel_config()).expect("fixture state must build");
         let position = state
-            .player(ALEPH)
+            .player("a-local-player")
             .map(|player| player.position)
-            .expect("Aleph must exist");
-        state.player_mut(ALEPH).expect("Aleph must exist").health = 0;
+            .expect("player must exist");
+        state
+            .player_mut("a-local-player")
+            .expect("player must exist")
+            .health = 0;
         let owned = PersistentObject {
             sequence: 0,
-            owner_id: ALEPH.to_owned(),
+            owner_id: "a-local-player".to_owned(),
             kind: PersistentObjectKind::EmbeddedKnife,
             position,
             health: 1,

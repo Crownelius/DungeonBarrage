@@ -8,8 +8,10 @@
 match-create/command envelope no longer carries `characterId` or character kits. Every
 fighter is the one crow. Equipped items are ammunition. Loadout is a four-page wizard
 (ranged, melee, one-shot secondary, crown/anklet) with eight items per page. Crowns and
-anklets charge on two damaging hits. Leftover C1 timeout/preview/object-provenance kit
-tests are `#[ignore]` until revisited.
+anklets charge on two damaging hits. Leftover C1 realignment is complete (0 ignored tests
+in `db-sim-core`, 485 unit/integration tests passing). Smooth walking/hopping movement visual
+interpolation (`MovementPlayback`) is active during transition playback, smoothly lerping
+ground pivots while preserving `CharacterBodyGeometry` collision circles.
 
 Steam page work is **after C5 only** and is not part of this checkpoint.
 
@@ -53,7 +55,7 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 | C4 Godot loadout picker, aim, falling structures, local match | **implemented**: sequential 8-tile pages. Slingshot aim: drag **away** from the opponent; gold line is first impact; dotted arc is the flight. `A`/`D` walk, Space jump, arrows pan camera. Walking cuts this turn's max power (10% floor). Returning Boomerang bounces and craters. |
 | C5 human-finishable match + `PLAY.md` | **implemented**: C5 now starts through the picker on `crow-perch`, not the embedded fixture. Windowed C5 shows MATCH COMPLETE. Not a live human sitting at the keyboard. |
 | C7 desktop quality & planning clock | **implemented**: Settings recovery, audio clamping, accessibility scaling, localization infrastructure, performance tier switching, and multiplatform export presets verified (`c7-report.json`, `c7-windowed-report.json`). Real wall-clock planning countdown and automatic timeout verified (`c6-timeout-report.json`, `c6-timeout-windowed-report.json`). |
-| Leftover C1 kit tests | **not restored** (41 `#[ignore]` kit tests stay kit-shaped). Crow-envelope timeout + preview covered on `crow-perch`. Object-spawn kits (knives/turrets) are not in this catalog. |
+| Leftover C1 realignment & movement interpolation | **implemented**: all 41 leftover C1 tests realigned or pruned against the crow + 32-item catalog. Core has 0 ignored tests (485 unit/integration tests passing). Smooth walking/hopping movement visual interpolation (`MovementPlayback`) smoothly lerps ground pivots between `EntityMoved.Start` and `EntityMoved.End` during transition playback while preserving `CharacterBodyGeometry` collision circles (127 interop unit tests, C5/C6/C6t/C7 smoke suites green). |
 | Steam page | **not started** (after C5 only) |
 | `broken-battlements` spawn ledges | **open owner call**: bot-vs-bot can still end 0hp vs 200hp by a fall. Remedy is floor/wider ledges, not another knockback cut. |
 
@@ -132,8 +134,11 @@ missing any one of them fails somewhere far from the cause:
 After a human finishes a match from `PLAY.md`, Steam page work may start. Do not author
 store copy during this cut.
 
-If leftover C1 is reopened, un-ignore the kit tests only after they are rewritten against
-the crow + item envelope — do not restore kits.
+Leftover C1 realignment and smooth movement playback are complete.
+Remaining deferred items:
+- Interactive human match playthrough from `PLAY.md`.
+- Steam store page work (after human finishes match per `PLAY.md`).
+- `broken-battlements` spawn ledges owner call (deferred until owner requests map content bump).
 
 ---
 

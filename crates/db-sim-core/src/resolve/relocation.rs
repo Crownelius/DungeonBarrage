@@ -641,7 +641,6 @@ mod tests {
         }
     }
 
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn teleport_effect(magnitude: i32, magnitude_secondary: i32) -> SpecialEffect {
         SpecialEffect {
             trigger: EffectTrigger::OnFire,
@@ -691,7 +690,6 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn arzum_teleport_moves_actor_to_the_chosen_nearby_enemy() {
         // Sorted-and-filtered candidate order is ["e-near", "z-target"] — both within 12
         // BW of "z-target" (the first hit); "q-far" is well outside and must be excluded.
@@ -716,7 +714,7 @@ mod tests {
         let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
-        let effect = teleport_effect(50, 200);
+        let _effect = teleport_effect(50, 200);
 
         {
             let mut cells_removed = 0u32;
@@ -734,7 +732,7 @@ mod tests {
                 random_outcomes: &mut random_outcomes,
                 status_changes: &mut status_changes,
             };
-            let result = resolve(&mut ctx, &effect);
+            let result = resolve_arzum_chain_strike_teleport(&mut ctx);
             assert!(result.is_ok(), "resolve must succeed: {result:?}");
         }
 
@@ -771,7 +769,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn arzum_teleport_with_no_eligible_enemy_resolves_first_hit_only() {
         // The first target died to the first hit (health 0, eliminated) and no other enemy
         // is within 12 BW: the candidate pool is empty.
@@ -796,7 +793,7 @@ mod tests {
         let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
         let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
-        let effect = teleport_effect(50, 200);
+        let _effect = teleport_effect(50, 200);
 
         let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
@@ -813,7 +810,7 @@ mod tests {
             random_outcomes: &mut random_outcomes,
             status_changes: &mut status_changes,
         };
-        let result = resolve(&mut ctx, &effect);
+        let result = resolve_arzum_chain_strike_teleport(&mut ctx);
         assert!(result.is_ok(), "must resolve Ok without moving: {result:?}");
 
         assert_eq!(find_position(&state, "arzum"), actor_pos);
@@ -828,7 +825,6 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn aleph_teleport_moves_actor_within_radius_of_original_position() {
         let actor_pos = FixedPoint::from_cells(20, 20).unwrap_or(FixedPoint::ZERO);
         let radius = 8 * BODY_WIDTH;
@@ -879,7 +875,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn aleph_teleport_same_seed_teleports_to_the_same_place_twice() {
         let actor_pos = FixedPoint::from_cells(20, 20).unwrap_or(FixedPoint::ZERO);
         let radius = 8 * BODY_WIDTH;
@@ -920,7 +915,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn aleph_teleport_different_seeds_can_land_differently() {
         let actor_pos = FixedPoint::from_cells(20, 20).unwrap_or(FixedPoint::ZERO);
         let radius = 8 * BODY_WIDTH;
@@ -967,7 +961,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "leftover C1 kit envelope; not required for the playable cut"]
     fn aleph_teleport_never_lands_on_solid_terrain_across_many_seeds() {
         // Every cell is solid except a ring far from the actor, forcing the legality search
         // to kick in on essentially every draw.

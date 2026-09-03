@@ -1226,7 +1226,17 @@ public partial class Main : Node2D
             }
         }
 
-        if (traces.Count == 0)
+        var hasMovement = false;
+        for (var i = 0; i < transition.Events.Count; i++)
+        {
+            if (transition.Events[i] is ClientEntityMovedEvent)
+            {
+                hasMovement = true;
+                break;
+            }
+        }
+
+        if (traces.Count == 0 && !hasMovement)
         {
             _playback = null;
             return false;
@@ -1259,8 +1269,25 @@ public partial class Main : Node2D
             lastTick = transition.InputLockTicks;
         }
 
-        var visualRate = ProjectilePlayback.VisualTickRate(lastTick, transition.PresentationTickRate);
-        var duration = ProjectilePlayback.PlaybackMsec(lastTick, visualRate);
+        uint visualRate;
+        ulong duration;
+        if (traces.Count > 0)
+        {
+            visualRate = ProjectilePlayback.VisualTickRate(lastTick, transition.PresentationTickRate);
+            duration = ProjectilePlayback.PlaybackMsec(lastTick, visualRate);
+        }
+        else
+        {
+            visualRate = transition.PresentationTickRate == 0 ? 30u : transition.PresentationTickRate;
+            if (lastTick == 0)
+            {
+                lastTick = 6u;
+            }
+
+            var moveMsec = (ulong)(lastTick * 1000.0 / visualRate);
+            duration = Math.Max(180UL, moveMsec);
+        }
+
         _playback = new ShotPlayback
         {
             PreSnapshot = preSnapshot,
@@ -1672,15 +1699,47 @@ public partial class Main : Node2D
             DrawBlock(block, terrain, snapshot.TerrainWidth, snapshot.TerrainHeight);
         }
 
+        var presentationTick = 0u;
+        if (IsInputLocked() && _playback is not null)
+        {
+            presentationTick = ProjectilePlayback.TickAt(
+                Time.GetTicksMsec() - _playback.StartMsec,
+                _playback.TickRate,
+                _playback.LockTicks);
+        }
+
         for (var index = 0; index < snapshot.Players.Count; index++)
         {
             var player = snapshot.Players[index];
+            if (IsInputLocked() && _playback is not null &&
+                MovementPlayback.FindMovementEvent(_playback.Events, player.PlayerId) is { } moved)
+            {
+                player = MovementPlayback.InterpolatePlayer(
+                    player,
+                    moved,
+                    presentationTick,
+                    _playback.LockTicks,
+                    _settings.Accessibility.ReduceMotion);
+            }
+
             int? opponentX = null;
             for (var other = 0; other < snapshot.Players.Count; other++)
             {
                 if (other != index && !snapshot.Players[other].IsEliminated)
                 {
-                    opponentX = snapshot.Players[other].Position.X;
+                    var otherPlayer = snapshot.Players[other];
+                    if (IsInputLocked() && _playback is not null &&
+                        MovementPlayback.FindMovementEvent(_playback.Events, otherPlayer.PlayerId) is { } otherMoved)
+                    {
+                        otherPlayer = MovementPlayback.InterpolatePlayer(
+                            otherPlayer,
+                            otherMoved,
+                            presentationTick,
+                            _playback.LockTicks,
+                            _settings.Accessibility.ReduceMotion);
+                    }
+
+                    opponentX = otherPlayer.Position.X;
                     break;
                 }
             }
@@ -2043,8 +2102,9 @@ public partial class Main : Node2D
                 var tip1 = bowCenter + perp;
                 var tip2 = bowCenter - perp;
                 DrawLine(tip1, tip2, weaponColor, width: 3f);
-                DrawLine(tip1, weaponPos, Colors.LightGoldenrodYellow, width: 1.5f);
-                DrawLine(tip2, weaponPos, Colors.LightGoldenrodYellow, width: 1.5f);
+                var bowstringColor = new Color(0.98f, 0.98f, 0.82f);
+                DrawLine(tip1, weaponPos, bowstringColor, width: 1.5f);
+                DrawLine(tip2, weaponPos, bowstringColor, width: 1.5f);
             }
             else if (weapon.Kind == CosmeticAccentKind.Ordnance)
             {
