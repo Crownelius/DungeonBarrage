@@ -59,7 +59,10 @@ pub mod types;
 pub mod victory;
 
 pub use error::{CharacterRejection, SimError, SimResult};
-pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSITION_SCALE};
+pub use fixed::{
+    BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, PLAYER_COLLISION_RADIUS,
+    POSITION_SCALE, player_collision_center, player_collision_circle,
+};
 
 /// Version of the simulation rules.
 ///
@@ -67,10 +70,12 @@ pub use fixed::{BASE_MELEE_RANGE, BODY_WIDTH, FIXED_TICK_RATE, FixedPoint, POSIT
 /// a change to the canonical encoding. Every match records the version it ran under so
 /// old replays stay interpretable (`PLATFORM_STRATEGY.md` §6).
 ///
-/// Version 7 drops character kits from the match-create/command envelope: every fighter is
-/// the one crow, equipped items are ammunition, and stacked structures collapse when their
-/// support is destroyed. Version 6 remains the kit-envelope compatibility boundary.
-pub const SIMULATION_VERSION: u32 = 7;
+/// Version 9 makes `BODY_WIDTH` the player-collider diameter, centres that collider above
+/// the standing pivot, and uses the same centre for projectile launch, preview, and bot aim.
+/// Version 8 adds a crown/anklet trinket to the loadout and a charge-gated special.
+/// Version 7 dropped kits: every fighter is the crow; items are ammunition; stacked
+/// structures collapse when their support is destroyed.
+pub const SIMULATION_VERSION: u32 = 9;
 
 /// Version of the gameplay content tables (items, maps, modes).
 ///
@@ -78,7 +83,12 @@ pub const SIMULATION_VERSION: u32 = 7;
 /// that effect carried `magnitude_secondary: 0`, which `displacement.rs` treats as "no
 /// radius test at all" rather than its documented "primary target only", so every shot
 /// shoved every opponent a flat 8 cells regardless of where the shell landed.
-pub const CONTENT_VERSION: u32 = 4;
+/// Version 5 is eight ranged, eight one-shot secondaries, eight melee skins, and eight
+/// charge-gated crowns/anklets.
+/// Version 6 is Melee-style stages (durable main platform plus stacked perches), crow
+/// health 280, and smaller craters so one throw cannot delete a tower and the void in
+/// the same shot.
+pub const CONTENT_VERSION: u32 = 6;
 
 /// Version of the wire protocol.
 pub const PROTOCOL_VERSION: u32 = 1;

@@ -1,12 +1,12 @@
 {
   "fixtureSchemaVersion": 1,
   "id": "horizontal-test-duel-v1",
-  "purpose": "Real map and loadout: nonzero movement, one projectile, and a terminal authoritative outcome. This fixture no longer hands a turn over -- its own 15%-power 45-degree lob craters the shooter's platform -- so turn-handover behaviour is proved on a playable map instead.",
+  "purpose": "Real map and loadout: nonzero movement, one projectile that deals damage and hands the turn over. CONTENT_VERSION 6 craters no longer dump the shooter into the void on this 15% lob.",
   "versions": {
     "abiVersion": 1,
     "clientContractVersion": 1,
-    "simulationVersion": 7,
-    "contentVersion": 4
+    "simulationVersion": 9,
+    "contentVersion": 6
   },
   "createRequestFile": "create-request.json",
   "createResponseFile": "responses/create.json",
@@ -25,7 +25,7 @@
     "activePlayerId": "a-local-player",
     "playerCount": 2,
     "blockCount": 8,
-    "stateHash": "5ff7b9a3a97f7d91"
+    "stateHash": "1028333c8a2e9f0f"
   },
   "steps": [
     {
@@ -37,7 +37,7 @@
         "postGeneration": 1,
         "postTurnNumber": 1,
         "postActivePlayerId": "a-local-player",
-        "postStateHash": "4610d8c64f1670b9",
+        "postStateHash": "b0e9ba84389a6797",
         "minimumActorDistanceMoved": 1,
         "minimumProjectileTraces": 0,
         "minimumProjectileSamples": 0,
@@ -52,22 +52,22 @@
         "disposition": "accepted",
         "preGeneration": 1,
         "postGeneration": 2,
-        "postTurnNumber": 1,
-        "postActivePlayerId": "a-local-player",
-        "postStateHash": "1e5dff46164b909b",
+        "postTurnNumber": 2,
+        "postActivePlayerId": "b-local-bot",
+        "postStateHash": "682f0e2a57b7debd",
         "minimumActorDistanceMoved": 0,
         "minimumProjectileTraces": 1,
         "minimumProjectileSamples": 2,
-        "minimumDamageEvents": 0,
+        "minimumDamageEvents": 1,
         "minimumTerrainCellsRemoved": 0
       }
     }
   ],
   "final": {
     "snapshotGeneration": 2,
-    "turnNumber": 1,
-    "activePlayerId": "a-local-player",
-    "stateHash": "1e5dff46164b909b",
+    "turnNumber": 2,
+    "activePlayerId": "b-local-bot",
+    "stateHash": "682f0e2a57b7debd",
     "stateChangedFromInitial": true
   }
 }

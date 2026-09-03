@@ -292,6 +292,9 @@ pub fn jump(state: &mut SimulationState, player_id: &str) -> SimResult<i32> {
     if let Some(player) = state.player_mut(player_id) {
         player.position = position;
     }
+    if risen > 0 {
+        state.movement_remaining = state.movement_remaining.saturating_sub(POSITION_SCALE);
+    }
     Ok(risen)
 }
 
@@ -394,6 +397,7 @@ mod tests {
             position,
             loadout: crate::types::Loadout::launch_default(),
             ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }

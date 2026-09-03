@@ -89,7 +89,7 @@
 //! (`docs/MODULE_OWNERSHIP.md` rule 4).
 
 use crate::character;
-use crate::fixed::{self, BODY_WIDTH, FixedPoint};
+use crate::fixed::{self, FixedPoint, PLAYER_COLLISION_RADIUS};
 use crate::hash;
 use crate::resolve;
 use crate::rng::Rng;
@@ -188,8 +188,12 @@ pub fn validate_ability(
     }
     let ability = &item.ability;
 
-    // 8. Finite items require remaining ammunition.
-    if !player.ammo_for(command.slot).can_spend() {
+    // 8. Combat items spend ammo. Crowns and anklets spend a full trinket charge.
+    if command.slot == AbilitySlot::Trinket {
+        if player.trinket_charge < crate::types::TRINKET_CHARGE_FULL {
+            return Err(CommandRejection::GaugeNotReady);
+        }
+    } else if !player.ammo_for(command.slot).can_spend() {
         return Err(CommandRejection::OutOfAmmo);
     }
 
@@ -205,6 +209,9 @@ pub fn validate_ability(
         return Err(CommandRejection::InputOutOfRange);
     }
     if command.power_basis_points < 0 || command.power_basis_points > 10_000 {
+        return Err(CommandRejection::InputOutOfRange);
+    }
+    if command.power_basis_points > max_launch_power(state) {
         return Err(CommandRejection::InputOutOfRange);
     }
 
@@ -295,7 +302,11 @@ fn resolve_ability(
     // Spending ammo and marking the attack are unconditional consequences of a
     // validated command being committed, independent of what the attack goes on to hit.
     if let Some(actor) = state.player_mut(&command.player_id) {
-        actor.spend_ammo(command.slot);
+        if command.slot == AbilitySlot::Trinket {
+            actor.trinket_charge = 0;
+        } else {
+            actor.spend_ammo(command.slot);
+        }
     }
     state.has_attacked_this_turn = true;
 
@@ -330,7 +341,7 @@ fn resolve_ability(
             let strikes = ability.strikes_per_turn.max(1);
             for sequence in 0..u32::from(strikes) {
                 let input = BallisticInput {
-                    origin: actor_position,
+                    origin: fixed::player_collision_center(actor_position),
                     angle_millidegrees: command.angle_millidegrees,
                     power_basis_points: command.power_basis_points,
                     wind_per_tick: state.wind_per_tick,
@@ -351,7 +362,10 @@ fn resolve_ability(
                     .players
                     .iter()
                     .filter(|p| !p.is_eliminated() && p.id != command.player_id)
-                    .map(|p| (p.id.clone(), p.position, BODY_WIDTH))
+                    .map(|p| {
+                        let (center, radius) = fixed::player_collision_circle(p.position);
+                        (p.id.clone(), center, radius)
+                    })
                     .collect();
 
                 let result = crate::ballistics::integrate(
@@ -382,9 +396,12 @@ fn resolve_ability(
                         .players
                         .iter()
                         .filter(|p| p.id != command.player_id && !p.is_eliminated())
-                        .filter(|p| fixed::within_radius(p.position, impact_position, BODY_WIDTH))
-                        .min_by_key(|p| fixed::distance_squared(p.position, impact_position))
-                        .map(|p| p.id.clone());
+                        .map(|player| (player, fixed::player_collision_center(player.position)))
+                        .filter(|(_, center)| {
+                            fixed::within_radius(*center, impact_position, PLAYER_COLLISION_RADIUS)
+                        })
+                        .min_by_key(|(_, center)| fixed::distance_squared(*center, impact_position))
+                        .map(|(player, _)| player.id.clone());
 
                     if let Some(target_id) = direct_target {
                         let crit = resolve_crit_for_target(
@@ -637,18 +654,43 @@ fn resolve_crit_for_target(
     roll_crit(rng, ability.crit_chance_basis_points)
 }
 
+/// Maximum legal launch power this turn after walking. A 20-cell aim line is 100% of this
+/// value. Floored at 10% so a full-move turn can still take a weak shot.
+#[must_use]
+pub fn max_launch_power(state: &SimulationState) -> i32 {
+    let allowance = crate::character::fighter().movement.per_turn();
+    if allowance <= 0 {
+        return 10_000;
+    }
+    let remaining = state.movement_remaining.max(0);
+    let scaled = i64::from(10_000)
+        .saturating_mul(i64::from(remaining))
+        .checked_div(i64::from(allowance))
+        .unwrap_or(10_000);
+    i32::try_from(scaled).unwrap_or(10_000).max(1_000)
+}
+
 /// Awards gauge to the actor for this action, per `CHARACTERS.md` §2's per-point rates
 /// (`GAUGE_PER_DAMAGE_DEALT`, `GAUGE_PER_DAMAGE_TAKEN`, `GAUGE_PER_HEALED`), routed through
 /// [`PlayerState::add_gauge`] so the per-action and full-gauge caps are enforced by the one
 /// reviewed implementation of that cap rather than a second copy of it here.
 fn award_gauge(
-    _state: &mut SimulationState,
-    _player_id: &str,
-    _dealt: u32,
+    state: &mut SimulationState,
+    player_id: &str,
+    dealt: u32,
     _taken: u32,
     _healed: u32,
 ) {
-    // This envelope spends item ammo; it does not award a special gauge.
+    if dealt == 0 {
+        return;
+    }
+    if let Some(actor) = state.player_mut(player_id) {
+        // Two damaging hits fill a crown or anklet.
+        actor.trinket_charge = actor
+            .trinket_charge
+            .saturating_add(5_000)
+            .min(crate::types::TRINKET_CHARGE_FULL);
+    }
 }
 
 /// Resolves the point a [`StrikeAttack`] acts at and enforces the direct reach check.
@@ -972,7 +1014,7 @@ mod tests {
             phase: MatchPhase::AimingAndSelection,
             active_player_id: "attacker".to_string(),
             wind_per_tick: 0,
-            movement_remaining: 0,
+            movement_remaining: crate::character::fighter().movement.per_turn(),
             has_attacked_this_turn: false,
             terrain: empty_terrain(),
             players: vec![attacker, defender],
@@ -1001,7 +1043,7 @@ mod tests {
             phase: MatchPhase::AimingAndSelection,
             active_player_id: active_player_id.to_string(),
             wind_per_tick: 0,
-            movement_remaining: 0,
+            movement_remaining: crate::character::fighter().movement.per_turn(),
             has_attacked_this_turn: false,
             terrain: empty_terrain(),
             players,
@@ -1356,6 +1398,21 @@ mod tests {
 
         assert!(validate_ability(&state, &low).is_ok());
         assert!(validate_ability(&state, &high).is_ok());
+    }
+
+    #[test]
+    fn walking_lowers_the_maximum_legal_shot_power() {
+        let mut state = base_state();
+        state.movement_remaining = 0;
+        let mut full = ability_command("cmd-full", Some("defender"));
+        full.power_basis_points = 10_000;
+        assert_eq!(
+            validate_ability(&state, &full),
+            Err(CommandRejection::InputOutOfRange)
+        );
+        let mut weak = ability_command("cmd-weak", Some("defender"));
+        weak.power_basis_points = 1_000;
+        assert!(validate_ability(&state, &weak).is_ok());
     }
 
     #[test]
@@ -2139,8 +2196,13 @@ mod tests {
             if let Some(defender) = state.player_mut("defender") {
                 defender.health = 999;
             }
+            if let Some(attacker) = state.player_mut("attacker")
+                && let Some(ammo) = attacker.ammo.get_mut(AbilitySlot::Basic.index())
+            {
+                ammo.remaining = 3;
+            }
             let mut command = ability_command(id, Some("defender"));
-            command.slot = AbilitySlot::BasicAlt;
+            command.slot = AbilitySlot::Basic;
             let result = apply_ability(&mut state, &command);
             assert!(
                 matches!(result, CommandResult::Accepted(_)),

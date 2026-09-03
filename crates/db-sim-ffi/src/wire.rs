@@ -135,6 +135,7 @@ struct LoadoutDto {
     main: String,
     secondary: String,
     melee_tool: String,
+    trinket: String,
 }
 
 impl MatchPlayerDto {
@@ -146,6 +147,7 @@ impl MatchPlayerDto {
                 main: self.loadout.main,
                 secondary: self.loadout.secondary,
                 melee_tool: self.loadout.melee_tool,
+                trinket: self.loadout.trinket,
             },
             appearance: self.appearance.into_core(),
         }
@@ -177,6 +179,7 @@ pub(crate) enum MatchCommandDto {
     Ability(AbilityCommandDto),
     PassiveChoice(PassiveChoiceCommandDto),
     Pass(PassCommandDto),
+    Jump(JumpCommandDto),
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +261,24 @@ enum PassKindDto {
     Pass,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct JumpCommandDto {
+    schema_version: u32,
+    command_id: String,
+    player_id: String,
+    expected_turn_number: u32,
+    expected_snapshot_generation: u64,
+    #[serde(rename = "kind")]
+    _kind: JumpKindDto,
+}
+
+#[derive(Debug, Deserialize)]
+enum JumpKindDto {
+    #[serde(rename = "jump")]
+    Jump,
+}
+
 impl MatchCommandDto {
     pub(crate) const fn schema_version(&self) -> u32 {
         match self {
@@ -265,6 +286,7 @@ impl MatchCommandDto {
             Self::Ability(command) => command.schema_version,
             Self::PassiveChoice(command) => command.schema_version,
             Self::Pass(command) => command.schema_version,
+            Self::Jump(command) => command.schema_version,
         }
     }
 
@@ -343,6 +365,21 @@ impl MatchCommandDto {
                 expected_snapshot_generation,
                 kind: MatchCommandKind::Pass,
             },
+            Self::Jump(JumpCommandDto {
+                schema_version,
+                command_id,
+                player_id,
+                expected_turn_number,
+                expected_snapshot_generation,
+                _kind: _,
+            }) => MatchCommand {
+                schema_version,
+                command_id,
+                player_id,
+                expected_turn_number,
+                expected_snapshot_generation,
+                kind: MatchCommandKind::Jump,
+            },
         }
     }
 }
@@ -383,6 +420,7 @@ pub(crate) enum AbilitySlotDto {
     Main,
     Secondary,
     MeleeTool,
+    Trinket,
 }
 
 impl AbilitySlotDto {
@@ -391,6 +429,7 @@ impl AbilitySlotDto {
             Self::Main => AbilitySlot::Basic,
             Self::Secondary => AbilitySlot::BasicAlt,
             Self::MeleeTool => AbilitySlot::Special,
+            Self::Trinket => AbilitySlot::Trinket,
         }
     }
 }
@@ -708,8 +747,11 @@ struct WirePlayer {
     is_eliminated: bool,
     max_health: u16,
     position: WirePosition,
+    collision_center: WirePosition,
+    collision_radius: i32,
     loadout: WireLoadout,
     ammo: [WireAmmo; 3],
+    trinket_charge: u16,
     statuses: Vec<WireStatus>,
     appearance: WireAppearance,
 }
@@ -720,6 +762,7 @@ struct WireLoadout {
     main: String,
     secondary: String,
     melee_tool: String,
+    trinket: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -739,16 +782,20 @@ impl WirePlayer {
             is_eliminated: player.is_eliminated,
             max_health: player.max_health,
             position: WirePosition::from_core(player.position),
+            collision_center: WirePosition::from_core(player.collision_center),
+            collision_radius: player.collision_radius,
             loadout: WireLoadout {
                 main: player.loadout.main.clone(),
                 secondary: player.loadout.secondary.clone(),
                 melee_tool: player.loadout.melee_tool.clone(),
+                trinket: player.loadout.trinket.clone(),
             },
             ammo: [
                 WireAmmo::from_core(snapshot_ammo(player, 0)),
                 WireAmmo::from_core(snapshot_ammo(player, 1)),
                 WireAmmo::from_core(snapshot_ammo(player, 2)),
             ],
+            trinket_charge: player.trinket_charge,
             statuses: player.statuses.iter().map(WireStatus::from_core).collect(),
             appearance: WireAppearance::from_core(&player.appearance),
         }
@@ -1591,6 +1638,7 @@ enum WireBotAction {
         passive_id: String,
     },
     Pass,
+    Jump,
 }
 
 impl WireBotDecision {
@@ -1621,6 +1669,7 @@ impl WireBotAction {
             },
             MatchCommandKind::PassiveChoice { passive_id } => Self::PassiveChoice { passive_id },
             MatchCommandKind::Pass => Self::Pass,
+            MatchCommandKind::Jump => Self::Jump,
         }
     }
 }

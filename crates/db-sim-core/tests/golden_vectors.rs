@@ -76,6 +76,7 @@ fn player(
         position,
         loadout: db_sim_core::types::Loadout::launch_default(),
         ammo: db_sim_core::types::DEFAULT_AMMO,
+        trinket_charge: 0,
         statuses: Vec::new(),
         appearance: Appearance::default(),
     }
@@ -256,7 +257,14 @@ fn golden_all_passes_terminates_identically() {
     // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
     // damage race decides the match. `content_version` is hashed, so every vector moves.
     // Previous value was "f66401193708e515".
-    assert_vector("all_passes", &actual, "fc8cf0f4ba111b74");
+    // REGENERATED 2026-09-01 at SIMULATION_VERSION 8 / CONTENT_VERSION 5: loadout.trinket,
+    // trinket_charge, and the eight-per-slot catalog. Previous value was "fc8cf0f4ba111b74".
+    // REGENERATED 2026-09-01 at CONTENT_VERSION 6: Melee-style stages, crow 280 HP, smaller
+    // craters. Previous value was "894d5b42f7ec2cc6".
+    // REGENERATED 2026-09-03 at SIMULATION_VERSION 9: BODY_WIDTH is now the player
+    // collider diameter, and projectile origins/collision use the visible body's centre.
+    // Previous value was "1d9f133f0916b2fb".
+    assert_vector("all_passes", &actual, "c37e748725499388");
 }
 
 #[test]
@@ -284,7 +292,13 @@ fn golden_walking_duel() {
     // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
     // damage race decides the match. `content_version` is hashed, so every vector moves.
     // Previous value was "ddb193455a403319".
-    assert_vector("walking_duel", &actual, "8831e091d2b5e054");
+    // REGENERATED 2026-09-01 at SIMULATION_VERSION 8 / CONTENT_VERSION 5: loadout.trinket,
+    // trinket_charge, and the eight-per-slot catalog. Previous value was "8831e091d2b5e054".
+    // REGENERATED 2026-09-01 at CONTENT_VERSION 6: Melee-style stages, crow 280 HP, smaller
+    // craters. Previous value was "c3727217929d598e".
+    // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
+    // collider correction. Previous value was "f687dc12c3e0e33f".
+    assert_vector("walking_duel", &actual, "030efa1266831350");
 }
 
 #[test]
@@ -329,7 +343,13 @@ fn golden_firing_duel() {
     // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
     // damage race decides the match. `content_version` is hashed, so every vector moves.
     // Previous value was "9ea57823cddeb8ae".
-    assert_vector("firing_duel", &actual, "13df21bcfee32f12");
+    // REGENERATED 2026-09-01 at SIMULATION_VERSION 8 / CONTENT_VERSION 5: loadout.trinket,
+    // trinket_charge, and the eight-per-slot catalog. Previous value was "13df21bcfee32f12".
+    // REGENERATED 2026-09-01 at CONTENT_VERSION 6: Melee-style stages, crow 280 HP, smaller
+    // craters. Previous value was "6f5278d82e4f0cff".
+    // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
+    // collider correction. Previous value was "ee07dc04a8821e68".
+    assert_vector("firing_duel", &actual, "5db94ba8baa5a1e4");
 }
 
 #[test]
@@ -369,7 +389,13 @@ fn golden_mixed_actions() {
     // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
     // damage race decides the match. `content_version` is hashed, so every vector moves.
     // Previous value was "c4911a24c765b3d0".
-    assert_vector("mixed_actions", &actual, "0aec335ec568cf3e");
+    // REGENERATED 2026-09-01 at SIMULATION_VERSION 8 / CONTENT_VERSION 5: loadout.trinket,
+    // trinket_charge, and the eight-per-slot catalog. Previous value was "0aec335ec568cf3e".
+    // REGENERATED 2026-09-01 at CONTENT_VERSION 6: Melee-style stages, crow 280 HP, smaller
+    // craters. Previous value was "f9b14740c92e84a7".
+    // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
+    // collider correction. Previous value was "701f6a98d4adda2d".
+    assert_vector("mixed_actions", &actual, "d447474ad2fda386");
 }
 
 #[test]
@@ -402,7 +428,13 @@ fn golden_low_health_duel_reaches_a_decision() {
     // from eight cells to two, so a direct hit no longer clears a four-cell perch and the
     // damage race decides the match. `content_version` is hashed, so every vector moves.
     // Previous value was "f1f76f9d8e9c1252".
-    assert_vector("low_health_duel", &actual, "3e201b123e110a0b");
+    // REGENERATED 2026-09-01 at SIMULATION_VERSION 8 / CONTENT_VERSION 5: loadout.trinket,
+    // trinket_charge, and the eight-per-slot catalog. Previous value was "3e201b123e110a0b".
+    // REGENERATED 2026-09-01 at CONTENT_VERSION 6: Melee-style stages, crow 280 HP, smaller
+    // craters. Previous value was "127a3ee345fbe462".
+    // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
+    // collider correction. Previous value was "6a673f45206d2d38".
+    assert_vector("low_health_duel", &actual, "59a874e1d6621f16");
 }
 
 #[test]

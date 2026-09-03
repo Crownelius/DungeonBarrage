@@ -47,7 +47,7 @@ public sealed class CommandContractTests
             expectedSnapshotGeneration: 1,
             slot: ClientAbilitySlot.Main,
             angleMillidegrees: 45_000,
-            powerBasisPoints: 1_500,
+            powerBasisPoints: 2_500,
             targetPlayerId: null,
             secondaryTargetPlayerId: null);
 

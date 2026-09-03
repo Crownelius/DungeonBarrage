@@ -192,11 +192,7 @@ impl From<AbilityPreviewRequestDto> for AbilityPreviewRequest {
             schema_version,
             expected_snapshot_generation,
             player_id,
-            slot: match slot {
-                AbilitySlotDto::Main => AbilitySlot::Basic,
-                AbilitySlotDto::Secondary => AbilitySlot::BasicAlt,
-                AbilitySlotDto::MeleeTool => AbilitySlot::Special,
-            },
+            slot: slot.into_core(),
             angle_millidegrees,
             power_basis_points,
             target_player_id,
@@ -256,6 +252,7 @@ struct LoadoutDto {
     main: String,
     secondary: String,
     melee_tool: String,
+    trinket: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,6 +346,19 @@ enum AbilitySlotDto {
     Secondary,
     #[serde(rename = "meleeTool")]
     MeleeTool,
+    #[serde(rename = "trinket")]
+    Trinket,
+}
+
+impl AbilitySlotDto {
+    const fn into_core(self) -> AbilitySlot {
+        match self {
+            Self::Main => AbilitySlot::Basic,
+            Self::Secondary => AbilitySlot::BasicAlt,
+            Self::MeleeTool => AbilitySlot::Special,
+            Self::Trinket => AbilitySlot::Trinket,
+        }
+    }
 }
 
 fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -380,6 +390,7 @@ impl From<MatchPlayerConfigDto> for MatchPlayerConfig {
                 main: value.loadout.main,
                 secondary: value.loadout.secondary,
                 melee_tool: value.loadout.melee_tool,
+                trinket: value.loadout.trinket,
             },
             appearance: Appearance {
                 skin_id: value.appearance.skin_id,
@@ -426,11 +437,7 @@ impl From<MatchCommandDto> for MatchCommand {
                 expected_turn_number,
                 expected_snapshot_generation,
                 kind: MatchCommandKind::Ability {
-                    slot: match slot {
-                        AbilitySlotDto::Main => AbilitySlot::Basic,
-                        AbilitySlotDto::Secondary => AbilitySlot::BasicAlt,
-                        AbilitySlotDto::MeleeTool => AbilitySlot::Special,
-                    },
+                    slot: slot.into_core(),
                     angle_millidegrees,
                     power_basis_points,
                     target_player_id,

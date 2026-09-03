@@ -242,10 +242,16 @@ pub struct PlayerSnapshot {
     pub max_health: u16,
     /// Authoritative fixed-point position.
     pub position: PositionSnapshot,
+    /// Centre of the authoritative projectile collision circle.
+    pub collision_center: PositionSnapshot,
+    /// Radius of the authoritative projectile collision circle, in fixed-point units.
+    pub collision_radius: i32,
     /// Equipped item identifiers in slot order.
     pub loadout: crate::types::Loadout,
-    /// Remaining ammunition per slot, in canonical slot order.
+    /// Remaining ammunition per combat slot, in canonical slot order.
     pub ammo: [crate::types::AmmoCounter; 3],
+    /// Charge toward the equipped crown or anklet special. Full is 10_000.
+    pub trinket_charge: u16,
     /// Active statuses in deterministic kind/magnitude/duration order.
     pub statuses: Vec<StatusSnapshot>,
     /// Cosmetic appearance used only by presentation.
@@ -542,8 +548,13 @@ fn snapshot_players(source: &[PlayerState]) -> Vec<PlayerSnapshot> {
             is_eliminated: player.is_eliminated(),
             max_health: player.max_health,
             position: snapshot_position(player.position),
+            collision_center: snapshot_position(crate::fixed::player_collision_center(
+                player.position,
+            )),
+            collision_radius: crate::fixed::PLAYER_COLLISION_RADIUS,
             loadout: player.loadout.clone(),
             ammo: player.ammo,
+            trinket_charge: player.trinket_charge,
             statuses: snapshot_statuses(&player.statuses),
             appearance: snapshot_appearance(&player.appearance),
         })

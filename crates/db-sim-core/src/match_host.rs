@@ -200,6 +200,33 @@ impl MatchHost {
         Ok(travelled)
     }
 
+    /// Hops the active player straight up. Spends one cell of walk allowance when it rises.
+    ///
+    /// # Errors
+    ///
+    /// Propagates failures from [`movement::jump`] and [`movement::settle`].
+    pub fn submit_jump(&mut self, player_id: &str) -> SimResult<i32> {
+        self.status_changes.clear();
+        self.object_changes.clear();
+        if !scheduler::is_accepting_commands(&self.state)
+            || player_id != self.state.active_player_id
+        {
+            return Ok(0);
+        }
+        let risen = movement::jump(&mut self.state, player_id)?;
+        // Crows have weight. A hop that skipped settle left them hanging at the apex so
+        // they could shoot from mid-air; gravity runs in the same action, matching walk.
+        movement::settle(&mut self.state)?;
+        let actor_was_eliminated = self
+            .state
+            .player(player_id)
+            .is_some_and(crate::types::PlayerState::is_eliminated);
+        if actor_was_eliminated && self.state.active_player_id == player_id {
+            self.finish_turn(TurnEndReason::Eliminated)?;
+        }
+        Ok(risen)
+    }
+
     /// Submits an ability command and advances the match.
     ///
     /// Validation, damage, effects, and terrain all resolve inside [`command::apply_ability`]
@@ -405,6 +432,7 @@ mod tests {
     use super::*;
     use crate::fixed::FixedPoint;
     use crate::map;
+    use crate::movement;
     use crate::types::{
         AbilitySlot, Appearance, PersistentObject, PersistentObjectKind,
         PersistentObjectRemovalCause, PersistentObjectTransition, PlayerState,
@@ -419,6 +447,7 @@ mod tests {
             position,
             loadout: crate::types::Loadout::launch_default(),
             ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -548,6 +577,36 @@ mod tests {
         };
         assert!(travelled > 0, "some distance must be covered");
         assert_ne!(before, after, "the character must actually move");
+    }
+
+    #[test]
+    fn a_jump_lands_instead_of_hanging_in_the_air() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let Some(before) = host.state().player(&actor).map(|p| p.position) else {
+            panic!("the active player must exist");
+        };
+        let remaining_before = host.state().movement_remaining;
+
+        let Ok(risen) = host.submit_jump(&actor) else {
+            panic!("jumping must succeed");
+        };
+        assert!(risen > 0, "the hop must actually rise before gravity");
+
+        let Some(after) = host.state().player(&actor).map(|p| p.position) else {
+            panic!("the active player must still exist");
+        };
+        assert_eq!(after.x, before.x, "a vertical hop does not translate");
+        assert!(
+            movement::can_stand_at(host.state(), after),
+            "after a hop the crow must be standing, not floating"
+        );
+        assert!(
+            host.state().movement_remaining < remaining_before,
+            "a successful hop spends walk allowance"
+        );
     }
 
     #[test]

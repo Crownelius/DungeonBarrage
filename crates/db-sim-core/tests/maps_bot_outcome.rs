@@ -19,7 +19,8 @@ use db_sim_core::match_session::{
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig, create_match};
 use db_sim_core::types::{
-    AbilityCommand, AbilitySlot, Appearance, CommandResult, Loadout, MatchOutcome, MatchPhase,
+    AbilityCommand, AbilitySlot, Appearance, CommandRejection, CommandResult, Loadout,
+    MatchOutcome, MatchPhase,
 };
 
 fn crow_player(id: &str, team: u8) -> MatchPlayerConfig {
@@ -76,6 +77,10 @@ fn submit_bot_kind(host: &mut MatchHost, kind: MatchCommandKind, command_id: &st
         MatchCommandKind::Pass | MatchCommandKind::PassiveChoice { .. } => {
             host.pass_turn().expect("bot pass must be legal");
         }
+        MatchCommandKind::Jump => {
+            host.submit_jump(&player_id)
+                .expect("bot jump must be a legal host submission");
+        }
     }
 }
 
@@ -119,9 +124,11 @@ fn run_bot_until_terminal(host: &mut MatchHost, map_id: &str) {
         submit_bot_kind(host, kind, &command_id);
         steps = steps.saturating_add(1);
         assert!(
-            steps < 120,
-            "{map_id}: a bot duel must reach a terminal outcome; still {:?}",
-            host.outcome()
+            steps < 2_000,
+            "{map_id}: a bot duel must reach a terminal outcome; still {:?} turn={} phase={:?} steps={steps}",
+            host.outcome(),
+            host.state().turn_number,
+            host.state().phase,
         );
     }
 
@@ -209,6 +216,7 @@ fn loadout_equipping(item: &db_sim_core::types::ItemDefinition) -> Loadout {
         AbilitySlot::Basic => loadout.main = item.id.to_owned(),
         AbilitySlot::BasicAlt => loadout.secondary = item.id.to_owned(),
         AbilitySlot::Special => loadout.melee_tool = item.id.to_owned(),
+        AbilitySlot::Trinket => loadout.trinket = item.id.to_owned(),
     }
     loadout
 }
@@ -251,6 +259,17 @@ fn every_catalog_item_fires_with_no_named_target_on_the_aim_path() {
         let result = host
             .submit_ability(&command)
             .unwrap_or_else(|_| panic!("{} submit must not fault the host", item.id));
+        if item.slot == AbilitySlot::Trinket {
+            assert!(
+                matches!(
+                    result,
+                    CommandResult::Rejected(CommandRejection::GaugeNotReady)
+                ),
+                "{} must refuse an uncharged crown/anklet; got {result:?}",
+                item.id
+            );
+            continue;
+        }
         assert!(
             matches!(result, CommandResult::Accepted(_)),
             "{} with target_player_id=None was {result:?}; Godot aim always sends a null target",

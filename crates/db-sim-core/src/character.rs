@@ -57,14 +57,14 @@ const RAMSHOT_KNOCKBACK_CELLS: i32 = 2;
 ///
 /// Named so the ability's terrain profile and [`RAMSHOT_KNOCKBACK`]'s falloff radius cannot
 /// drift apart: the shove is meant to be the crater's shove.
-const RAMSHOT_CRATER_RADIUS_CELLS: u16 = 6;
+const RAMSHOT_CRATER_RADIUS_CELLS: u16 = 3;
 
 /// [`RAMSHOT_CRATER_RADIUS_CELLS`] in fixed-point units, for the knockback falloff.
 ///
 /// The assertion below is what actually keeps the two in step, since the terrain profile
 /// wants cells and the falloff radius wants fixed-point.
-const RAMSHOT_CRATER_RADIUS_FIXED: i32 = 6 * POSITION_SCALE;
-const _: () = assert!(RAMSHOT_CRATER_RADIUS_CELLS == 6);
+const RAMSHOT_CRATER_RADIUS_FIXED: i32 = 3 * POSITION_SCALE;
+const _: () = assert!(RAMSHOT_CRATER_RADIUS_CELLS == 3);
 
 const FROSTFALL_CHILL: SpecialEffect = SpecialEffect {
     trigger: EffectTrigger::OnImpact,
@@ -72,14 +72,6 @@ const FROSTFALL_CHILL: SpecialEffect = SpecialEffect {
     magnitude: 2 * BODY_WIDTH,
     magnitude_secondary: 0,
     duration_turns: 1,
-};
-
-const BLOOD_MAUL_BACKLASH: SpecialEffect = SpecialEffect {
-    trigger: EffectTrigger::OnFire,
-    kind: EffectKind::SelfDamage,
-    magnitude: 14,
-    magnitude_secondary: 0,
-    duration_turns: 0,
 };
 
 const RAMSHOT_CANNON_ABILITY: AbilityDefinition = AbilityDefinition {
@@ -117,7 +109,7 @@ const FROSTFALL_MORTAR_ABILITY: AbilityDefinition = AbilityDefinition {
         wind_scale_basis_points: 10_000,
         max_ticks: PROJECTILE_TIER2_MAX_TICKS,
         bounces: 0,
-        terrain: TerrainProfile::Crater { radius_cells: 8 },
+        terrain: TerrainProfile::Crater { radius_cells: 3 },
     }),
     effects: &[FROSTFALL_CHILL],
 };
@@ -147,7 +139,7 @@ const MOLE_DRILL_ABILITY: AbilityDefinition = AbilityDefinition {
 const RECURVE_BOW_ABILITY: AbilityDefinition = AbilityDefinition {
     id: "recurve-bow",
     display_name: "Recurve Bow",
-    slot: AbilitySlot::BasicAlt,
+    slot: AbilitySlot::Basic,
     damage_percent: 32,
     crit_damage_percent: 32,
     crit_chance_basis_points: 0,
@@ -163,26 +155,10 @@ const RECURVE_BOW_ABILITY: AbilityDefinition = AbilityDefinition {
     effects: &[],
 };
 
-const LONGSWORD_ABILITY: AbilityDefinition = AbilityDefinition {
-    id: "longsword",
-    display_name: "Longsword",
-    slot: AbilitySlot::BasicAlt,
-    damage_percent: 24,
-    crit_damage_percent: 24,
-    crit_chance_basis_points: 0,
-    strikes_per_turn: 1,
-    attack: Attack::Strike(StrikeAttack {
-        range: 10 * POSITION_SCALE,
-        terrain: TerrainProfile::None,
-        self_damage: 0,
-    }),
-    effects: &[],
-};
-
 const SERVICE_PISTOL_ABILITY: AbilityDefinition = AbilityDefinition {
     id: "service-pistol",
     display_name: "5.7 Service Pistol",
-    slot: AbilitySlot::BasicAlt,
+    slot: AbilitySlot::Basic,
     damage_percent: 26,
     crit_damage_percent: 26,
     crit_chance_basis_points: 0,
@@ -198,59 +174,37 @@ const SERVICE_PISTOL_ABILITY: AbilityDefinition = AbilityDefinition {
     effects: &[],
 };
 
-const TRENCH_SPADE_ABILITY: AbilityDefinition = AbilityDefinition {
-    id: "trench-spade",
-    display_name: "Trench Spade",
-    slot: AbilitySlot::Special,
-    damage_percent: 22,
-    crit_damage_percent: 22,
-    crit_chance_basis_points: 0,
-    strikes_per_turn: 1,
-    attack: Attack::Strike(StrikeAttack {
-        range: RangeTier::Melee.reach(),
-        terrain: TerrainProfile::Dig {
-            radius_cells: 4,
-            length_cells: 6,
-        },
-        self_damage: 0,
-    }),
-    effects: &[],
-};
+const fn melee_ability(id: &'static str, display_name: &'static str) -> AbilityDefinition {
+    AbilityDefinition {
+        id,
+        display_name,
+        slot: AbilitySlot::Special,
+        damage_percent: 22,
+        crit_damage_percent: 22,
+        crit_chance_basis_points: 0,
+        strikes_per_turn: 1,
+        attack: Attack::Strike(StrikeAttack {
+            range: RangeTier::Melee.reach(),
+            terrain: TerrainProfile::Dig {
+                radius_cells: 4,
+                length_cells: 6,
+            },
+            self_damage: 0,
+        }),
+        effects: &[],
+    }
+}
 
-const BLOOD_MAUL_ABILITY: AbilityDefinition = AbilityDefinition {
-    id: "blood-maul",
-    display_name: "Blood Maul",
-    slot: AbilitySlot::Special,
-    damage_percent: 52,
-    crit_damage_percent: 52,
-    crit_chance_basis_points: 0,
-    strikes_per_turn: 1,
-    attack: Attack::Strike(StrikeAttack {
-        range: RangeTier::Melee.reach(),
-        terrain: TerrainProfile::Crater { radius_cells: 2 },
-        self_damage: 14,
-    }),
-    effects: &[BLOOD_MAUL_BACKLASH],
-};
-
-const BREACH_PICK_ABILITY: AbilityDefinition = AbilityDefinition {
-    id: "breach-pick",
-    display_name: "Breach Pick",
-    slot: AbilitySlot::Special,
-    damage_percent: 30,
-    crit_damage_percent: 30,
-    crit_chance_basis_points: 0,
-    strikes_per_turn: 1,
-    attack: Attack::Strike(StrikeAttack {
-        range: RangeTier::Melee.reach(),
-        terrain: TerrainProfile::Dig {
-            radius_cells: 3,
-            length_cells: 4,
-        },
-        self_damage: 0,
-    }),
-    effects: &[],
-};
+const fn melee_item(id: &'static str, display_name: &'static str) -> ItemDefinition {
+    ItemDefinition {
+        id,
+        display_name,
+        slot: AbilitySlot::Special,
+        ammo_policy: AmmoPolicy::Finite,
+        starting_ammo: 4,
+        ability: melee_ability(id, display_name),
+    }
+}
 
 const RAMSHOT_CANNON: ItemDefinition = ItemDefinition {
     id: "ramshot-cannon",
@@ -282,56 +236,288 @@ const MOLE_DRILL: ItemDefinition = ItemDefinition {
 const RECURVE_BOW: ItemDefinition = ItemDefinition {
     id: "recurve-bow",
     display_name: "Recurve Bow",
-    slot: AbilitySlot::BasicAlt,
+    slot: AbilitySlot::Basic,
     ammo_policy: AmmoPolicy::Finite,
     starting_ammo: 5,
     ability: RECURVE_BOW_ABILITY,
 };
 
-const LONGSWORD: ItemDefinition = ItemDefinition {
-    id: "longsword",
-    display_name: "Longsword",
-    slot: AbilitySlot::BasicAlt,
-    ammo_policy: AmmoPolicy::Unlimited,
-    starting_ammo: 0,
-    ability: LONGSWORD_ABILITY,
-};
-
 const SERVICE_PISTOL: ItemDefinition = ItemDefinition {
     id: "service-pistol",
     display_name: "5.7 Service Pistol",
-    slot: AbilitySlot::BasicAlt,
+    slot: AbilitySlot::Basic,
     ammo_policy: AmmoPolicy::Finite,
     starting_ammo: 6,
     ability: SERVICE_PISTOL_ABILITY,
 };
 
-const TRENCH_SPADE: ItemDefinition = ItemDefinition {
-    id: "trench-spade",
-    display_name: "Trench Spade",
-    slot: AbilitySlot::Special,
-    ammo_policy: AmmoPolicy::Finite,
-    starting_ammo: 4,
-    ability: TRENCH_SPADE_ABILITY,
-};
+const TRENCH_SPADE: ItemDefinition = melee_item("trench-spade", "Trench Spade");
 
-const BLOOD_MAUL: ItemDefinition = ItemDefinition {
-    id: "blood-maul",
-    display_name: "Blood Maul",
-    slot: AbilitySlot::Special,
-    ammo_policy: AmmoPolicy::Finite,
-    starting_ammo: 2,
-    ability: BLOOD_MAUL_ABILITY,
-};
+const BLOOD_MAUL: ItemDefinition = melee_item("blood-maul", "Blood Maul");
 
 const BREACH_PICK: ItemDefinition = ItemDefinition {
     id: "breach-pick",
     display_name: "Breach Pick",
     slot: AbilitySlot::Special,
     ammo_policy: AmmoPolicy::Finite,
-    starting_ammo: 3,
-    ability: BREACH_PICK_ABILITY,
+    starting_ammo: 4,
+    ability: melee_ability("breach-pick", "Breach Pick"),
 };
+
+const LINE_REPEATER_ABILITY: AbilityDefinition = AbilityDefinition {
+    id: "line-repeater",
+    display_name: "Line Repeater",
+    slot: AbilitySlot::Basic,
+    damage_percent: 16,
+    crit_damage_percent: 16,
+    crit_chance_basis_points: 0,
+    strikes_per_turn: 4,
+    attack: Attack::Projectile(ProjectileAttack {
+        speed_per_tick: PROJECTILE_TIER3_SPEED,
+        gravity_per_tick: 4,
+        wind_scale_basis_points: 0,
+        max_ticks: PROJECTILE_TIER1_MAX_TICKS,
+        bounces: 0,
+        terrain: TerrainProfile::None,
+    }),
+    effects: &[],
+};
+
+const RETURNING_BOOMERANG_ABILITY: AbilityDefinition = AbilityDefinition {
+    id: "returning-boomerang",
+    display_name: "Returning Boomerang",
+    slot: AbilitySlot::Basic,
+    damage_percent: 28,
+    crit_damage_percent: 28,
+    crit_chance_basis_points: 0,
+    strikes_per_turn: 1,
+    attack: Attack::Projectile(ProjectileAttack {
+        speed_per_tick: PROJECTILE_TIER2_SPEED,
+        gravity_per_tick: 8,
+        wind_scale_basis_points: 4_000,
+        max_ticks: PROJECTILE_TIER2_MAX_TICKS,
+        bounces: 2,
+        terrain: TerrainProfile::Crater { radius_cells: 2 },
+    }),
+    effects: &[],
+};
+
+const TIDE_SPRAYER_PUSH: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnImpact,
+    kind: EffectKind::Push,
+    magnitude: 2 * POSITION_SCALE,
+    magnitude_secondary: 4 * POSITION_SCALE,
+    duration_turns: 0,
+};
+
+const TIDE_SPRAYER_ABILITY: AbilityDefinition = AbilityDefinition {
+    id: "tide-sprayer",
+    display_name: "Tide Sprayer",
+    slot: AbilitySlot::Basic,
+    damage_percent: 18,
+    crit_damage_percent: 18,
+    crit_chance_basis_points: 0,
+    strikes_per_turn: 1,
+    attack: Attack::Projectile(ProjectileAttack {
+        speed_per_tick: PROJECTILE_TIER1_SPEED,
+        gravity_per_tick: PROJECTILE_TIER1_GRAVITY,
+        wind_scale_basis_points: 2_000,
+        max_ticks: PROJECTILE_TIER1_MAX_TICKS,
+        bounces: 0,
+        terrain: TerrainProfile::None,
+    }),
+    effects: &[TIDE_SPRAYER_PUSH],
+};
+
+const LINE_REPEATER: ItemDefinition = ItemDefinition {
+    id: "line-repeater",
+    display_name: "Line Repeater",
+    slot: AbilitySlot::Basic,
+    ammo_policy: AmmoPolicy::Finite,
+    starting_ammo: 4,
+    ability: LINE_REPEATER_ABILITY,
+};
+
+const RETURNING_BOOMERANG: ItemDefinition = ItemDefinition {
+    id: "returning-boomerang",
+    display_name: "Returning Boomerang",
+    slot: AbilitySlot::Basic,
+    ammo_policy: AmmoPolicy::Finite,
+    starting_ammo: 3,
+    ability: RETURNING_BOOMERANG_ABILITY,
+};
+
+const TIDE_SPRAYER: ItemDefinition = ItemDefinition {
+    id: "tide-sprayer",
+    display_name: "Tide Sprayer",
+    slot: AbilitySlot::Basic,
+    ammo_policy: AmmoPolicy::Finite,
+    starting_ammo: 5,
+    ability: TIDE_SPRAYER_ABILITY,
+};
+
+const LONGSWORD: ItemDefinition = melee_item("longsword", "Longsword");
+const CROW_BEAK: ItemDefinition = melee_item("crow-beak", "Crow Beak");
+const IRON_FAN: ItemDefinition = melee_item("iron-fan", "Iron Fan");
+const HOOK_BILL: ItemDefinition = melee_item("hook-bill", "Hook Bill");
+const RUST_CLEAVER: ItemDefinition = melee_item("rust-cleaver", "Rust Cleaver");
+
+const fn shell_of(
+    main: AbilityDefinition,
+    id: &'static str,
+    display_name: &'static str,
+) -> ItemDefinition {
+    let mut ability = main;
+    ability.id = id;
+    ability.display_name = display_name;
+    ability.slot = AbilitySlot::BasicAlt;
+    ItemDefinition {
+        id,
+        display_name,
+        slot: AbilitySlot::BasicAlt,
+        ammo_policy: AmmoPolicy::Finite,
+        starting_ammo: 1,
+        ability,
+    }
+}
+
+const RAMSHOT_SHELL: ItemDefinition =
+    shell_of(RAMSHOT_CANNON_ABILITY, "ramshot-shell", "Ramshot Shell");
+const FROSTFALL_SHELL: ItemDefinition = shell_of(
+    FROSTFALL_MORTAR_ABILITY,
+    "frostfall-shell",
+    "Frostfall Shell",
+);
+const MOLE_CHARGE: ItemDefinition = shell_of(MOLE_DRILL_ABILITY, "mole-charge", "Mole Charge");
+const BOW_BODKIN: ItemDefinition = shell_of(RECURVE_BOW_ABILITY, "bow-bodkin", "Bow Bodkin");
+const PISTOL_MAG: ItemDefinition = shell_of(SERVICE_PISTOL_ABILITY, "pistol-mag", "Pistol Mag");
+const REPEATER_BELT: ItemDefinition =
+    shell_of(LINE_REPEATER_ABILITY, "repeater-belt", "Repeater Belt");
+const BOOMERANG_FINISHER: ItemDefinition = shell_of(
+    RETURNING_BOOMERANG_ABILITY,
+    "boomerang-finisher",
+    "Boomerang Finisher",
+);
+const TIDE_BLADDER: ItemDefinition = shell_of(TIDE_SPRAYER_ABILITY, "tide-bladder", "Tide Bladder");
+
+const EMBER_CROWN_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnImpact,
+    kind: EffectKind::Embers,
+    magnitude: 12,
+    magnitude_secondary: 4 * POSITION_SCALE,
+    duration_turns: 2,
+};
+
+const FROST_CROWN_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnImpact,
+    kind: EffectKind::Chill,
+    magnitude: 2 * BODY_WIDTH,
+    magnitude_secondary: 0,
+    duration_turns: 1,
+};
+
+const GALE_ANKLET_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnImpact,
+    kind: EffectKind::Knockback,
+    magnitude: 2 * POSITION_SCALE,
+    magnitude_secondary: 6 * POSITION_SCALE,
+    duration_turns: 0,
+};
+
+const TIDE_ANKLET_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnImpact,
+    kind: EffectKind::Push,
+    magnitude: 3 * POSITION_SCALE,
+    magnitude_secondary: 6 * POSITION_SCALE,
+    duration_turns: 0,
+};
+
+const fn trinket_ability(
+    id: &'static str,
+    display_name: &'static str,
+    effects: &'static [SpecialEffect],
+) -> AbilityDefinition {
+    AbilityDefinition {
+        id,
+        display_name,
+        slot: AbilitySlot::Trinket,
+        damage_percent: 20,
+        crit_damage_percent: 20,
+        crit_chance_basis_points: 0,
+        strikes_per_turn: 1,
+        attack: Attack::Strike(StrikeAttack {
+            range: RangeTier::Melee.reach(),
+            terrain: TerrainProfile::None,
+            self_damage: 0,
+        }),
+        effects,
+    }
+}
+
+const fn trinket_item(
+    id: &'static str,
+    display_name: &'static str,
+    effects: &'static [SpecialEffect],
+) -> ItemDefinition {
+    ItemDefinition {
+        id,
+        display_name,
+        slot: AbilitySlot::Trinket,
+        ammo_policy: AmmoPolicy::Unlimited,
+        starting_ammo: 0,
+        ability: trinket_ability(id, display_name, effects),
+    }
+}
+
+const SPARK_CROWN_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnFire,
+    kind: EffectKind::GuaranteeCrit,
+    magnitude: 1,
+    magnitude_secondary: 0,
+    duration_turns: 0,
+};
+
+const SPRING_ANKLET_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnFire,
+    kind: EffectKind::Recoil,
+    magnitude: 3 * POSITION_SCALE,
+    magnitude_secondary: 0,
+    duration_turns: 0,
+};
+
+const BURROW_ANKLET_EFFECT: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnFire,
+    kind: EffectKind::Tunnel,
+    magnitude: 12,
+    magnitude_secondary: 20,
+    duration_turns: 0,
+};
+
+const EMBER_CROWN: ItemDefinition =
+    trinket_item("ember-crown", "Ember Crown", &[EMBER_CROWN_EFFECT]);
+const FROST_CROWN: ItemDefinition =
+    trinket_item("frost-crown", "Frost Crown", &[FROST_CROWN_EFFECT]);
+const SPARK_CROWN: ItemDefinition =
+    trinket_item("spark-crown", "Spark Crown", &[SPARK_CROWN_EFFECT]);
+const ROOST_CROWN: ItemDefinition = trinket_item(
+    "roost-crown",
+    "Roost Crown",
+    &[SpecialEffect {
+        trigger: EffectTrigger::OnFire,
+        kind: EffectKind::Heal,
+        magnitude: 24,
+        magnitude_secondary: 0,
+        duration_turns: 0,
+    }],
+);
+const GALE_ANKLET: ItemDefinition =
+    trinket_item("gale-anklet", "Gale Anklet", &[GALE_ANKLET_EFFECT]);
+const TIDE_ANKLET: ItemDefinition =
+    trinket_item("tide-anklet", "Tide Anklet", &[TIDE_ANKLET_EFFECT]);
+const SPRING_ANKLET: ItemDefinition =
+    trinket_item("spring-anklet", "Spring Anklet", &[SPRING_ANKLET_EFFECT]);
+const BURROW_ANKLET: ItemDefinition =
+    trinket_item("burrow-anklet", "Burrow Anklet", &[BURROW_ANKLET_EFFECT]);
 
 /// The one fighter in this envelope.
 pub static CROW: CharacterDefinition = CharacterDefinition {
@@ -354,11 +540,34 @@ pub static LAUNCH_ITEMS: &[ItemDefinition] = &[
     FROSTFALL_MORTAR,
     MOLE_DRILL,
     RECURVE_BOW,
-    LONGSWORD,
     SERVICE_PISTOL,
+    LINE_REPEATER,
+    RETURNING_BOOMERANG,
+    TIDE_SPRAYER,
+    RAMSHOT_SHELL,
+    FROSTFALL_SHELL,
+    MOLE_CHARGE,
+    BOW_BODKIN,
+    PISTOL_MAG,
+    REPEATER_BELT,
+    BOOMERANG_FINISHER,
+    TIDE_BLADDER,
     TRENCH_SPADE,
     BLOOD_MAUL,
     BREACH_PICK,
+    LONGSWORD,
+    CROW_BEAK,
+    IRON_FAN,
+    HOOK_BILL,
+    RUST_CLEAVER,
+    EMBER_CROWN,
+    FROST_CROWN,
+    SPARK_CROWN,
+    ROOST_CROWN,
+    GALE_ANKLET,
+    TIDE_ANKLET,
+    SPRING_ANKLET,
+    BURROW_ANKLET,
 ];
 
 /// Finds the crow by identifier. Unknown ids, including retired kit ids, return [`None`].
@@ -444,7 +653,6 @@ pub fn validate_roster() -> SimResult<()> {
     }
 
     let mut ids = std::collections::HashSet::new();
-    let mut unlimited_count: u32 = 0;
     for definition in LAUNCH_ITEMS {
         if definition.id.is_empty() || !ids.insert(definition.id) {
             return Err(SimError::InvalidCharacter {
@@ -456,19 +664,30 @@ pub fn validate_roster() -> SimResult<()> {
                 reason: CharacterRejection::SlotMismatch,
             });
         }
-        match definition.ammo_policy {
-            AmmoPolicy::Unlimited => {
-                unlimited_count = unlimited_count.saturating_add(1);
-                if definition.id != "longsword" {
-                    return Err(SimError::InvalidRoster);
+        match (definition.slot, definition.ammo_policy) {
+            (AbilitySlot::Trinket, AmmoPolicy::Unlimited) => {
+                if definition.ability.effects.is_empty() {
+                    return Err(SimError::InvalidCharacter {
+                        reason: CharacterRejection::StatOutOfRange,
+                    });
                 }
             }
-            AmmoPolicy::Finite => {
+            (AbilitySlot::BasicAlt, AmmoPolicy::Finite) => {
+                if definition.starting_ammo != 1 {
+                    return Err(SimError::InvalidCharacter {
+                        reason: CharacterRejection::StatOutOfRange,
+                    });
+                }
+            }
+            (_, AmmoPolicy::Finite) => {
                 if definition.starting_ammo == 0 {
                     return Err(SimError::InvalidCharacter {
                         reason: CharacterRejection::StatOutOfRange,
                     });
                 }
+            }
+            (_, AmmoPolicy::Unlimited) => {
+                return Err(SimError::InvalidRoster);
             }
         }
 
@@ -488,11 +707,8 @@ pub fn validate_roster() -> SimResult<()> {
             }
         }
     }
-    if unlimited_count != 1 {
-        return Err(SimError::InvalidRoster);
-    }
     for slot in AbilitySlot::ALL {
-        if items_in_slot(slot).next().is_none() {
+        if items_in_slot(slot).count() != 8 {
             return Err(SimError::InvalidRoster);
         }
     }
@@ -549,21 +765,40 @@ mod tests {
         };
         assert_eq!(ammo, DEFAULT_AMMO);
         assert!(item("ramshot-cannon").is_some());
-        assert!(item("recurve-bow").is_some());
+        assert!(item("ramshot-shell").is_some());
         assert!(item("trench-spade").is_some());
-        let Some(sword) = item("longsword") else {
-            panic!("longsword");
+        assert!(item("ember-crown").is_some());
+        let Some(shell) = item("ramshot-shell") else {
+            panic!("ramshot-shell");
         };
-        assert_eq!(sword.ammo_policy, AmmoPolicy::Unlimited);
+        assert_eq!(shell.starting_ammo, 1);
     }
 
     #[test]
-    fn each_slot_has_at_least_two_items() {
+    fn each_slot_has_eight_items() {
         for slot in AbilitySlot::ALL {
-            assert!(
-                items_in_slot(slot).count() >= 2,
-                "slot {slot:?} needs a picker"
+            assert_eq!(
+                items_in_slot(slot).count(),
+                8,
+                "slot {slot:?} must offer eight picker tiles"
             );
         }
+    }
+
+    #[test]
+    fn every_trinket_has_a_distinct_primary_effect() {
+        let mut kinds = std::collections::HashSet::new();
+        for definition in items_in_slot(AbilitySlot::Trinket) {
+            let Some(effect) = definition.ability.effects.first() else {
+                panic!("{} has no special", definition.id);
+            };
+            assert!(
+                kinds.insert(effect.kind),
+                "{} reuses {:?}; each crown or anklet must charge a unique special",
+                definition.id,
+                effect.kind
+            );
+        }
+        assert_eq!(kinds.len(), 8);
     }
 }

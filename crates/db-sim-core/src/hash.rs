@@ -116,6 +116,7 @@ const fn ability_slot_discriminant(slot: AbilitySlot) -> u8 {
         AbilitySlot::Basic => 0,
         AbilitySlot::BasicAlt => 1,
         AbilitySlot::Special => 2,
+        AbilitySlot::Trinket => 3,
     }
 }
 
@@ -454,8 +455,8 @@ impl Canonical for PersistentObject {
 
 impl Canonical for PlayerState {
     /// Field order: `id`, `team`, `health`, `max_health`, `position`, loadout item ids
-    /// (`main`, `secondary`, `melee_tool`), then each ammo counter (policy tag, remaining,
-    /// maximum) in [`AbilitySlot::ALL`] order, then `statuses` — re-sorted by
+    /// (`main`, `secondary`, `melee_tool`, `trinket`), `trinket_charge`, then each ammo
+    /// counter in [`AbilitySlot::COMBAT`] order, then `statuses` — re-sorted by
     /// [`EffectKind`] here rather than trusted from the field's current order.
     ///
     /// `appearance` is **deliberately never written**: it is cosmetic
@@ -470,7 +471,9 @@ impl Canonical for PlayerState {
         hasher.write_str(&self.loadout.main);
         hasher.write_str(&self.loadout.secondary);
         hasher.write_str(&self.loadout.melee_tool);
-        for slot in AbilitySlot::ALL {
+        hasher.write_str(&self.loadout.trinket);
+        hasher.write_u32(u32::from(self.trinket_charge));
+        for slot in AbilitySlot::COMBAT {
             let ammo = self.ammo_for(slot);
             hasher.write_u8(ammo_policy_discriminant(ammo.policy));
             hasher.write_u32(u32::from(ammo.remaining));
@@ -1164,10 +1167,11 @@ mod tests {
 
     #[test]
     fn known_answer_vector_sample_state() {
-        // REGENERATED 2026-08-31 for SIMULATION_VERSION 7: PlayerState hashes loadout item
-        // ids and ammo counters instead of character_id / passive / special_gauge.
-        // Previous value at version 6 was "1ff6ff01d76463ce".
-        assert_eq!(hash_state(&sample_state()), "7bf6b69b7302408e");
+        // REGENERATED 2026-08-31 for SIMULATION_VERSION 8: loadout.trinket + trinket_charge.
+        // Previous value at version 7 was "7bf6b69b7302408e".
+        // REGENERATED 2026-09-01 for CONTENT_VERSION 6: crow health 280 and hashed content
+        // version. Previous value at version 5 was "cc84d64348b65a1e".
+        assert_eq!(hash_state(&sample_state()), "7452ad5c5c9ebe2e");
     }
 
     #[test]
@@ -1175,9 +1179,11 @@ mod tests {
         let player = sample_player("known-answer-player");
         let mut hasher = CanonicalHasher::new();
         player.write_canonical(&mut hasher);
-        // REGENERATED 2026-08-31 for SIMULATION_VERSION 7 loadout/ammo encoding.
-        // Previous value was "bb84670a6d8b948d".
-        assert_eq!(hasher.finish_hex(), "e76a2cbc302f1017");
+        // REGENERATED 2026-08-31 for SIMULATION_VERSION 8 trinket encoding.
+        // Previous value at version 7 was "e76a2cbc302f1017".
+        // REGENERATED 2026-09-01 for CONTENT_VERSION 6 crow health 280.
+        // Previous value at version 5 was "790ddaea118d9c11".
+        assert_eq!(hasher.finish_hex(), "0c3493d895a34281");
     }
 
     // -----------------------------------------------------------------------------------

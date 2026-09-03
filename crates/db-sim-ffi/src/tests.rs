@@ -169,7 +169,7 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
         );
         assert_eq!(created["snapshot"]["matchId"], "fixture-horizontal-duel-v1");
         assert_eq!(created["snapshot"]["mapId"], "horizontal-test-array");
-        assert_eq!(created["snapshot"]["stateHash"], "5ff7b9a3a97f7d91");
+        assert_eq!(created["snapshot"]["stateHash"], "1028333c8a2e9f0f");
 
         let mut snapshot_buffer = DbOwnedBuffer::empty();
         assert_eq!(
@@ -252,7 +252,7 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             moved["postSnapshot"]["fixedTickRate"],
             db_sim_core::FIXED_TICK_RATE
         );
-        assert_eq!(moved["postStateHash"], "4610d8c64f1670b9");
+        assert_eq!(moved["postStateHash"], "b0e9ba84389a6797");
 
         let (ability_code, mut ability_buffer) = apply(handle, ABILITY_REQUEST);
         assert_eq!(ability_code, status::OK);
@@ -267,8 +267,8 @@ fn shared_fixture_runs_through_the_real_c_abi_with_the_direct_hashes() {
             ability["postSnapshot"]["fixedTickRate"],
             db_sim_core::FIXED_TICK_RATE
         );
-        assert_eq!(ability["postStateHash"], "1e5dff46164b909b");
-        assert_eq!(ability["postSnapshot"]["stateHash"], "1e5dff46164b909b");
+        assert_eq!(ability["postStateHash"], "682f0e2a57b7debd");
+        assert_eq!(ability["postSnapshot"]["stateHash"], "682f0e2a57b7debd");
         assert!(ability["events"].as_array().is_some_and(|events| {
             events
                 .iter()
@@ -336,7 +336,7 @@ fn ffi_create_apply_snapshot_matches_direct_rust_on_the_duel_blocks_path() {
     let direct_after_ability = hash_state(direct.host().state());
 
     let create_json = format!(
-        r#"{{"schemaVersion":1,"matchId":"parity-duel","simulationVersion":{},"contentVersion":{},"match":{{"seed":12345,"mapId":"horizontal-test-array","mode":"turnBased","players":[{{"playerId":"a-local-player","team":0,"loadout":{{"main":"ramshot-cannon","secondary":"recurve-bow","meleeTool":"trench-spade"}},"appearance":{{"skinId":"default","abilitySkinIds":["default","default","default"],"victoryPoseId":"default"}}}},{{"playerId":"b-local-bot","team":1,"loadout":{{"main":"ramshot-cannon","secondary":"recurve-bow","meleeTool":"trench-spade"}},"appearance":{{"skinId":"default","abilitySkinIds":["default","default","default"],"victoryPoseId":"default"}}}}]}}}}"#,
+        r#"{{"schemaVersion":1,"matchId":"parity-duel","simulationVersion":{},"contentVersion":{},"match":{{"seed":12345,"mapId":"horizontal-test-array","mode":"turnBased","players":[{{"playerId":"a-local-player","team":0,"loadout":{{"main":"ramshot-cannon","secondary":"ramshot-shell","meleeTool":"trench-spade","trinket":"ember-crown"}},"appearance":{{"skinId":"default","abilitySkinIds":["default","default","default"],"victoryPoseId":"default"}}}},{{"playerId":"b-local-bot","team":1,"loadout":{{"main":"ramshot-cannon","secondary":"ramshot-shell","meleeTool":"trench-spade","trinket":"ember-crown"}},"appearance":{{"skinId":"default","abilitySkinIds":["default","default","default"],"victoryPoseId":"default"}}}}]}}}}"#,
         db_sim_core::SIMULATION_VERSION,
         db_sim_core::CONTENT_VERSION
     );
@@ -497,7 +497,7 @@ fn command_parser_requires_nullable_fields_and_rejects_unknowns_without_mutation
         let missing_nullable = br#"{"schemaVersion":1,"commandId":"missing-null","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"ability","slot":"basic","angleMillidegrees":45000,"powerBasisPoints":1500}"#;
         let unknown = br#"{"schemaVersion":1,"commandId":"unknown-field","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"pass","dx":1}"#;
         let duplicate = br#"{"schemaVersion":1,"commandId":"duplicate","commandId":"duplicate","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"pass"}"#;
-        let unknown_kind = br#"{"schemaVersion":1,"commandId":"unknown-kind","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"jump"}"#;
+        let unknown_kind = br#"{"schemaVersion":1,"commandId":"unknown-kind","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"flourish"}"#;
         let unknown_slot = br#"{"schemaVersion":1,"commandId":"unknown-slot","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"ability","slot":"ultimate","angleMillidegrees":45000,"powerBasisPoints":1500,"targetPlayerId":null,"secondaryTargetPlayerId":null}"#;
         let float_move = br#"{"schemaVersion":1,"commandId":"float-move","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"move","dx":1.5}"#;
         let trailing = br#"{"schemaVersion":1,"commandId":"trailing","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"pass"} trailing"#;
@@ -550,7 +550,7 @@ fn command_parser_requires_nullable_fields_and_rejects_unknowns_without_mutation
         );
         let snapshot = json_and_free(&mut snapshot_output);
         assert_eq!(snapshot["snapshotGeneration"], 0);
-        assert_eq!(snapshot["stateHash"], "5ff7b9a3a97f7d91");
+        assert_eq!(snapshot["stateHash"], "1028333c8a2e9f0f");
         destroy(handle);
     }
 }
@@ -1228,14 +1228,24 @@ fn roster_returns_the_crow_and_items_with_no_handle_required() {
 
         assert_eq!(roster["schemaVersion"], Value::from(1));
         assert_eq!(roster["fighter"]["id"], Value::from("crow"));
-        assert_eq!(roster["fighter"]["maxHealth"], Value::from(200));
+        assert_eq!(roster["fighter"]["maxHealth"], Value::from(280));
         let items = roster["items"].as_array().expect("items must be an array");
-        assert!(items.len() >= 6, "loadout picker needs multiple items");
+        assert_eq!(items.len(), 32, "eight items in each of four slots");
         let ids: Vec<&str> = items
             .iter()
             .map(|item| item["id"].as_str().expect("id must be a string"))
             .collect();
-        for expected in ["ramshot-cannon", "recurve-bow", "trench-spade", "longsword"] {
+        for expected in [
+            "ramshot-cannon",
+            "recurve-bow",
+            "line-repeater",
+            "returning-boomerang",
+            "ramshot-shell",
+            "trench-spade",
+            "longsword",
+            "ember-crown",
+            "gale-anklet",
+        ] {
             assert!(ids.contains(&expected), "catalog is missing {expected}");
         }
         let ramshot = items
@@ -1254,4 +1264,14 @@ fn roster_null_pointer_is_rejected() {
     unsafe {
         assert_eq!(db_sim_roster(core::ptr::null_mut()), status::NULL_POINTER);
     }
+}
+
+#[test]
+fn bot_jump_decision_stays_a_jump_on_the_wire() {
+    let bytes = wire::serialize_bot_decision(db_sim_core::match_session::MatchCommandKind::Jump)
+        .expect("jump decision must serialize");
+    let value: Value = serde_json::from_slice(&bytes).expect("bot decision must be valid JSON");
+
+    assert_eq!(value["schemaVersion"], Value::from(1));
+    assert_eq!(value["kind"], Value::from("jump"));
 }

@@ -181,20 +181,30 @@ fn plan_turn(
         let Some(ability) = character::equipped_ability(actor, slot) else {
             continue;
         };
-        if !actor.ammo_for(slot).can_spend() {
+        if slot == AbilitySlot::Trinket {
+            if actor.trinket_charge < crate::types::TRINKET_CHARGE_FULL {
+                continue;
+            }
+        } else if !actor.ammo_for(slot).can_spend() {
             continue;
         }
 
         match &ability.attack {
             Attack::Strike(strike) => {
                 if fixed::within_radius(actor.position, target.position, strike.range) {
+                    // Strike resolution ignores launch power, but the shared command validator
+                    // still enforces this turn's walking-adjusted cap. A bot that had walked most
+                    // of its allowance used to emit the fixed 5_000 value here and have its own
+                    // otherwise legal melee action rejected as InputOutOfRange.
+                    let power_basis_points =
+                        STRIKE_POWER_BASIS_POINTS.min(crate::command::max_launch_power(state));
                     consider(
                         &mut best,
                         strike_score(ability),
                         MatchCommandKind::Ability {
                             slot,
                             angle_millidegrees: STRIKE_ANGLE_MILLIDEGREES,
-                            power_basis_points: STRIKE_POWER_BASIS_POINTS,
+                            power_basis_points,
                             target_player_id: Some(target.id.clone()),
                             secondary_target_player_id: None,
                         },
@@ -212,10 +222,11 @@ fn plan_turn(
                 {
                     let angle = jitter(rng, angle, difficulty.angle_error_millidegrees())
                         .rem_euclid(ANGLE_SWEEP_MILLIDEGREES);
+                    let cap = crate::command::max_launch_power(state);
                     let power = fixed::clamp(
                         jitter(rng, power, difficulty.power_error_basis_points()),
                         1,
-                        fixed::BASIS_POINTS,
+                        cap,
                     );
                     consider(
                         &mut best,
@@ -256,6 +267,20 @@ fn plan_turn(
             close_by
         };
         if dx != 0 {
+            let step = if dx < 0 {
+                crate::fixed::POSITION_SCALE.saturating_neg()
+            } else {
+                crate::fixed::POSITION_SCALE
+            };
+            let probe = crate::fixed::FixedPoint::new(
+                actor.position.x.saturating_add(step),
+                actor.position.y,
+            );
+            if crate::terrain::is_solid_at(&state.terrain, probe) {
+                // A keep or stage wall is in the way; walking the same blocked step
+                // forever would stall the match. Pass so the turn clock still advances.
+                return MatchCommandKind::Pass;
+            }
             return MatchCommandKind::Move { dx };
         }
     }
@@ -288,7 +313,10 @@ fn search_projectile(
         .players
         .iter()
         .filter(|p| p.id != actor.id && !p.is_eliminated())
-        .map(|p| (p.id.clone(), p.position, fixed::BODY_WIDTH))
+        .map(|p| {
+            let (center, radius) = fixed::player_collision_circle(p.position);
+            (p.id.clone(), center, radius)
+        })
         .collect();
 
     let angle_samples = difficulty.angle_samples();
@@ -319,15 +347,16 @@ fn search_projectile(
             let Ok(power_step) = i32::try_from(power_step) else {
                 continue;
             };
+            let cap = crate::command::max_launch_power(state);
             let power = fixed::clamp(
                 MIN_SEARCH_POWER_BASIS_POINTS
                     .saturating_add(power_index.saturating_mul(power_step)),
                 1,
-                fixed::BASIS_POINTS,
+                cap,
             );
 
             let input = BallisticInput {
-                origin: actor.position,
+                origin: fixed::player_collision_center(actor.position),
                 angle_millidegrees: angle,
                 power_basis_points: power,
                 wind_per_tick: state.wind_per_tick,
@@ -363,7 +392,10 @@ fn score_impact(
     cause: ImpactCause,
 ) -> i64 {
     if !matches!(cause, ImpactCause::Character) {
-        return 0i64.saturating_sub(fixed::distance_squared(impact_position, target.position));
+        return 0i64.saturating_sub(fixed::distance_squared(
+            impact_position,
+            fixed::player_collision_center(target.position),
+        ));
     }
 
     let nearest = hitboxes
@@ -374,7 +406,10 @@ fn score_impact(
     match nearest {
         Some((id, _, _)) if *id == target.id => 1_000_000,
         Some(_) => -500_000,
-        None => 0i64.saturating_sub(fixed::distance_squared(impact_position, target.position)),
+        None => 0i64.saturating_sub(fixed::distance_squared(
+            impact_position,
+            fixed::player_collision_center(target.position),
+        )),
     }
 }
 
@@ -436,6 +471,7 @@ mod tests {
             position,
             loadout: crate::types::Loadout::launch_default(),
             ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -549,6 +585,41 @@ mod tests {
                 assert_eq!(target_player_id.as_deref(), Some("b"));
             }
             other => panic!("expected an in-range strike, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn melee_decision_respects_the_walking_adjusted_power_cap() {
+        let mut actor = player("a", 0, "crow", FixedPoint::new(0, 0));
+        actor
+            .ammo
+            .get_mut(AbilitySlot::Basic.index())
+            .expect("basic ammo slot must exist")
+            .remaining = 0;
+        actor
+            .ammo
+            .get_mut(AbilitySlot::BasicAlt.index())
+            .expect("secondary ammo slot must exist")
+            .remaining = 0;
+        let mut state = state_with(
+            vec![actor, player("b", 1, "crow", FixedPoint::new(1_024, 0))],
+            MatchPhase::AimingAndSelection,
+            "a",
+        );
+        state.movement_remaining = 1_000;
+
+        let action = decide(&state, "a", BotDifficulty::Standard, 1);
+
+        match action {
+            MatchCommandKind::Ability {
+                slot,
+                power_basis_points,
+                ..
+            } => {
+                assert_eq!(slot, AbilitySlot::Special);
+                assert_eq!(power_basis_points, crate::command::max_launch_power(&state));
+            }
+            other => panic!("expected a capped melee strike, got {other:?}"),
         }
     }
 
@@ -676,6 +747,9 @@ mod tests {
                 MatchCommandKind::Pass => {
                     host.pass_turn().expect("pass must not error");
                 }
+                MatchCommandKind::Jump => {
+                    host.submit_jump(&actor).expect("jump must not error");
+                }
                 MatchCommandKind::PassiveChoice { passive_id } => {
                     let command = crate::types::PassiveChoiceCommand {
                         command_id: format!("bot-passive-{turns}"),
@@ -755,6 +829,9 @@ mod tests {
                 }
                 MatchCommandKind::Pass => {
                     host.pass_turn().expect("pass must not error");
+                }
+                MatchCommandKind::Jump => {
+                    host.submit_jump(&actor).expect("jump must not error");
                 }
                 MatchCommandKind::PassiveChoice { passive_id } => {
                     let command = crate::types::PassiveChoiceCommand {

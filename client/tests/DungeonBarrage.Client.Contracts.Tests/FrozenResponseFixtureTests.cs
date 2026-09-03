@@ -33,8 +33,8 @@ public sealed class FrozenResponseFixtureTests
 
         // ABI version 4: db_sim_match_timeout's addition (docs/BUILD_LOG.md's C6 entry).
         Assert.Equal(4U, snapshot.AbiVersion);
-        Assert.Equal(7U, snapshot.SimulationVersion);
-        Assert.Equal(4U, snapshot.ContentVersion);
+        Assert.Equal(9U, snapshot.SimulationVersion);
+        Assert.Equal(6U, snapshot.ContentVersion);
         Assert.Equal(1024, snapshot.PositionScale);
         Assert.Equal(60U, snapshot.FixedTickRate);
         Assert.Equal("a-local-player", snapshot.ActivePlayerId);
@@ -43,6 +43,9 @@ public sealed class FrozenResponseFixtureTests
         Assert.All(snapshot.Blocks, block => Assert.Equal(ClientMaterial.Soil, block.Material));
         Assert.All(snapshot.Blocks, block => Assert.Equal(ClientErosionAxis.Columns, block.ErosionAxis));
         Assert.Equal("ramshot-cannon", snapshot.Players[0].Loadout.Main);
+        Assert.Equal("ramshot-shell", snapshot.Players[0].Loadout.Secondary);
+        Assert.Equal("ember-crown", snapshot.Players[0].Loadout.Trinket);
+        Assert.Equal((ushort)0, snapshot.Players[0].TrinketCharge);
         Assert.Equal(new ClientPosition(2048, 7936), snapshot.Players[0].Position);
         Assert.Empty(snapshot.PersistentObjects);
     }
@@ -58,7 +61,7 @@ public sealed class FrozenResponseFixtureTests
         Assert.Equal(["a-local-player", "b-local-bot"], preview.LegalTargetPlayerIds);
         var trace = Assert.Single(preview.ProjectileTraces);
         Assert.Equal("ramshot-cannon", trace.AbilityId);
-        Assert.Equal(6, trace.Samples.Count);
+        Assert.Equal(7, trace.Samples.Count);
         Assert.Equal(ClientImpactCause.Character, trace.TerminalImpact.Cause);
     }
 
@@ -76,7 +79,7 @@ public sealed class FrozenResponseFixtureTests
         Assert.Equal(ClientEntityMovementCause.AuthoritativeResolution, movement.Cause);
         Assert.Equal(new ClientPosition(2048, 7936), movement.Start);
         Assert.Equal(new ClientPosition(3072, 7936), movement.End);
-        Assert.Equal("4610d8c64f1670b9", transition.PostSnapshot.StateHash);
+        Assert.Equal("b0e9ba84389a6797", transition.PostSnapshot.StateHash);
         Assert.Equal(transition.PostSnapshot.StateHash, transition.PostStateHash);
     }
 
@@ -88,11 +91,12 @@ public sealed class FrozenResponseFixtureTests
         Assert.IsType<ClientProjectileTraceEvent>(transition.Events[0]);
         Assert.IsType<ClientImpactEvent>(transition.Events[1]);
         Assert.Contains(transition.Events, e => e is ClientStrikeResolvedEvent);
-        Assert.Contains(transition.Events, e => e is ClientPlayerEliminatedEvent);
-        Assert.Contains(transition.Events, e => e is ClientMatchCompletedEvent);
+        Assert.Contains(transition.Events, e => e is ClientHealthChangedEvent);
         Assert.Contains(transition.Events, e => e is ClientTurnEndedEvent);
-        Assert.Equal("1e5dff46164b909b", transition.PostStateHash);
-        Assert.Equal(ClientMatchPhase.MatchComplete, transition.PostSnapshot.Phase);
+        Assert.Contains(transition.Events, e => e is ClientTurnOpenedEvent);
+        Assert.Equal("682f0e2a57b7debd", transition.PostStateHash);
+        Assert.Equal(ClientMatchPhase.Movement, transition.PostSnapshot.Phase);
+        Assert.Equal("b-local-bot", transition.PostSnapshot.ActivePlayerId);
     }
 
     private static T Deserialize<T>(string fileName)

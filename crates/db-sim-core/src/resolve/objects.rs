@@ -453,6 +453,7 @@ mod tests {
             position,
             loadout: crate::types::Loadout::launch_default(),
             ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }

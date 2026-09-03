@@ -118,6 +118,7 @@ pub fn build_initial_state(config: &MatchConfig) -> SimResult<SimulationState> {
             position: *spawn,
             loadout: player_config.loadout.clone(),
             ammo,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: player_config.appearance.clone(),
         });
@@ -188,9 +189,14 @@ pub(crate) fn is_valid_match_local_id(id: &str) -> bool {
 }
 
 fn loadout_ids_are_legal(loadout: &Loadout) -> bool {
-    [&loadout.main, &loadout.secondary, &loadout.melee_tool]
-        .into_iter()
-        .all(|id| !id.is_empty() && !id.contains('\0'))
+    [
+        &loadout.main,
+        &loadout.secondary,
+        &loadout.melee_tool,
+        &loadout.trinket,
+    ]
+    .into_iter()
+    .all(|id| !id.is_empty() && !id.contains('\0'))
 }
 
 fn find_map(id: &str) -> Option<MapDefinition> {

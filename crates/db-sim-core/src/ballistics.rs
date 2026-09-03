@@ -386,9 +386,10 @@ fn terminal_result(
 ///
 /// Returns [`SimError::OutOfRange`] if `input.power_basis_points` is outside `1..=10_000`
 /// (matching the oracle's `powerBasisPoints` validation). Returns [`SimError::Overflow`]
-/// if fixed-point arithmetic would exceed `i32`/`i64` range at any step — this bounds
-/// worst-case input (an absurd map size or launch power) to a reported error rather than
-/// a wrapped, teleporting trajectory.
+/// if launch-time arithmetic (map size, launch speed) would exceed `i32`/`i64` range.
+/// A shot that flies so far that a later position or velocity step cannot be represented
+/// leaves the playable area ([`ImpactCause::OutOfBounds`]) instead of failing the command:
+/// aiming at the sky or the screen edge is a miss, not a math error.
 pub fn integrate(
     input: &BallisticInput,
     attack: &ProjectileAttack,
@@ -423,31 +424,42 @@ pub fn integrate(
     for tick in 1..=u32::from(attack.max_ticks) {
         // Semi-implicit Euler: velocity is advanced by acceleration BEFORE position is
         // advanced by velocity. This ordering is load-bearing for parity — see module docs.
-        velocity_x = velocity_x
-            .checked_add(wind_acceleration)
-            .ok_or(SimError::Overflow {
-                context: "ballistics::velocity_x_update",
-            })?;
-        velocity_y = velocity_y
-            .checked_add(attack.gravity_per_tick)
-            .ok_or(SimError::Overflow {
-                context: "ballistics::velocity_y_update",
-            })?;
+        let Some(next_vx) = velocity_x.checked_add(wind_acceleration) else {
+            return Ok(terminal_result(
+                samples,
+                position,
+                tick,
+                ImpactCause::OutOfBounds,
+            ));
+        };
+        let Some(next_vy) = velocity_y.checked_add(attack.gravity_per_tick) else {
+            return Ok(terminal_result(
+                samples,
+                position,
+                tick,
+                ImpactCause::OutOfBounds,
+            ));
+        };
+        velocity_x = next_vx;
+        velocity_y = next_vy;
 
-        let candidate = FixedPoint::new(
-            position
-                .x
-                .checked_add(velocity_x)
-                .ok_or(SimError::Overflow {
-                    context: "ballistics::position_x_update",
-                })?,
-            position
-                .y
-                .checked_add(velocity_y)
-                .ok_or(SimError::Overflow {
-                    context: "ballistics::position_y_update",
-                })?,
-        );
+        let Some(next_x) = position.x.checked_add(velocity_x) else {
+            return Ok(terminal_result(
+                samples,
+                position,
+                tick,
+                ImpactCause::OutOfBounds,
+            ));
+        };
+        let Some(next_y) = position.y.checked_add(velocity_y) else {
+            return Ok(terminal_result(
+                samples,
+                position,
+                tick,
+                ImpactCause::OutOfBounds,
+            ));
+        };
+        let candidate = FixedPoint::new(next_x, next_y);
 
         // Bounds: matches the oracle exactly — both edges on X, only the lower edge
         // absent on Y (a shot may fly arbitrarily far above the map before falling back).
@@ -467,21 +479,35 @@ pub fn integrate(
                 bounces_remaining = bounces_remaining.saturating_sub(1);
                 let (reflect_x, reflect_y) = reflection_axes(position, candidate, terrain_mask);
                 if reflect_x {
-                    velocity_x = velocity_x.checked_neg().ok_or(SimError::Overflow {
-                        context: "ballistics::bounce_reflect_x",
-                    })?;
+                    let Some(reflected) = velocity_x.checked_neg() else {
+                        return Ok(terminal_result(
+                            samples,
+                            position,
+                            tick,
+                            ImpactCause::OutOfBounds,
+                        ));
+                    };
+                    velocity_x = reflected;
                 }
                 if reflect_y {
-                    velocity_y = velocity_y.checked_neg().ok_or(SimError::Overflow {
-                        context: "ballistics::bounce_reflect_y",
-                    })?;
+                    let Some(reflected) = velocity_y.checked_neg() else {
+                        return Ok(terminal_result(
+                            samples,
+                            position,
+                            tick,
+                            ImpactCause::OutOfBounds,
+                        ));
+                    };
+                    velocity_y = reflected;
                 }
                 // Revert to the last valid (non-solid) position rather than the
                 // intruding one. This is a coarse "undo the offending tick, redo it with
                 // reflected velocity next tick" model: the grid mask has no fractional
                 // penetration depth to reflect out of exactly, and reverting guarantees
                 // the projectile never gets stuck sampling from inside solid terrain.
-                // The tick still counts against max_ticks; no sample is recorded for it.
+                // Record this tick so playback shows the ricochet instead of interpolating
+                // through the wall (stride samples would skip this contact).
+                samples.push(BallisticSample { tick, position });
                 continue;
             }
 
@@ -853,6 +879,10 @@ mod tests {
             result.impact.position.x < 0,
             "must have exited through the left edge after reflecting"
         );
+        assert!(
+            result.samples.iter().any(|sample| sample.tick == 26),
+            "the ricochet tick must be sampled so the client can draw the bounce"
+        );
     }
 
     #[test]
@@ -937,6 +967,27 @@ mod tests {
             Err(SimError::OutOfRange {
                 field: "power_basis_points"
             })
+        );
+    }
+
+    #[test]
+    fn integrate_treats_a_skyward_overflow_as_leaving_the_map() {
+        // No ceiling on Y (oracle parity): a vertical shot may climb arbitrarily far.
+        // If that climb can no longer be represented, it is a miss, not Overflow — aiming
+        // at the top of the screen must not fail the command as a math error.
+        let attack = no_gravity_no_wind_attack(1_000_000, 3_000, 0);
+        let mask = open_terrain(8, 8);
+        let input = BallisticInput {
+            origin: FixedPoint::new(1_024, 1_024),
+            angle_millidegrees: 90_000,
+            power_basis_points: 10_000,
+            wind_per_tick: 0,
+        };
+        let result = must_succeed(integrate(&input, &attack, &mask, &[]));
+        assert_eq!(result.impact.cause, ImpactCause::OutOfBounds);
+        assert!(
+            result.impact.tick > 0,
+            "the projectile must leave after at least one integration step"
         );
     }
 

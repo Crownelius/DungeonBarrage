@@ -152,9 +152,12 @@ public sealed record ClientStatusSnapshot(
 /// <param name="Health">Current health.</param>
 /// <param name="IsEliminated">Whether the player is eliminated.</param>
 /// <param name="MaxHealth">Maximum health.</param>
-/// <param name="Position">Authoritative fixed-point position.</param>
+/// <param name="Position">Authoritative fixed-point ground pivot.</param>
+/// <param name="CollisionCenter">Authoritative fixed-point center of the visible collision body.</param>
+/// <param name="CollisionRadius">Authoritative collision-body radius in fixed-point units.</param>
 /// <param name="Loadout">Equipped item identifiers.</param>
 /// <param name="Ammo">Remaining ammunition per slot.</param>
+/// <param name="TrinketCharge">Charge toward the equipped crown or anklet special.</param>
 /// <param name="Statuses">Current statuses.</param>
 /// <param name="Appearance">Cosmetic appearance.</param>
 public sealed record ClientPlayerSnapshot(
@@ -164,8 +167,11 @@ public sealed record ClientPlayerSnapshot(
     bool IsEliminated,
     ushort MaxHealth,
     ClientPosition Position,
+    ClientPosition CollisionCenter,
+    int CollisionRadius,
     ClientLoadout Loadout,
     IReadOnlyList<ClientAmmoCounter> Ammo,
+    ushort TrinketCharge,
     IReadOnlyList<ClientStatusSnapshot> Statuses,
     ClientAppearance Appearance);
 

@@ -50,6 +50,7 @@ public sealed record ClientBotDecisionRequest(
 [JsonDerivedType(typeof(ClientBotAbilityDecision), "ability")]
 [JsonDerivedType(typeof(ClientBotPassiveChoiceDecision), "passiveChoice")]
 [JsonDerivedType(typeof(ClientBotPassDecision), "pass")]
+[JsonDerivedType(typeof(ClientBotJumpDecision), "jump")]
 public abstract record ClientBotDecision(uint SchemaVersion);
 
 /// <summary>The bot wants to move horizontally.</summary>
@@ -82,3 +83,7 @@ public sealed record ClientBotPassiveChoiceDecision(uint SchemaVersion, string P
 /// <summary>The bot wants to end its turn without acting.</summary>
 /// <param name="SchemaVersion">Client-contract schema version.</param>
 public sealed record ClientBotPassDecision(uint SchemaVersion) : ClientBotDecision(SchemaVersion);
+
+/// <summary>The bot wants to hop straight up.</summary>
+/// <param name="SchemaVersion">Client-contract schema version.</param>
+public sealed record ClientBotJumpDecision(uint SchemaVersion) : ClientBotDecision(SchemaVersion);

@@ -104,17 +104,20 @@ public enum ClientTransitionDisposition
     DuplicateReplay,
 }
 
-/// <summary>Equipped item slots. Wire names are main / secondary / meleeTool.</summary>
+/// <summary>Equipped item slots. Wire names are main / secondary / meleeTool / trinket.</summary>
 public enum ClientAbilitySlot
 {
-    /// <summary>Main item.</summary>
+    /// <summary>Main ranged item.</summary>
     Main,
 
-    /// <summary>Secondary item.</summary>
+    /// <summary>Secondary: a single-use round.</summary>
     Secondary,
 
-    /// <summary>Melee/tool item.</summary>
+    /// <summary>Melee item. Visual only.</summary>
     MeleeTool,
+
+    /// <summary>Crown or anklet. Charge-gated special.</summary>
+    Trinket,
 }
 
 /// <summary>Ammunition policy for one equipped item.</summary>
@@ -140,10 +143,12 @@ public sealed record ClientAmmoCounter(
 /// <param name="Main">Main item id.</param>
 /// <param name="Secondary">Secondary item id.</param>
 /// <param name="MeleeTool">Melee/tool item id.</param>
+/// <param name="Trinket">Crown or anklet id.</param>
 public sealed record ClientLoadout(
     [property: JsonPropertyName("main")] string Main,
     [property: JsonPropertyName("secondary")] string Secondary,
-    [property: JsonPropertyName("meleeTool")] string MeleeTool);
+    [property: JsonPropertyName("meleeTool")] string MeleeTool,
+    [property: JsonPropertyName("trinket")] string Trinket);
 
 /// <summary>Cosmetic appearance selected before the match.</summary>
 /// <param name="SkinId">Character skin identifier.</param>

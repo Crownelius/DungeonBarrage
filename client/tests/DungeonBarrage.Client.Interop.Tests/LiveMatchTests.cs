@@ -43,7 +43,7 @@ public sealed class LiveMatchTests
         Assert.Single(move.Events);
         Assert.IsType<ClientEntityMovedEvent>(move.Events[0]);
 
-        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500, null);
+        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 2_500, null);
         Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
 
         // The concrete gameplay facts a live-generated command id cannot change: real damage
@@ -52,11 +52,10 @@ public sealed class LiveMatchTests
             .First(p => p.PlayerId == "b-local-bot").Health;
         Assert.True(afterDefenderHealth < beforeDefenderHealth, "the ability must have dealt damage");
 
-        // This runs on the C2 wire fixture, whose 15%-power 45-degree lob craters the shooter's
-        // own three-cell-tall platform over a void, so the match ends here. That makes the fixture
-        // unusable for proving turn handover, which is why handover has its own test below on a
-        // playable map rather than being dropped.
-        Assert.IsNotType<ClientInProgressOutcome>(live.CurrentSnapshot.Outcome);
+        // CONTENT_VERSION 6: this 15% lob no longer dumps the shooter into the void, so the
+        // fixture now hands the turn over instead of ending the match.
+        Assert.IsType<ClientInProgressOutcome>(live.CurrentSnapshot.Outcome);
+        Assert.Equal("b-local-bot", live.CurrentSnapshot.ActivePlayerId);
 
         // The C5 gate itself: every view ends at the post-snapshot. Checked, not assumed true by
         // LiveMatch's own construction.
@@ -114,6 +113,97 @@ public sealed class LiveMatchTests
         Assert.Equal(firstAbility.PostStateHash, secondAbility.PostStateHash);
     }
 
+    [Fact]
+    public async Task A_preview_returns_a_trace_and_does_not_change_the_match()
+    {
+        await using var live = await CreateLiveOnAsync("crow-perch");
+        var hashBefore = live.CurrentSnapshot.StateHash;
+
+        var preview = await live.PreviewAbilityAsync(ClientAbilitySlot.Main, 45_000, 1_500);
+
+        Assert.NotNull(preview);
+        Assert.True(preview.Legal, "a 45° 15% ramshot on crow-perch must be a legal guide");
+        Assert.NotEmpty(preview.ProjectileTraces);
+        Assert.True(preview.ProjectileTraces[0].Samples.Count >= 2, "a guide must have a path, not a single point");
+        Assert.Equal(hashBefore, live.CurrentSnapshot.StateHash);
+    }
+
+    [Fact]
+    public async Task A_shot_straight_down_is_accepted_instead_of_rejected_as_a_negative_angle()
+    {
+        await using var live = await CreateLiveOnAsync("crow-perch");
+        _ = await live.SubmitMoveAsync(1024);
+        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 270_000, 1_500, null);
+        Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
+        Assert.NotEmpty(ability.Events);
+        Assert.Contains(ability.Events, e => e is ClientProjectileTraceEvent);
+    }
+
+    [Fact]
+    public async Task Every_projectile_weapon_emits_a_trace_that_reaches_its_impact()
+    {
+        var roster = RosterCatalog.Get();
+        var projectileItems = roster.Items
+            .Where(item =>
+                item.Ability.AttackShape == ClientAttackShape.Projectile
+                && item.Slot is ClientAbilitySlot.Main or ClientAbilitySlot.Secondary)
+            .ToList();
+        Assert.True(projectileItems.Count >= 8, "launch roster must include the eight ranged items plus their one-shot copies");
+
+        foreach (var item in projectileItems)
+        {
+            var slot = item.Slot switch
+            {
+                ClientAbilitySlot.Secondary => ClientAbilitySlot.Secondary,
+                ClientAbilitySlot.Trinket => ClientAbilitySlot.Trinket,
+                _ => ClientAbilitySlot.Main,
+            };
+            var loadout = slot switch
+            {
+                ClientAbilitySlot.Secondary => LocalMatchEnvelope.LaunchDefaultLoadout with { Secondary = item.Id },
+                ClientAbilitySlot.Trinket => LocalMatchEnvelope.LaunchDefaultLoadout with { Trinket = item.Id },
+                _ => LocalMatchEnvelope.LaunchDefaultLoadout with { Main = item.Id },
+            };
+
+            await using var live = await CreateLiveOnAsync("crow-perch", loadout);
+            _ = await live.SubmitMoveAsync(1024);
+            var ability = await live.SubmitAbilityAsync(slot, 45_000, 5_000, null);
+            Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
+
+            var traces = ability.Events.OfType<ClientProjectileTraceEvent>().Select(e => e.Trace).ToList();
+            Assert.True(traces.Count > 0, $"{item.Id} must publish at least one projectile trace");
+            foreach (var trace in traces)
+            {
+                Assert.True(trace.Samples.Count >= 2, $"{item.Id} must sample more than the origin");
+                Assert.Equal(0u, trace.Samples[0].Tick);
+                var last = trace.Samples[trace.Samples.Count - 1];
+                Assert.Equal(trace.TerminalImpact.Tick, last.Tick);
+                Assert.True(
+                    ProjectilePlayback.LastSampleTick(trace) > 0,
+                    $"{item.Id} flight must last more than a single tick so playback can show the hit");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task A_jump_spends_walk_allowance_and_lands()
+    {
+        await using var live = await CreateLiveOnAsync("crow-perch");
+        var before = live.CurrentSnapshot;
+        var yBefore = before.Players.First(p => p.PlayerId == before.ActivePlayerId).Position.Y;
+        var moveBefore = before.MovementRemaining;
+
+        var jump = await live.SubmitJumpAsync();
+        Assert.Equal(ClientTransitionDisposition.Accepted, jump.Disposition);
+
+        var after = live.CurrentSnapshot;
+        var yAfter = after.Players.First(p => p.PlayerId == before.ActivePlayerId).Position.Y;
+        Assert.True(after.MovementRemaining < moveBefore, "a successful jump spends walk allowance");
+        Assert.True(
+            yAfter >= yBefore - 256,
+            "gravity must land the crow; they must not hang at the apex");
+    }
+
     [SuppressMessage(
         "Reliability",
         "CA2000:Dispose objects before losing scope",
@@ -135,7 +225,16 @@ public sealed class LiveMatchTests
         Justification =
             "Ownership transfers to the returned LiveMatch, which every caller disposes via " +
             "'await using'.")]
-    private static async Task<LiveMatch> CreateLiveOnAsync(string mapId)
+    private static Task<LiveMatch> CreateLiveOnAsync(string mapId) =>
+        CreateLiveOnAsync(mapId, LocalMatchEnvelope.LaunchDefaultLoadout);
+
+    [SuppressMessage(
+        "Reliability",
+        "CA2000:Dispose objects before losing scope",
+        Justification =
+            "Ownership transfers to the returned LiveMatch, which every caller disposes via " +
+            "'await using'.")]
+    private static async Task<LiveMatch> CreateLiveOnAsync(string mapId, ClientLoadout humanLoadout)
     {
         var request = LocalMatchEnvelope.HumanVsBot(
             LocalMatchSession.SimulationVersion,
@@ -143,7 +242,7 @@ public sealed class LiveMatchTests
             seed: 12345,
             matchId: "test-match",
             mapId: mapId,
-            humanLoadout: new ClientLoadout("ramshot-cannon", "recurve-bow", "trench-spade"));
+            humanLoadout: humanLoadout);
         var session = LocalMatchSession.Create(
             System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options));
         var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(

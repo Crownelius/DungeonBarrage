@@ -7,13 +7,9 @@ using Xunit;
 namespace DungeonBarrage.Client.Interop.Tests;
 
 /// <summary>
-/// The select screen's picker writes the clicked item into the create envelope.
+/// Sequential loadout wizard: ranged, melee, one-shot secondary, then crown/anklet.
+/// Confirm must send the equipped items, not a leftover default.
 /// </summary>
-/// <remarks>
-/// This is the C4 gate the kit-era character index missed: Confirm must send the equipped
-/// items, not a leftover default triangle. Uses the real native catalog so the ids are the
-/// same ones Godot displays.
-/// </remarks>
 public sealed class LoadoutPickerTests
 {
     [Fact]
@@ -22,9 +18,11 @@ public sealed class LoadoutPickerTests
         var items = RosterCatalog.Get().Items;
         var picker = new LoadoutPicker(items);
 
+        Assert.Equal(LoadoutStage.Main, picker.Stage);
         Assert.Equal("ramshot-cannon", picker.Loadout.Main);
-        Assert.Equal("recurve-bow", picker.Loadout.Secondary);
+        Assert.Equal("ramshot-shell", picker.Loadout.Secondary);
         Assert.Equal("trench-spade", picker.Loadout.MeleeTool);
+        Assert.Equal("ember-crown", picker.Loadout.Trinket);
 
         var frostIndex = IndexOf(items, "frostfall-mortar");
         Assert.Equal(ClientAbilitySlot.Main, items[frostIndex].Slot);
@@ -32,10 +30,12 @@ public sealed class LoadoutPickerTests
         picker.SelectTile(frostIndex);
 
         Assert.Equal("frostfall-mortar", picker.Loadout.Main);
-        Assert.Equal("recurve-bow", picker.Loadout.Secondary);
+        Assert.Equal("ramshot-shell", picker.Loadout.Secondary);
         Assert.Equal("trench-spade", picker.Loadout.MeleeTool);
+        Assert.Equal("ember-crown", picker.Loadout.Trinket);
         Assert.Equal(frostIndex, picker.FocusedIndex);
         Assert.Equal(frostIndex, picker.MainIndex);
+        Assert.True(picker.IsEquipped(frostIndex));
 
         var request = LocalMatchEnvelope.HumanVsBot(
             simulationVersion: LocalMatchSession.SimulationVersion,
@@ -45,8 +45,6 @@ public sealed class LoadoutPickerTests
             mapId: "crow-perch",
             humanLoadout: picker.Loadout);
 
-        // The human's pick reaches their own side only. The opponent fields the launch default,
-        // so this also pins that a duel is not a mirror match by construction.
         Assert.Equal("frostfall-mortar", request.Match.Players[0].Loadout.Main);
         Assert.Equal(
             LocalMatchEnvelope.LaunchDefaultLoadout.Main,
@@ -70,8 +68,9 @@ public sealed class LoadoutPickerTests
         Assert.Equal(
             LocalMatchEnvelope.LaunchDefaultLoadout.Main,
             created.Snapshot.Players[1].Loadout.Main);
-        Assert.Equal("recurve-bow", created.Snapshot.Players[0].Loadout.Secondary);
+        Assert.Equal("ramshot-shell", created.Snapshot.Players[0].Loadout.Secondary);
         Assert.Equal("trench-spade", created.Snapshot.Players[0].Loadout.MeleeTool);
+        Assert.Equal("ember-crown", created.Snapshot.Players[0].Loadout.Trinket);
 
         var move = ClientMatchCommand.Move(
             commandId: "picker-frostfall-move",
@@ -107,37 +106,69 @@ public sealed class LoadoutPickerTests
     }
 
     [Fact]
-    public void Selecting_a_secondary_item_does_not_replace_main()
+    public void Each_page_shows_eight_items_and_enter_walks_ranged_melee_secondary_trinket()
+    {
+        var picker = new LoadoutPicker(RosterCatalog.Get().Items);
+
+        Assert.Equal(8, picker.VisibleCatalogIndices().Count);
+        Assert.Equal(LoadoutStage.Main, picker.Stage);
+        Assert.False(picker.IsLastStage);
+
+        Assert.True(picker.TryAdvance());
+        Assert.Equal(LoadoutStage.Melee, picker.Stage);
+        Assert.Equal(8, picker.VisibleCatalogIndices().Count);
+
+        Assert.True(picker.TryAdvance());
+        Assert.Equal(LoadoutStage.Secondary, picker.Stage);
+        Assert.Equal(8, picker.VisibleCatalogIndices().Count);
+
+        Assert.True(picker.TryAdvance());
+        Assert.Equal(LoadoutStage.Trinket, picker.Stage);
+        Assert.True(picker.IsLastStage);
+        Assert.Equal(8, picker.VisibleCatalogIndices().Count);
+        Assert.False(picker.TryAdvance());
+    }
+
+    [Fact]
+    public void Selecting_a_melee_item_does_not_replace_main()
     {
         var items = RosterCatalog.Get().Items;
         var picker = new LoadoutPicker(items);
         var longsword = IndexOf(items, "longsword");
-        Assert.Equal(ClientAbilitySlot.Secondary, items[longsword].Slot);
+        Assert.Equal(ClientAbilitySlot.MeleeTool, items[longsword].Slot);
 
+        picker.SelectTile(longsword);
+        Assert.Equal("ramshot-cannon", picker.Loadout.Main);
+        Assert.Equal("trench-spade", picker.Loadout.MeleeTool);
+
+        Assert.True(picker.TryAdvance());
         picker.SelectTile(longsword);
 
         Assert.Equal("ramshot-cannon", picker.Loadout.Main);
-        Assert.Equal("longsword", picker.Loadout.Secondary);
-        Assert.Equal("trench-spade", picker.Loadout.MeleeTool);
+        Assert.Equal("ramshot-shell", picker.Loadout.Secondary);
+        Assert.Equal("longsword", picker.Loadout.MeleeTool);
+        Assert.Equal("ember-crown", picker.Loadout.Trinket);
+        Assert.True(picker.IsEquipped(longsword));
     }
 
     [Fact]
-    public async Task Every_catalog_item_lands_on_its_slot_and_fires_with_a_null_target()
+    public async Task Every_catalog_item_lands_on_its_slot_and_combat_items_fire_with_a_null_target()
     {
         var items = RosterCatalog.Get().Items;
-        Assert.True(items.Count >= 9, "the native catalog must still publish the nine launch items");
+        Assert.Equal(32, items.Count);
 
         for (var i = 0; i < items.Count; i++)
         {
             var item = items[i];
             var picker = new LoadoutPicker(items);
+            AdvanceToSlot(picker, item.Slot);
             picker.SelectTile(i);
 
             switch (item.Slot)
             {
                 case ClientAbilitySlot.Main:
                     Assert.Equal(item.Id, picker.Loadout.Main);
-                    Assert.Equal("recurve-bow", picker.Loadout.Secondary);
+                    Assert.Equal("ramshot-shell", picker.Loadout.Secondary);
                     Assert.Equal("trench-spade", picker.Loadout.MeleeTool);
                     break;
                 case ClientAbilitySlot.Secondary:
@@ -147,8 +178,14 @@ public sealed class LoadoutPickerTests
                     break;
                 case ClientAbilitySlot.MeleeTool:
                     Assert.Equal("ramshot-cannon", picker.Loadout.Main);
-                    Assert.Equal("recurve-bow", picker.Loadout.Secondary);
+                    Assert.Equal("ramshot-shell", picker.Loadout.Secondary);
                     Assert.Equal(item.Id, picker.Loadout.MeleeTool);
+                    break;
+                case ClientAbilitySlot.Trinket:
+                    Assert.Equal("ramshot-cannon", picker.Loadout.Main);
+                    Assert.Equal("ramshot-shell", picker.Loadout.Secondary);
+                    Assert.Equal("trench-spade", picker.Loadout.MeleeTool);
+                    Assert.Equal(item.Id, picker.Loadout.Trinket);
                     break;
                 default:
                     throw new InvalidOperationException($"Unexpected slot {item.Slot} for '{item.Id}'.");
@@ -165,6 +202,7 @@ public sealed class LoadoutPickerTests
             Assert.Equal(picker.Loadout.Main, request.Match.Players[0].Loadout.Main);
             Assert.Equal(picker.Loadout.Secondary, request.Match.Players[0].Loadout.Secondary);
             Assert.Equal(picker.Loadout.MeleeTool, request.Match.Players[0].Loadout.MeleeTool);
+            Assert.Equal(picker.Loadout.Trinket, request.Match.Players[0].Loadout.Trinket);
             Assert.DoesNotContain(
                 "characterId",
                 Encoding.UTF8.GetString(JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options)),
@@ -180,6 +218,12 @@ public sealed class LoadoutPickerTests
             Assert.Equal(picker.Loadout.Main, created.Snapshot.Players[0].Loadout.Main);
             Assert.Equal(picker.Loadout.Secondary, created.Snapshot.Players[0].Loadout.Secondary);
             Assert.Equal(picker.Loadout.MeleeTool, created.Snapshot.Players[0].Loadout.MeleeTool);
+            Assert.Equal(picker.Loadout.Trinket, created.Snapshot.Players[0].Loadout.Trinket);
+
+            if (item.Slot == ClientAbilitySlot.Trinket)
+            {
+                continue;
+            }
 
             var ability = ClientMatchCommand.Ability(
                 commandId: $"aim-{item.Id}",
@@ -200,6 +244,25 @@ public sealed class LoadoutPickerTests
                 $"{item.Id} with targetPlayerId=null was {transition.Disposition}: {transition.RejectionReason}");
         }
     }
+
+    private static void AdvanceToSlot(LoadoutPicker picker, ClientAbilitySlot slot)
+    {
+        for (var i = 0; i < 4 && StageSlot(picker.Stage) != slot; i++)
+        {
+            Assert.True(picker.TryAdvance(), $"could not reach {slot} from {picker.Stage}");
+        }
+
+        Assert.Equal(slot, StageSlot(picker.Stage));
+    }
+
+    private static ClientAbilitySlot StageSlot(LoadoutStage stage) => stage switch
+    {
+        LoadoutStage.Main => ClientAbilitySlot.Main,
+        LoadoutStage.Melee => ClientAbilitySlot.MeleeTool,
+        LoadoutStage.Secondary => ClientAbilitySlot.Secondary,
+        LoadoutStage.Trinket => ClientAbilitySlot.Trinket,
+        _ => throw new InvalidOperationException($"Unknown loadout stage {stage}."),
+    };
 
     private static int IndexOf(IReadOnlyList<ClientItemDefinition> items, string id)
     {

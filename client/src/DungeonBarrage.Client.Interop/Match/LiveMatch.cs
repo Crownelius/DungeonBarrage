@@ -45,6 +45,20 @@ public sealed class MatchCommandRejectedException : Exception
     /// <returns>The exception, ready to throw.</returns>
     public static MatchCommandRejectedException ForDisposition(string disposition) =>
         new($"The command was not accepted (disposition: {disposition}).") { Disposition = disposition };
+
+    /// <summary>Creates an exception carrying the authority's closed rejection details.</summary>
+    /// <param name="transition">The rejected transition.</param>
+    /// <returns>The exception, ready to throw.</returns>
+    public static MatchCommandRejectedException ForTransition(ClientMatchTransition transition)
+    {
+        ArgumentNullException.ThrowIfNull(transition);
+        var disposition = transition.Disposition.ToString();
+        var reason = transition.RejectionReason?.ToString() ?? "unspecified";
+        return new($"The command was not accepted (disposition: {disposition}, reason: {reason}).")
+        {
+            Disposition = disposition,
+        };
+    }
 }
 
 /// <summary>
@@ -170,6 +184,41 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
             CurrentSnapshot.SnapshotGeneration,
             dx));
 
+    /// <summary>Submits a vertical hop for the active player.</summary>
+    /// <returns>The accepted transition.</returns>
+    /// <exception cref="MatchCommandRejectedException">The authority refused the command.</exception>
+    public Task<ClientMatchTransition> SubmitJumpAsync() =>
+        SubmitAsync(ordinal => ClientMatchCommand.Jump(
+            CommandId(ordinal),
+            CurrentSnapshot.ActivePlayerId ?? throw new InvalidOperationException("No active player."),
+            CurrentSnapshot.TurnNumber,
+            CurrentSnapshot.SnapshotGeneration));
+
+    /// <summary>
+    /// Asks the authority where the current aim would fly, without submitting or mutating.
+    /// </summary>
+    /// <param name="slot">Item slot.</param>
+    /// <param name="angleMillidegrees">Quantized launch angle.</param>
+    /// <param name="powerBasisPoints">Quantized launch power.</param>
+    /// <returns>The preview, or <see langword="null"/> if the native call could not be decoded.</returns>
+    public async Task<ClientAbilityPreviewResponse?> PreviewAbilityAsync(
+        ClientAbilitySlot slot,
+        int angleMillidegrees,
+        int powerBasisPoints)
+    {
+        var playerId = CurrentSnapshot.ActivePlayerId
+            ?? throw new InvalidOperationException("No active player.");
+        var request = ClientAbilityPreviewRequest.ForAim(
+            playerId,
+            CurrentSnapshot.SnapshotGeneration,
+            slot,
+            angleMillidegrees,
+            powerBasisPoints);
+        var requestBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
+        var responseBytes = await _session.PreviewAsync(requestBytes).ConfigureAwait(true);
+        return JsonSerializer.Deserialize<ClientAbilityPreviewResponse>(responseBytes, ClientEnvelope.Options);
+    }
+
     /// <summary>Submits an ability for the active player.</summary>
     /// <param name="slot">Character ability slot.</param>
     /// <param name="angleMillidegrees">Launch angle in integer millidegrees.</param>
@@ -221,9 +270,9 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// One call drives exactly one action — a plain reposition, one ability, one passive
-    /// choice, or a pass — never a whole turn. The Rust bot's own calling contract
+    /// choice, a jump, or a pass — never a whole turn. The Rust bot's own calling contract
     /// (<c>db_sim_core::bot::decide</c>'s doc comment) is that a full bot turn takes at most
-    /// two decisions: an optional move, then a follow-up ability or pass against the
+    /// two decisions: an optional move or jump, then a follow-up ability or pass against the
     /// post-move state. A caller drives that same two-call shape by invoking this method
     /// again after the first result, exactly as a human's own move-then-fire submissions do.
     /// </remarks>
@@ -259,6 +308,8 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
                 await SubmitPassiveChoiceAsync(passive.PassiveId).ConfigureAwait(true),
             ClientBotPassDecision =>
                 await SubmitPassAsync().ConfigureAwait(true),
+            ClientBotJumpDecision =>
+                await SubmitJumpAsync().ConfigureAwait(true),
             _ => throw new InvalidDataException($"Unrecognized bot decision type: {decision.GetType()}"),
         };
     }
@@ -326,7 +377,7 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
 
         if (transition.Disposition != ClientTransitionDisposition.Accepted)
         {
-            throw MatchCommandRejectedException.ForDisposition(transition.Disposition.ToString());
+            throw MatchCommandRejectedException.ForTransition(transition);
         }
 
         // The reconciliation rule, stated in code: the view's state is exactly what the authority

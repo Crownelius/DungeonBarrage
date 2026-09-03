@@ -11,13 +11,13 @@ public static class LocalMatchEnvelope
     public static ClientAppearance DefaultAppearance { get; } =
         new("default", ["default", "default", "default"], "default");
 
-    /// <summary>The launch-default triangle: Ramshot Cannon, Recurve Bow, Trench Spade.</summary>
+    /// <summary>The launch-default loadout: Ramshot Cannon, Ramshot Shell, Trench Spade, Ember Crown.</summary>
     /// <remarks>
     /// Mirrors <c>Loadout::launch_default()</c> on the Rust side. Used as the opponent's kit so a
     /// duel is not a mirror match by construction.
     /// </remarks>
     public static ClientLoadout LaunchDefaultLoadout { get; } =
-        new("ramshot-cannon", "recurve-bow", "trench-spade");
+        new("ramshot-cannon", "ramshot-shell", "trench-spade", "ember-crown");
 
     /// <summary>
     /// A two-player local duel. Each side carries its own loadout; there is no kit id.

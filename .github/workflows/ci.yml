@@ -4,9 +4,8 @@
 # that is documented but not gated is an intention, not a control — everything in that
 # section that CAN be automated is automated here.
 #
-# The web/npm job was removed with the TypeScript surface (ADR 0004). C# jobs are added at
-# the milestone that introduces the client and server, not before — a job that tests nothing
-# still reports green, which is worse than an absent job.
+# The web/npm job was removed with the TypeScript surface (ADR 0004). The Godot-free C#
+# contracts/interop solution is gated below against a freshly built native core.
 
 name: CI
 
@@ -66,11 +65,14 @@ jobs:
             db_sim_buffer_free \
             db_sim_content_version \
             db_sim_match_apply \
+            db_sim_match_bot_decide \
             db_sim_match_create \
             db_sim_match_destroy \
             db_sim_match_preview \
             db_sim_match_snapshot \
             db_sim_match_terrain \
+            db_sim_match_timeout \
+            db_sim_roster \
             db_sim_simulation_version \
             | sort)
           if [ "$actual" != "$expected" ]; then
@@ -94,6 +96,36 @@ jobs:
             --error-exitcode=1 \
             "$test_binary" \
             --exact tests::repeated_create_apply_preview_snapshot_terrain_and_destroy_cycles_complete_cleanly
+
+  client:
+    name: C# contracts and native interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build native authority
+        run: cargo build --release -p db-sim-ffi --locked
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked dependencies
+        run: dotnet restore client/DungeonBarrage.sln --locked-mode
+
+      - name: Build
+        run: dotnet build client/DungeonBarrage.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet test client/DungeonBarrage.sln -c Release --no-build
+
+      - name: Format
+        run: dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore
 
   memory-safety:
     name: Memory safety invariants

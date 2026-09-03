@@ -3457,3 +3457,94 @@ matches `LocalMatchSession.ContentVersion`, and asserts a stale `contentVersion`
 
 `broken-battlements` fall-kill (0hp vs 200hp in three bot decisions) is still an owner map
 geometry call; this change does not touch map design.
+
+---
+
+## 2026-09-03 — playable content-6 cut and visible-body collision correction
+
+This checkpoint completes the inherited content-6 playable-cut work and corrects the reported
+case where a projectile could register a character hit in empty space outside the drawn fighter.
+
+### Playable-cut surface completed
+
+- One crow fighter with a four-page, eight-items-per-page loadout flow (32 items total).
+- Three stacked playable maps, structural collapse, walk-power tradeoff, jump/landing, trinket
+  charge, aim preview, multi-sample projectile playback, Returning Boomerang return playback,
+  results, and rematch/disposal.
+- `CONTENT_VERSION` remains 6. `SIMULATION_VERSION` is now 9 because collision/trajectory results
+  changed; ABI remains 4 because no native function signature or ownership rule changed.
+
+### Root cause and collision contract
+
+`BODY_WIDTH` is a diameter, but command resolution, preview, and bot aiming had passed it to the
+circle collider as a radius around the stored ground pivot. Godot independently drew a smaller
+circle above that pivot. The authority therefore accepted impacts in a two-body-width invisible
+region that the presentation never showed.
+
+The fixed contract has one source of truth:
+
+- `PLAYER_COLLISION_RADIUS = BODY_WIDTH / 2`.
+- The player position remains the ground/standing pivot.
+- `player_collision_center()` moves one radius upward (positive world Y points down).
+- Apply, preview, bot search/scoring, projectile launch origin, nearest-target lookup, snapshot
+  projection, aim muzzle, projectile return, and Godot drawing consume that same center/radius.
+- C# `CharacterBodyGeometry` is Godot-free, so frozen preview and applied character impacts are
+  asserted inside the exact body that `Main.DrawPlayer` projects and draws.
+
+The production-ABI fixture writer regenerated the shared corpus with a 25% command/preview shot,
+which now reaches the visible character rather than the terrain. Pinned hashes at simulation 9,
+content 6 are:
+
+| Vector | Hash |
+|---|---|
+| Initial | `1028333c8a2e9f0f` |
+| After move | `b0e9ba84389a6797` |
+| After ability / final | `682f0e2a57b7debd` |
+
+Golden vectors are `c37e748725499388` (all passes), `030efa1266831350` (walking),
+`5db94ba8baa5a1e4` (firing), `d447474ad2fda386` (mixed), and `59a874e1d6621f16`
+(low health). Each constant records the previous value and simulation-9 reason in
+`golden_vectors.rs`.
+
+### Export-only regressions found during review
+
+The renderer smoke initially failed even though unit tests were green. Its rejection details were
+discarded, so `MatchCommandRejectedException` now preserves the closed authority reason.
+That exposed `InputOutOfRange`: after walking, the bot emitted the otherwise ignored fixed 50%
+power on a melee strike even when the walk-adjusted cap was lower. Melee decisions now clamp to
+`max_launch_power`, with a focused regression test.
+
+The same review found that the native bot-decision serializer mapped `Jump` to `Pass`. The wire
+contract and C# polymorphic decision/submission path now carry a real `jump`; Rust and managed
+regressions prevent another silent translation.
+
+Client movement no longer duplicates `POSITION_SCALE = 1024`; one-cell input reads the loaded
+snapshot's authoritative scale. Internal-panic/overflow errors are no longer relabeled as the
+ordinary player-facing “Shot left the arena” message.
+
+CI now checks all 13 current `db_sim_*` exports and builds/tests/formats the Godot-free .NET
+contracts and interop solution on Linux against a freshly built native library.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 active core tests + all integration/doc tests pass; 41 explicitly documented legacy kit tests ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 pass, 1 fixture-writer test intentionally ignored |
+| `cargo deny check` | advisories, bans, licenses, sources pass; only unused license allow-list warnings |
+| `dotnet restore client/DungeonBarrage.sln --locked-mode` | pass |
+| `dotnet build client/DungeonBarrage.sln -c Release --no-restore` | pass, 0 warnings/errors |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-build` | 12 contracts + 84 interop = 96 pass |
+| Godot 4.7.1 .NET headless import/export | pass |
+| Exported C6 headless smoke | pass: 32 items, 3/3 maps, collapse, bot/human actions, rematch/disposal |
+| Exported C6 renderer smoke | pass: all prior checks plus 1280×720 setup, loadout, hover, and result captures |
+
+The deterministic smoke currently reports 419 bot decisions and can reach the hard turn limit
+after the smaller honest collider replaced the invisible outer target. That number is diagnostic,
+not evidence of a human playthrough. The next dependency remains unchanged: a human must finish a
+match from `PLAY.md` before Steam store-page work starts. The 41 ignored kit-era tests must be
+rewritten for the crow/item envelope if reopened; do not restore kits or rewrite accepted ADR
+history.

@@ -26,6 +26,7 @@ namespace DungeonBarrage.Client.Contracts;
 [JsonDerivedType(typeof(ClientAbilityCommand), "ability")]
 [JsonDerivedType(typeof(ClientPassiveChoiceCommand), "passiveChoice")]
 [JsonDerivedType(typeof(ClientPassCommand), "pass")]
+[JsonDerivedType(typeof(ClientJumpCommand), "jump")]
 public abstract record ClientMatchCommand(
     uint SchemaVersion,
     string CommandId,
@@ -114,6 +115,19 @@ public abstract record ClientMatchCommand(
         uint expectedTurnNumber,
         ulong expectedSnapshotGeneration) =>
         new ClientPassCommand(1, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
+
+    /// <summary>Builds a jump command.</summary>
+    /// <param name="commandId">Deterministic match-unique idempotency key.</param>
+    /// <param name="playerId">Claimed actor.</param>
+    /// <param name="expectedTurnNumber">Turn number observed when constructed.</param>
+    /// <param name="expectedSnapshotGeneration">Session generation observed when constructed.</param>
+    /// <returns>The command, base-typed so serialization always includes the discriminator.</returns>
+    public static ClientMatchCommand Jump(
+        string commandId,
+        string playerId,
+        uint expectedTurnNumber,
+        ulong expectedSnapshotGeneration) =>
+        new ClientJumpCommand(1, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
 }
 
 /// <summary>Move horizontally by a fixed-point delta, bounded by authoritative allowance.</summary>
@@ -185,3 +199,66 @@ public sealed record ClientPassCommand(
     uint ExpectedTurnNumber,
     ulong ExpectedSnapshotGeneration)
     : ClientMatchCommand(SchemaVersion, CommandId, PlayerId, ExpectedTurnNumber, ExpectedSnapshotGeneration);
+
+/// <summary>Hop straight up. Spends one cell of walk allowance when it rises.</summary>
+/// <param name="SchemaVersion">Client-contract schema version.</param>
+/// <param name="CommandId">Deterministic match-unique idempotency key.</param>
+/// <param name="PlayerId">Claimed actor, validated against the active player.</param>
+/// <param name="ExpectedTurnNumber">Turn number observed when the command was constructed.</param>
+/// <param name="ExpectedSnapshotGeneration">Session snapshot generation observed at construction.</param>
+public sealed record ClientJumpCommand(
+    uint SchemaVersion,
+    string CommandId,
+    string PlayerId,
+    uint ExpectedTurnNumber,
+    ulong ExpectedSnapshotGeneration)
+    : ClientMatchCommand(SchemaVersion, CommandId, PlayerId, ExpectedTurnNumber, ExpectedSnapshotGeneration);
+
+/// <summary>
+/// Read-only ability preview. Same fields as a fire, but no command id — a preview must
+/// never enter the idempotency ledger.
+/// </summary>
+/// <param name="SchemaVersion">Client-contract schema version.</param>
+/// <param name="ExpectedSnapshotGeneration">Generation the guide was built against.</param>
+/// <param name="PlayerId">Claimed actor.</param>
+/// <param name="Kind">Must be the wire discriminator <c>ability</c>.</param>
+/// <param name="Slot">Item slot to inspect.</param>
+/// <param name="AngleMillidegrees">Launch angle in millidegrees.</param>
+/// <param name="PowerBasisPoints">Launch power in basis points.</param>
+/// <param name="TargetPlayerId">Optional primary target.</param>
+/// <param name="SecondaryTargetPlayerId">Optional secondary target.</param>
+public sealed record ClientAbilityPreviewRequest(
+    [property: JsonPropertyName("schemaVersion")] uint SchemaVersion,
+    [property: JsonPropertyName("expectedSnapshotGeneration")] ulong ExpectedSnapshotGeneration,
+    [property: JsonPropertyName("playerId")] string PlayerId,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("slot")] ClientAbilitySlot Slot,
+    [property: JsonPropertyName("angleMillidegrees")] int AngleMillidegrees,
+    [property: JsonPropertyName("powerBasisPoints")] int PowerBasisPoints,
+    [property: JsonPropertyName("targetPlayerId")] string? TargetPlayerId,
+    [property: JsonPropertyName("secondaryTargetPlayerId")] string? SecondaryTargetPlayerId)
+{
+    /// <summary>Builds a preview for the active player's current aim.</summary>
+    /// <param name="playerId">Active player.</param>
+    /// <param name="expectedSnapshotGeneration">Current snapshot generation.</param>
+    /// <param name="slot">Selected item slot.</param>
+    /// <param name="angleMillidegrees">Quantized angle.</param>
+    /// <param name="powerBasisPoints">Quantized power.</param>
+    /// <returns>The request the native <c>db_sim_match_preview</c> export accepts.</returns>
+    public static ClientAbilityPreviewRequest ForAim(
+        string playerId,
+        ulong expectedSnapshotGeneration,
+        ClientAbilitySlot slot,
+        int angleMillidegrees,
+        int powerBasisPoints) =>
+        new(
+            SchemaVersion: 1,
+            ExpectedSnapshotGeneration: expectedSnapshotGeneration,
+            PlayerId: playerId,
+            Kind: "ability",
+            Slot: slot,
+            AngleMillidegrees: angleMillidegrees,
+            PowerBasisPoints: powerBasisPoints,
+            TargetPlayerId: null,
+            SecondaryTargetPlayerId: null);
+}

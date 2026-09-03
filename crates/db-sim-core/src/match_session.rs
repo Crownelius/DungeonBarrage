@@ -107,7 +107,7 @@ impl MatchCommand {
         }
 
         match &self.kind {
-            MatchCommandKind::Move { .. } | MatchCommandKind::Pass => {}
+            MatchCommandKind::Move { .. } | MatchCommandKind::Pass | MatchCommandKind::Jump => {}
             MatchCommandKind::Ability {
                 target_player_id,
                 secondary_target_player_id,
@@ -171,6 +171,7 @@ impl Canonical for MatchCommand {
                 hasher.write_str(passive_id);
             }
             MatchCommandKind::Pass => hasher.write_u8(3),
+            MatchCommandKind::Jump => hasher.write_u8(4),
         }
     }
 }
@@ -203,6 +204,8 @@ pub enum MatchCommandKind {
     },
     /// End the active turn without attacking.
     Pass,
+    /// Hop straight up. Spends one cell of walk allowance when it rises.
+    Jump,
 }
 
 /// A turn ended by the authority because its planning deadline expired.
@@ -950,7 +953,7 @@ fn retained_command_bytes(command: &MatchCommand) -> Option<u64> {
             retained_optional_string_bytes(&mut counter, secondary_target_player_id.as_deref())?;
         }
         MatchCommandKind::PassiveChoice { passive_id } => counter.string(passive_id)?,
-        MatchCommandKind::Pass => {}
+        MatchCommandKind::Pass | MatchCommandKind::Jump => {}
     }
     Some(counter.finish())
 }
@@ -1630,8 +1633,11 @@ fn retained_player_snapshot_bytes(
         is_eliminated,
         max_health,
         position,
+        collision_center,
+        collision_radius,
         loadout,
         ammo,
+        trinket_charge,
         statuses,
         appearance,
     } = player;
@@ -1641,9 +1647,13 @@ fn retained_player_snapshot_bytes(
     counter.boolean(*is_eliminated)?;
     counter.u16(*max_health)?;
     retained_position_bytes(counter, *position)?;
+    retained_position_bytes(counter, *collision_center)?;
+    counter.i32(*collision_radius)?;
     counter.string(&loadout.main)?;
     counter.string(&loadout.secondary)?;
     counter.string(&loadout.melee_tool)?;
+    counter.string(&loadout.trinket)?;
+    counter.u16(*trinket_charge)?;
     for counter_ammo in ammo {
         counter.u8(match counter_ammo.policy {
             crate::types::AmmoPolicy::Finite => 0,
@@ -2650,6 +2660,10 @@ fn apply_to_working_host(
             host.pass_turn()?;
             Ok(AppliedCommand::Accepted(None))
         }
+        MatchCommandKind::Jump => {
+            let _risen = host.submit_jump(&command.player_id)?;
+            Ok(AppliedCommand::Accepted(None))
+        }
     }
 }
 
@@ -2707,10 +2721,13 @@ fn preview_projectile_traces(
         .players
         .iter()
         .filter(|player| player.id != request.player_id && !player.is_eliminated())
-        .map(|player| (player.id.clone(), player.position, crate::fixed::BODY_WIDTH))
+        .map(|player| {
+            let (center, radius) = crate::fixed::player_collision_circle(player.position);
+            (player.id.clone(), center, radius)
+        })
         .collect();
     let input = crate::types::BallisticInput {
-        origin: actor_position,
+        origin: crate::fixed::player_collision_center(actor_position),
         angle_millidegrees: request.angle_millidegrees,
         power_basis_points: request.power_basis_points,
         wind_per_tick: state.wind_per_tick,
@@ -2795,7 +2812,8 @@ fn preflight_rejection(
     let phase_is_valid = match command.kind {
         MatchCommandKind::Move { .. }
         | MatchCommandKind::Ability { .. }
-        | MatchCommandKind::Pass => state.phase.accepts_ability_command(),
+        | MatchCommandKind::Pass
+        | MatchCommandKind::Jump => state.phase.accepts_ability_command(),
         MatchCommandKind::PassiveChoice { .. } => state.phase == MatchPhase::PassiveSelection,
     };
     (!phase_is_valid).then_some(CommandRejection::WrongPhase)
@@ -3155,7 +3173,8 @@ fn reconcile_strikes(
         },
         MatchCommandKind::Move { .. }
         | MatchCommandKind::PassiveChoice { .. }
-        | MatchCommandKind::Pass => return Err(SessionFault::ContractInvariant),
+        | MatchCommandKind::Pass
+        | MatchCommandKind::Jump => return Err(SessionFault::ContractInvariant),
     };
     let mut replay_state = pre_state.clone();
     let replayed = match crate::command::apply_ability(&mut replay_state, &replay_command) {
@@ -4040,6 +4059,7 @@ const fn ability_slot_tag(slot: AbilitySlot) -> u8 {
         AbilitySlot::Basic => 0,
         AbilitySlot::BasicAlt => 1,
         AbilitySlot::Special => 2,
+        AbilitySlot::Trinket => 3,
     }
 }
 

@@ -27,8 +27,18 @@ public sealed class BotDecisionTests
         Assert.Equal(1u, decision.SchemaVersion);
         Assert.True(
             decision is ClientBotMoveDecision or ClientBotAbilityDecision or ClientBotPassiveChoiceDecision
-                or ClientBotPassDecision,
+                or ClientBotPassDecision or ClientBotJumpDecision,
             $"unexpected decision type: {decision.GetType()}");
+    }
+
+    [Fact]
+    public void A_jump_decision_is_not_deserialized_as_a_pass()
+    {
+        const string json = "{\"schemaVersion\":1,\"kind\":\"jump\"}";
+
+        var decision = JsonSerializer.Deserialize<ClientBotDecision>(json, ClientEnvelope.Options);
+
+        Assert.IsType<ClientBotJumpDecision>(decision);
     }
 
     [Fact]

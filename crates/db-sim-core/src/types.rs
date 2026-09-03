@@ -25,7 +25,7 @@ pub const BASE_ATTACK: i32 = 100;
 pub const CROW_ID: &str = "crow";
 
 /// Shared crow maximum health (`PRODUCT_SPEC.md` §2 / `ARSENAL.md`).
-pub const CROW_MAX_HEALTH: u16 = 200;
+pub const CROW_MAX_HEALTH: u16 = 280;
 
 /// Special-gauge scale. The gauge is stored in hundredths so the fractional per-damage
 /// gains in `CHARACTERS.md` §2 (+0.40 dealt, +0.25 taken, +0.30 healed) stay exact
@@ -118,22 +118,29 @@ impl MovementClass {
 
 /// Which equipped item slot is being used.
 ///
-/// Bounded at three so the HUD is bounded at three buttons. Variant names keep the
-/// historical `Basic` / `BasicAlt` / `Special` discriminants so canonical tags stay
-/// stable; the *wire* names are the loadout slots `main` / `secondary` / `meleeTool`.
+/// Combat slots stay `main` / `secondary` / `meleeTool`. `Trinket` is a crown or anklet
+/// whose special fires only when [`PlayerState::trinket_charge`] is full.
+///
+/// Variant names keep the historical `Basic` / `BasicAlt` / `Special` discriminants so
+/// canonical tags stay stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AbilitySlot {
-    /// Main item. Finite ammunition; strongest terrain or area influence.
+    /// Main ranged item.
     Basic,
-    /// Secondary item. Includes bows, the longsword, and handguns.
+    /// Secondary: a single-use round of a main weapon.
     BasicAlt,
-    /// Melee/tool item. Close-range damage, digging, or risky burst.
+    /// Melee item. Visual only; every melee shares one strike.
     Special,
+    /// Crown or anklet. Charge-gated unique special.
+    Trinket,
 }
 
 impl AbilitySlot {
-    /// All slots in canonical order. Iteration order is fixed for hashing.
-    pub const ALL: [Self; 3] = [Self::Basic, Self::BasicAlt, Self::Special];
+    /// Combat slots that spend ammunition. Iteration order is fixed for hashing.
+    pub const COMBAT: [Self; 3] = [Self::Basic, Self::BasicAlt, Self::Special];
+
+    /// All slots including the trinket, in canonical order.
+    pub const ALL: [Self; 4] = [Self::Basic, Self::BasicAlt, Self::Special, Self::Trinket];
 
     /// Stable wire identifier. Never localize these.
     #[must_use]
@@ -142,16 +149,18 @@ impl AbilitySlot {
             Self::Basic => "main",
             Self::BasicAlt => "secondary",
             Self::Special => "meleeTool",
+            Self::Trinket => "trinket",
         }
     }
 
-    /// Index into [`PlayerState::ammo`] / loadout slot order.
+    /// Index into [`PlayerState::ammo`] for combat slots. Trinket is not an ammo index.
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Basic => 0,
             Self::BasicAlt => 1,
             Self::Special => 2,
+            Self::Trinket => 3,
         }
     }
 
@@ -167,7 +176,7 @@ impl AbilitySlot {
 pub enum AmmoPolicy {
     /// Decrement once after the authority accepts the attack.
     Finite,
-    /// Never decrements. The Longsword is the only unlimited item.
+    /// Never decrements. Crowns and anklets are unlimited; they spend charge instead.
     Unlimited,
 }
 
@@ -211,22 +220,25 @@ impl AmmoCounter {
 /// Equipped item identifiers in slot order. Validated against the item catalog at match create.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loadout {
-    /// Main item identifier.
+    /// Main ranged item identifier.
     pub main: String,
-    /// Secondary item identifier.
+    /// Secondary: a single-use round.
     pub secondary: String,
-    /// Melee/tool item identifier.
+    /// Melee item identifier. Visual only.
     pub melee_tool: String,
+    /// Crown or anklet identifier.
+    pub trinket: String,
 }
 
 impl Loadout {
-    /// Launch-default triangle: Ramshot Cannon, Recurve Bow, Trench Spade.
+    /// Launch-default: Ramshot, one Ramshot shell, Trench Spade, Ember Crown.
     #[must_use]
     pub fn launch_default() -> Self {
         Self {
             main: "ramshot-cannon".to_owned(),
-            secondary: "recurve-bow".to_owned(),
+            secondary: "ramshot-shell".to_owned(),
             melee_tool: "trench-spade".to_owned(),
+            trinket: "ember-crown".to_owned(),
         }
     }
 
@@ -237,12 +249,15 @@ impl Loadout {
             AbilitySlot::Basic => self.main.as_str(),
             AbilitySlot::BasicAlt => self.secondary.as_str(),
             AbilitySlot::Special => self.melee_tool.as_str(),
+            AbilitySlot::Trinket => self.trinket.as_str(),
         }
     }
 }
 
-/// Default ammo matching [`Loadout::launch_default`]. Kept here so `PlayerState`
-/// construction does not take a dependency on the item catalog.
+/// Full trinket charge. One special per fill.
+pub const TRINKET_CHARGE_FULL: u16 = 10_000;
+
+/// Default ammo matching [`Loadout::launch_default`] combat slots.
 pub const DEFAULT_AMMO: [AmmoCounter; 3] = [
     AmmoCounter {
         remaining: 3,
@@ -250,8 +265,8 @@ pub const DEFAULT_AMMO: [AmmoCounter; 3] = [
         policy: AmmoPolicy::Finite,
     },
     AmmoCounter {
-        remaining: 5,
-        maximum: 5,
+        remaining: 1,
+        maximum: 1,
         policy: AmmoPolicy::Finite,
     },
     AmmoCounter {
@@ -913,8 +928,10 @@ pub struct PlayerState {
     pub position: FixedPoint,
     /// Equipped item identifiers in slot order.
     pub loadout: Loadout,
-    /// Remaining ammunition per slot, in [`AbilitySlot::ALL`] order.
+    /// Remaining ammunition per combat slot, in [`AbilitySlot::COMBAT`] order.
     pub ammo: [AmmoCounter; 3],
+    /// Charge toward the equipped crown or anklet special. Full is [`TRINKET_CHARGE_FULL`].
+    pub trinket_charge: u16,
     /// Active statuses, kept sorted by `kind` for canonical encoding.
     pub statuses: Vec<StatusEffect>,
     /// Cosmetic only. Excluded from the state hash.
@@ -933,6 +950,7 @@ impl PlayerState {
             position,
             loadout: Loadout::launch_default(),
             ammo: DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -1176,7 +1194,7 @@ pub enum CommandRejection {
     TurnVersionMismatch,
     /// The acting player's loadout has no item in that slot. **Security event.**
     AbilityNotAvailable,
-    /// The special was used without a full gauge. Unused in this envelope; items spend ammo.
+    /// The crown or anklet was used without a full trinket charge.
     GaugeNotReady,
     /// The selected item has no remaining ammunition or durability.
     OutOfAmmo,

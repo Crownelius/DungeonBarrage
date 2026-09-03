@@ -1,13 +1,15 @@
 # Dungeon Barrage operational handoff
 
-**Checkpoint date:** 2026-08-31
+**Checkpoint date:** 2026-09-03
 
 **Audience:** the next implementation agent
 
-**State:** Playable cut on `SIMULATION_VERSION` 7. The match-create/command envelope no
-longer carries `characterId` or character kits. Every fighter is the one crow. Equipped
-items are ammunition. Leftover C1 timeout/preview/object-provenance kit tests are
-`#[ignore]` until revisited; a real turn already runs on the existing duel + blocks.
+**State:** Playable cut on `SIMULATION_VERSION` 9 / `CONTENT_VERSION` 6. The
+match-create/command envelope no longer carries `characterId` or character kits. Every
+fighter is the one crow. Equipped items are ammunition. Loadout is a four-page wizard
+(ranged, melee, one-shot secondary, crown/anklet) with eight items per page. Crowns and
+anklets charge on two damaging hits. Leftover C1 timeout/preview/object-provenance kit
+tests are `#[ignore]` until revisited.
 
 Steam page work is **after C5 only** and is not part of this checkpoint.
 
@@ -38,12 +40,13 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 
 | Claim | Status |
 |---|---|
-| Envelope: no `characterId`/kits; one crow; items as ammo | **implemented** (`SIMULATION_VERSION` 7, `CONTENT_VERSION` 4). Ramshot knockback is two cells. A healthy match runs 3–4 turns and the winner finishes hurt. |
+| Envelope: no `characterId`/kits; one crow; items as ammo | **implemented** (`SIMULATION_VERSION` 9, `CONTENT_VERSION` 6). Melee-style stages, crow 280 HP, 2–3 cell craters. Eight ranged, eight one-shot secondaries, eight melee skins, eight charge-gated crowns/anklets. Ramshot knockback is two cells. |
+| Visible fighter body equals the authoritative hitbox | **implemented**: `BODY_WIDTH` is a diameter; Rust publishes a half-body-width collision radius centered one radius above the ground pivot. Preview, apply, bot aim, projectile muzzle/playback, and Godot drawing all consume that geometry. Frozen preview/apply impacts are asserted inside the displayed target. |
 | FFI `create`/`apply`/`snapshot` hashes equal direct Rust | **implemented** (`ffi_create_apply_snapshot_matches_direct_rust_on_the_duel_blocks_path`) |
 | 3 stacked maps + bot reaches win/lose | **implemented**: bot-to-terminal on all three maps (`maps_bot_outcome`); Godot C6 `mapsCompleted: crow-perch,broken-battlements,twin-spires` |
 | Stacked structures fall in sim state when support is destroyed | **implemented**: `destroying_support_on_each_stacked_map_drops_the_crown`; C6 `stackedBlocksFell: true` |
 | C3 C# `SafeHandle` vs release FFI | **implemented** on the Godot-free interop tests; recopy `target/release/db_sim_ffi.dll` to `client/native/win-x64/` |
-| C4 Godot loadout picker, aim, falling structures, local match | **implemented**: every catalog item SelectTile + null-target fire; windowed C5/C6 screenshots 1280×720 |
+| C4 Godot loadout picker, aim, falling structures, local match | **implemented**: sequential 8-tile pages. Slingshot aim: drag **away** from the opponent; gold line is first impact; dotted arc is the flight. `A`/`D` walk, Space jump, arrows pan camera. Walking cuts this turn's max power (10% floor). Returning Boomerang bounces and craters. |
 | C5 human-finishable match + `PLAY.md` | **implemented**: C5 now starts through the picker on `crow-perch`, not the embedded fixture. Windowed C5 shows MATCH COMPLETE. Not a live human sitting at the keyboard. |
 | Leftover C1 kit tests | **not restored** (41 `#[ignore]` kit tests stay kit-shaped). Crow-envelope timeout + preview covered on `crow-perch`. Object-spawn kits (knives/turrets) are not in this catalog. |
 | Steam page | **not started** (after C5 only) |
@@ -69,22 +72,23 @@ Create request player object:
   "team": 0,
   "loadout": {
     "main": "ramshot-cannon",
-    "secondary": "recurve-bow",
-    "meleeTool": "trench-spade"
+    "secondary": "ramshot-shell",
+    "meleeTool": "trench-spade",
+    "trinket": "ember-crown"
   },
   "appearance": { "skinId": "default", "abilitySkinIds": ["default", "default", "default"], "victoryPoseId": "default" }
 }
 ```
 
-Ability commands use `"slot": "main" | "secondary" | "meleeTool"`.
+Ability commands use `"slot": "main" | "secondary" | "meleeTool" | "trinket"`.
 
-Shared-fixture hashes at `SIMULATION_VERSION` 7 / `CONTENT_VERSION` 4:
+Shared-fixture hashes at `SIMULATION_VERSION` 9 / `CONTENT_VERSION` 6:
 
 | Vector | Hash |
 |---|---|
-| Initial | `5ff7b9a3a97f7d91` |
-| After move | `4610d8c64f1670b9` |
-| After ability / final | `1e5dff46164b909b` |
+| Initial | `1028333c8a2e9f0f` |
+| After move | `b0e9ba84389a6797` |
+| After ability / final | `682f0e2a57b7debd` |
 
 **Read these from the fixture files, not from this table.** Every content bump moves all three,
 because `content_version` is part of the hashed state. This table has already been stale once: it
@@ -136,6 +140,7 @@ From the repo root, every slice:
 - `cargo deny check`
 
 Then recopy the release FFI next to the C# RID dir and run `dotnet test client/DungeonBarrage.sln -c Release`.
+CI repeats the Godot-free C# gate on Linux against a freshly built `libdb_sim_ffi.so`.
 
 Unit tests are not sufficient on their own for anything that touches content, the manifest, or the
 Godot screens. Export and run the C6 smoke as well:
@@ -143,10 +148,13 @@ Godot screens. Export and run the C6 smoke as well:
 ```powershell
 & $env:DUNGEON_BARRAGE_GODOT --headless --path client/src/DungeonBarrage.Client `
     --export-release "Windows Desktop" <out>/DungeonBarrage.exe
-<out>/DungeonBarrage.exe --headless --c6-smoke-report <out>/report.json --c6-screenshot <out>/shot.png
+<out>/DungeonBarrage.exe --headless -- --c6-smoke-report <out>/report.json --c6-screenshot <out>/shot.png
 ```
 
 `success: true` is not the whole check — read the report. `allPlayableMapsCompleted`,
-`stackedBlocksFell`, and a `turnsPlayed` in the high single digits are what say the game is
-actually playable; `humanMainItemId` and `botMainItemId` must differ, since both once read from
-the same field and hid that the bot mirrored the player's loadout.
+`stackedBlocksFell`, clean rematch disposal, and non-zero dimensions from the renderer-backed
+(non-headless) run are required. `turnsPlayed` is diagnostic rather than a fixed threshold after
+the simulation-9 hitbox correction; the smaller visible target can make bot-only matches reach
+the hard turn limit. This smoke proves the complete client flow, not the still-required human
+playthrough. `humanMainItemId` and `botMainItemId` must differ, since both once read from the same
+field and hid that the bot mirrored the player's loadout.
