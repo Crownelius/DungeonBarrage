@@ -3187,8 +3187,31 @@ public partial class Main : Node2D
 
             // 6. Multi-Platform Export Presets Verification
             var presetsPath = "res://export_presets.cfg";
-            using var file = Godot.FileAccess.Open(presetsPath, Godot.FileAccess.ModeFlags.Read);
-            var presetsText = file?.GetAsText() ?? string.Empty;
+            string presetsText = string.Empty;
+            if (Godot.FileAccess.FileExists(presetsPath))
+            {
+                using var file = Godot.FileAccess.Open(presetsPath, Godot.FileAccess.ModeFlags.Read);
+                presetsText = file?.GetAsText() ?? string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(presetsText))
+            {
+                var candidatePaths = new[]
+                {
+                    Path.Combine(AppContext.BaseDirectory, "export_presets.cfg"),
+                    Path.Combine(AppContext.BaseDirectory, "../../../client/src/DungeonBarrage.Client/export_presets.cfg"),
+                    Path.Combine(Directory.GetCurrentDirectory(), "client/src/DungeonBarrage.Client/export_presets.cfg"),
+                };
+                foreach (var candidate in candidatePaths)
+                {
+                    if (File.Exists(candidate))
+                    {
+                        presetsText = await File.ReadAllTextAsync(candidate).ConfigureAwait(true);
+                        break;
+                    }
+                }
+            }
+
             var multiPlatformExportPresetsVerified = presetsText.Contains("name=\"Windows Desktop\"") &&
                                                      presetsText.Contains("name=\"Linux/X11\"") &&
                                                      presetsText.Contains("name=\"macOS\"");

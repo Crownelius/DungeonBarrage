@@ -3693,5 +3693,43 @@ tactical visibility for target and hit markers.
 | Renderer-backed C5 smoke | pass: 1280×720 fire, impact, and post-shot captures |
 | Renderer-backed C6 smoke | pass: 1280×720 setup, loadout select, hover, and result captures |
 
+---
+
+## 2026-09-03 — C7 desktop quality and planning deadline verification
+
+This checkpoint completes machine-checkable evidence for CLIENT_SPEC §21 milestone C7 (desktop release quality)
+and validates the real wall-clock planning clock and automatic timeout in Main._Process.
+
+### Delivered
+
+- **Export Presets Packaging (`export_presets.cfg`):** Configured `include_filter="export_presets.cfg"` across
+  Windows, Linux, and macOS presets, ensuring release exports bundle configuration resources.
+- **Robust Preset Verification (`Main.cs`):** Enhanced C7 smoke verification with asynchronous file reading
+  and path fallback, passing both in editor, standalone development, and packaged release binaries.
+- **Full Smoke Suite Validation:**
+  - `C6TimeoutSmoke`: Verified wall-clock planning deadline countdown, automatic trigger on idle turn,
+    and turn handoff to bot and back (`c6-timeout-report.json`, `c6-timeout-windowed-report.json`).
+  - `C7Smoke`: Verified settings recovery from non-existent storage, audio volume clamping, accessibility
+    text scaling limits, localization catalog (en-US / es-ES), performance tier switching, and multi-platform
+    export presets (`c7-report.json`, `c7-windowed-report.json`).
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 passed, 41 ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 passed, 1 ignored |
+| `cargo deny check` | pass |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 105 interop = 117 passed |
+| Godot 4.7.1 .NET release export | pass (`export/windows/DungeonBarrage.exe`) |
+| Headless & Windowed C5 smoke | pass: `success: true`, real damage, fire/hit/impact cues |
+| Headless & Windowed C6 smoke | pass: `success: true`, 3/3 maps, collapse, bot/human, rematch |
+| Headless & Windowed C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
+| Headless & Windowed C7 smoke | pass: `success: true`, all 6 quality checks verified |
+
+
 
 
