@@ -1682,13 +1682,28 @@ public partial class Main : Node2D
                 }
             }
 
+            var activePlayer = ActivePlayer(snapshot);
+            var isActive = activePlayer is not null && string.Equals(player.PlayerId, activePlayer.PlayerId, StringComparison.Ordinal);
+            var slot = isActive ? _selectedAbilitySlot : ClientAbilitySlot.Main;
+            float? aimAngle = null;
+            if (isActive && _isAiming)
+            {
+                var aim = CurrentAim();
+                if (aim.CanFire)
+                {
+                    aimAngle = (aim.AngleMillidegrees / 1000f) * (MathF.PI / 180f);
+                }
+            }
+
             DrawPlayer(
                 player,
                 index == 0 ? PlayerAColor : PlayerBColor,
                 index,
                 snapshot.PositionScale,
                 presentation?.CueFor(player.PlayerId),
-                opponentX);
+                opponentX,
+                slot,
+                aimAngle);
         }
 
         DrawCombatEffects();
@@ -1926,7 +1941,9 @@ public partial class Main : Node2D
         int index,
         int positionScale,
         ActorPresentationCue? cue,
-        int? opponentX)
+        int? opponentX,
+        ClientAbilitySlot activeSlot = ClientAbilitySlot.Main,
+        float? aimAngleRadians = null)
     {
         var model = CharacterPresentationModel.Create(
             player,
@@ -1934,13 +1951,16 @@ public partial class Main : Node2D
             positionScale,
             _cellSize,
             new PresentationPoint(_worldOrigin.X, _worldOrigin.Y),
-            new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y));
-        var center = new Vector2(model.Body.Center.X, model.Body.Center.Y);
+            new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y),
+            activeSlot,
+            aimAngleRadians);
+        var bobY = model.BobOffsetY(Time.GetTicksMsec(), _settings.Accessibility.ReduceMotion);
+        var center = new Vector2(model.Body.Center.X, model.Body.Center.Y + bobY);
         var radius = model.Body.Radius;
         var defeated = player.IsEliminated || cue is { Kind: ActorPresentationCueKind.Defeat };
         var bodyColor = defeated ? Colors.Gray : color;
 
-        // Ground shadow
+        // Ground shadow (anchored to floor)
         DrawCircle(new Vector2(model.ShadowPivot.X, model.ShadowPivot.Y), radius * 0.45f, new Color(0, 0, 0, 0.35f));
 
         // Authoritative body
@@ -1950,7 +1970,7 @@ public partial class Main : Node2D
         // Equipped Trinket (Crown / Gem) socket adornment
         if (!defeated && model.TrinketAccent is { } trinket)
         {
-            var crownPos = new Vector2(model.CrownSocket.X, model.CrownSocket.Y);
+            var crownPos = new Vector2(model.CrownSocket.X, model.CrownSocket.Y + bobY);
             var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
             if (trinket.Kind == CosmeticAccentKind.Crown)
             {
@@ -1986,16 +2006,48 @@ public partial class Main : Node2D
         // Equipped Weapon / Tool socket adornment
         if (!defeated && model.WeaponAccent is { } weapon)
         {
-            var weaponPos = new Vector2(model.WeaponSocket.X, model.WeaponSocket.Y);
+            var weaponPos = new Vector2(model.WeaponSocket.X, model.WeaponSocket.Y + bobY);
             var weaponColor = Color.FromHtml(weapon.PrimaryColorHex);
             var dir = model.FacingSign;
+
+            Vector2 barrelDir;
+            if (model.AimVector is { } aimVec)
+            {
+                barrelDir = new Vector2(aimVec.X, aimVec.Y);
+            }
+            else
+            {
+                barrelDir = new Vector2(dir, -0.2f).Normalized();
+            }
+
             if (weapon.Kind == CosmeticAccentKind.Cannon)
             {
-                DrawLine(weaponPos, weaponPos + new Vector2(dir * radius * 0.45f, -radius * 0.1f), weaponColor, width: 4f);
+                var barrelEnd = weaponPos + (barrelDir * radius * 0.55f);
+                DrawLine(weaponPos, barrelEnd, weaponColor, width: 4.5f);
+                DrawCircle(barrelEnd, 2.5f, weaponColor.Lightened(0.2f));
             }
             else if (weapon.Kind == CosmeticAccentKind.Blade)
             {
-                DrawLine(weaponPos, weaponPos + new Vector2(dir * radius * 0.35f, radius * 0.35f), weaponColor, width: 3f);
+                var bladeDir = model.AimVector is not null ? barrelDir : new Vector2(dir * 0.7f, 0.7f).Normalized();
+                var bladeTip = weaponPos + (bladeDir * radius * 0.5f);
+                DrawLine(weaponPos, bladeTip, weaponColor, width: 3.5f);
+                DrawLine(bladeTip, bladeTip + new Vector2(dir * 2.5f, -2.5f), weaponColor.Lightened(0.3f), width: 2f);
+            }
+            else if (weapon.Kind == CosmeticAccentKind.Bow)
+            {
+                var bowCenter = weaponPos + (barrelDir * radius * 0.3f);
+                var perp = new Vector2(-barrelDir.Y, barrelDir.X) * radius * 0.35f;
+                var tip1 = bowCenter + perp;
+                var tip2 = bowCenter - perp;
+                DrawLine(tip1, tip2, weaponColor, width: 3f);
+                DrawLine(tip1, weaponPos, Colors.LightGoldenrodYellow, width: 1.5f);
+                DrawLine(tip2, weaponPos, Colors.LightGoldenrodYellow, width: 1.5f);
+            }
+            else if (weapon.Kind == CosmeticAccentKind.Ordnance)
+            {
+                var ordPos = weaponPos + (barrelDir * radius * 0.25f);
+                DrawCircle(ordPos, radius * 0.22f, weaponColor);
+                DrawCircle(ordPos + new Vector2(0, -radius * 0.1f), radius * 0.10f, weaponColor.Lightened(0.3f));
             }
         }
 
@@ -2005,12 +2057,12 @@ public partial class Main : Node2D
         var beak = new Vector2[model.BeakPolygon.Count];
         for (var i = 0; i < model.BeakPolygon.Count; i++)
         {
-            beak[i] = new Vector2(model.BeakPolygon[i].X, model.BeakPolygon[i].Y);
+            beak[i] = new Vector2(model.BeakPolygon[i].X, model.BeakPolygon[i].Y + bobY);
         }
         DrawColoredPolygon(beak, Colors.Gold);
 
         // Eye socket
-        var eyePos = new Vector2(model.EyeSocket.X, model.EyeSocket.Y);
+        var eyePos = new Vector2(model.EyeSocket.X, model.EyeSocket.Y + bobY);
         DrawCircle(eyePos, radius * 0.14f, Colors.White);
         DrawCircle(eyePos, radius * 0.06f, Colors.Black);
 

@@ -21,6 +21,12 @@ public enum CosmeticAccentKind
 
     /// <summary>Blade or spade tool silhouette (e.g. trench-spade, scrap-scythe).</summary>
     Blade,
+
+    /// <summary>Arched recurve bow silhouette (e.g. recurve-bow, line-repeater).</summary>
+    Bow,
+
+    /// <summary>One-shot secondary ordnance projectile silhouette (e.g. ramshot-shell, frostfall-shell, mole-charge).</summary>
+    Ordnance,
 }
 
 /// <summary>
@@ -74,8 +80,17 @@ public sealed class CharacterPresentationModel
     /// <summary>Equipped trinket / crown cosmetic accent, or null.</summary>
     public EquipmentCosmeticAccent? TrinketAccent { get; }
 
-    /// <summary>Equipped main weapon cosmetic accent, or null.</summary>
+    /// <summary>Equipped weapon cosmetic accent for the currently active slot, or null.</summary>
     public EquipmentCosmeticAccent? WeaponAccent { get; }
+
+    /// <summary>The currently active ability slot being presented.</summary>
+    public ClientAbilitySlot ActiveSlot { get; }
+
+    /// <summary>The aim elevation angle in radians relative to horizontal, if aiming.</summary>
+    public float? AimAngleRadians { get; }
+
+    /// <summary>The normalized directional aim unit vector in screen coordinates (accounting for facing), or null if not aiming.</summary>
+    public PresentationPoint? AimVector { get; }
 
     private CharacterPresentationModel(
         PresentationCircle body,
@@ -87,7 +102,10 @@ public sealed class CharacterPresentationModel
         PresentationPoint shadowPivot,
         IReadOnlyList<PresentationPoint> beakPolygon,
         EquipmentCosmeticAccent? trinketAccent,
-        EquipmentCosmeticAccent? weaponAccent)
+        EquipmentCosmeticAccent? weaponAccent,
+        ClientAbilitySlot activeSlot,
+        float? aimAngleRadians,
+        PresentationPoint? aimVector)
     {
         Body = body;
         FacesRight = facesRight;
@@ -99,6 +117,25 @@ public sealed class CharacterPresentationModel
         BeakPolygon = beakPolygon;
         TrinketAccent = trinketAccent;
         WeaponAccent = weaponAccent;
+        ActiveSlot = activeSlot;
+        AimAngleRadians = aimAngleRadians;
+        AimVector = aimVector;
+    }
+
+    /// <summary>
+    /// Computes a subtle vertical idle breathing offset in display pixels.
+    /// </summary>
+    /// <param name="visualTimeMsec">Visual clock time in milliseconds.</param>
+    /// <param name="reduceMotion">Whether reduced motion accessibility is enabled.</param>
+    /// <returns>A signed pixel offset along the Y axis.</returns>
+    public float BobOffsetY(ulong visualTimeMsec, bool reduceMotion)
+    {
+        if (reduceMotion)
+        {
+            return 0f;
+        }
+
+        return MathF.Sin(visualTimeMsec * 0.003f) * (Body.Radius * 0.05f);
     }
 
     /// <summary>
@@ -110,6 +147,8 @@ public sealed class CharacterPresentationModel
     /// <param name="cellSize">Current display pixels per terrain cell.</param>
     /// <param name="worldOrigin">Arena origin on screen.</param>
     /// <param name="cameraOffset">Current effective camera offset.</param>
+    /// <param name="activeSlot">The currently active ability slot being framed.</param>
+    /// <param name="aimAngleRadians">Current aim elevation angle in radians, or null if not aiming.</param>
     /// <returns>A fully resolved paper-doll presentation model.</returns>
     public static CharacterPresentationModel Create(
         ClientPlayerSnapshot player,
@@ -117,7 +156,9 @@ public sealed class CharacterPresentationModel
         int positionScale,
         float cellSize,
         PresentationPoint worldOrigin,
-        PresentationPoint cameraOffset)
+        PresentationPoint cameraOffset,
+        ClientAbilitySlot activeSlot = ClientAbilitySlot.Main,
+        float? aimAngleRadians = null)
     {
         ArgumentNullException.ThrowIfNull(player);
         var body = CharacterBodyGeometry.FromPlayer(player);
@@ -144,7 +185,15 @@ public sealed class CharacterPresentationModel
         };
 
         var trinketAccent = ResolveTrinketAccent(player.Loadout.Trinket);
-        var weaponAccent = ResolveWeaponAccent(player.Loadout.Main);
+        var weaponAccent = ResolveWeaponAccent(player.Loadout, activeSlot);
+
+        PresentationPoint? aimVector = null;
+        if (aimAngleRadians is { } angle)
+        {
+            var vx = facing * MathF.Cos(angle);
+            var vy = -MathF.Sin(angle);
+            aimVector = new PresentationPoint(vx, vy);
+        }
 
         return new CharacterPresentationModel(
             projected,
@@ -156,7 +205,10 @@ public sealed class CharacterPresentationModel
             shadowPivot,
             beakPolygon,
             trinketAccent,
-            weaponAccent);
+            weaponAccent,
+            activeSlot,
+            aimAngleRadians,
+            aimVector);
     }
 
     private static EquipmentCosmeticAccent? ResolveTrinketAccent(string? itemId)
@@ -167,12 +219,13 @@ public sealed class CharacterPresentationModel
         }
 
         var lower = itemId.ToLowerInvariant();
-        if (lower.Contains("crown") || lower.Contains("diadem"))
+        if (lower.Contains("crown") || lower.Contains("diadem") || lower.Contains("circlet"))
         {
             return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Crown, "#FFD700");
         }
 
-        if (lower.Contains("anklet") || lower.Contains("gem") || lower.Contains("ring"))
+        if (lower.Contains("anklet") || lower.Contains("gem") || lower.Contains("ring") ||
+            lower.Contains("crest") || lower.Contains("pendant"))
         {
             return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Gem, "#4FC3F7");
         }
@@ -181,22 +234,48 @@ public sealed class CharacterPresentationModel
         return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Crown, "#E0E0E0");
     }
 
-    private static EquipmentCosmeticAccent? ResolveWeaponAccent(string? itemId)
+    private static EquipmentCosmeticAccent? ResolveWeaponAccent(ClientLoadout loadout, ClientAbilitySlot activeSlot)
     {
+        var itemId = activeSlot switch
+        {
+            ClientAbilitySlot.Main => loadout.Main,
+            ClientAbilitySlot.Secondary => loadout.Secondary,
+            ClientAbilitySlot.MeleeTool => loadout.MeleeTool,
+            ClientAbilitySlot.Trinket => null,
+            _ => loadout.Main,
+        };
+
         if (string.IsNullOrWhiteSpace(itemId))
         {
             return null;
         }
 
         var lower = itemId.ToLowerInvariant();
-        if (lower.Contains("cannon") || lower.Contains("mortar") || lower.Contains("howitzer") || lower.Contains("ramshot"))
+        if (lower.Contains("bow") || lower.Contains("repeater"))
         {
-            return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Cannon, "#78909C");
+            return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Bow, "#8D6E63");
         }
 
-        if (lower.Contains("spade") || lower.Contains("scythe") || lower.Contains("blade") || lower.Contains("dagger"))
+        if (lower.Contains("shell") || lower.Contains("charge") || lower.Contains("mag") ||
+            lower.Contains("belt") || lower.Contains("finisher") || lower.Contains("bladder") ||
+            lower.Contains("capsule") || lower.Contains("bomb"))
+        {
+            return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Ordnance, "#FF7043");
+        }
+
+        if (lower.Contains("spade") || lower.Contains("scythe") || lower.Contains("blade") ||
+            lower.Contains("dagger") || lower.Contains("maul") || lower.Contains("pick") ||
+            lower.Contains("longsword") || lower.Contains("cleaver") || lower.Contains("fan") ||
+            lower.Contains("beak"))
         {
             return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Blade, "#B0BEC5");
+        }
+
+        if (lower.Contains("cannon") || lower.Contains("mortar") || lower.Contains("howitzer") ||
+            lower.Contains("ramshot") || lower.Contains("pistol") || lower.Contains("drill") ||
+            lower.Contains("sprayer"))
+        {
+            return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Cannon, "#78909C");
         }
 
         // Fallback for custom/unrecognized weapons

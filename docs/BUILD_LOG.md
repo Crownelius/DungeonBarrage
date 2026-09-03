@@ -3730,6 +3730,53 @@ and validates the real wall-clock planning clock and automatic timeout in Main._
 | Headless & Windowed C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
 | Headless & Windowed C7 smoke | pass: `success: true`, all 6 quality checks verified |
 
+---
+
+## 2026-09-03 — Slot-aware paper-doll model, dynamic aim elevation, and weapon silhouettes
+
+This checkpoint enriches item 1 from `docs/OPENBOUND_CLEAN_ROOM_AUDIT.md` sequenced follow-up:
+expanding the Godot-free paper-doll character presentation model with real-time ability slot
+switching, aim elevation trajectory alignment, distinct weapon silhouettes (`Cannon`, `Blade`,
+`Bow`, `Ordnance`), and accessibility-safe idle breathing.
+
+### Delivered
+
+- **Slot-Aware Paper-Doll Model (`CharacterPresentationModel.cs`):**
+  - Expanded `CosmeticAccentKind` with `Bow` (arched stave and taut string) and `Ordnance` (secondary projectile shell/bomb).
+  - Added slot-aware weapon resolution across all 4 slots: `Main`, `Secondary`, `MeleeTool`, and `Trinket`.
+  - Added dynamic `AimAngleRadians` and facing-aware `AimVector` in screen coordinates.
+  - Added accessibility-safe `BobOffsetY(visualClockMsec, reduceMotion)` supplying continuous idle breathing
+    while keeping the ground shadow anchored to authoritative floor geometry and respecting `ReduceMotion`.
+- **Client Integration (`Main.cs`):**
+  - Integrated active slot and aim angle passing from `_selectedAbilitySlot` and `CurrentAim()` into `DrawMatch`.
+  - Renders directional weapon silhouettes oriented along the slingshot drag trajectory in `DrawPlayer`.
+  - Renders distinct visual styles for cannons, blades, bows, and ordnance projectiles.
+- **Unit Test Suite:**
+  - Added tests in `CharacterPresentationModelTests.cs`:
+    - `Equipment_accents_switch_with_active_slot` (Main, Secondary, MeleeTool, Trinket)
+    - `Bow_and_ordnance_kinds_resolve_expected_accents` (Recurve Bow, Ramshot Shell)
+    - `Aim_vector_reflects_elevation_angle_and_facing` (Right, Left, Neutral)
+    - `Bob_offset_respects_reduced_motion` (Suppressed vs Active)
+  - .NET test suite expanded to 12 contracts + 109 interop = 121 tests.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 passed, 41 ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 passed, 1 ignored |
+| `cargo deny check` | pass |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 109 interop = 121 passed |
+| Godot 4.7.1 .NET release export | pass (`export/windows/DungeonBarrage.exe`) |
+| Headless & Windowed C5 smoke | pass: `success: true`, real damage, fire/hit/impact cues |
+| Headless & Windowed C6 smoke | pass: `success: true`, 3/3 maps, collapse, bot/human, rematch |
+| Headless & Windowed C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
+| Headless & Windowed C7 smoke | pass: `success: true`, all 6 quality checks verified |
+
+
 
 
 

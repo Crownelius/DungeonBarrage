@@ -106,4 +106,118 @@ public sealed class CharacterPresentationModelTests
         Assert.NotNull(ankletModel.WeaponAccent);
         Assert.Equal(CosmeticAccentKind.Blade, ankletModel.WeaponAccent.Kind);
     }
+
+    [Fact]
+    public void Equipment_accents_switch_with_active_slot()
+    {
+        var player = new ClientPlayerSnapshot(
+            PlayerId: "p1",
+            Team: 0,
+            Health: 280,
+            IsEliminated: false,
+            MaxHealth: 280,
+            Position: new ClientPosition(0, 0),
+            CollisionCenter: new ClientPosition(0, -2048),
+            CollisionRadius: 2048,
+            Loadout: new ClientLoadout(
+                Main: "ramshot-cannon",
+                Secondary: "frostfall-shell",
+                MeleeTool: "trench-spade",
+                Trinket: "ember-crown"),
+            Ammo: Array.Empty<ClientAmmoCounter>(),
+            TrinketCharge: 0,
+            Statuses: Array.Empty<ClientStatusSnapshot>(),
+            Appearance: new ClientAppearance("default", Array.Empty<string>(), "default"));
+
+        // Main slot
+        var mainModel = CharacterPresentationModel.Create(
+            player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0),
+            activeSlot: ClientAbilitySlot.Main);
+        Assert.NotNull(mainModel.WeaponAccent);
+        Assert.Equal(CosmeticAccentKind.Cannon, mainModel.WeaponAccent.Kind);
+
+        // Secondary slot
+        var secModel = CharacterPresentationModel.Create(
+            player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0),
+            activeSlot: ClientAbilitySlot.Secondary);
+        Assert.NotNull(secModel.WeaponAccent);
+        Assert.Equal(CosmeticAccentKind.Ordnance, secModel.WeaponAccent.Kind);
+
+        // Melee slot
+        var meleeModel = CharacterPresentationModel.Create(
+            player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0),
+            activeSlot: ClientAbilitySlot.MeleeTool);
+        Assert.NotNull(meleeModel.WeaponAccent);
+        Assert.Equal(CosmeticAccentKind.Blade, meleeModel.WeaponAccent.Kind);
+
+        // Trinket slot
+        var trinketModel = CharacterPresentationModel.Create(
+            player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0),
+            activeSlot: ClientAbilitySlot.Trinket);
+        Assert.Null(trinketModel.WeaponAccent);
+        Assert.NotNull(trinketModel.TrinketAccent);
+        Assert.Equal(CosmeticAccentKind.Crown, trinketModel.TrinketAccent.Kind);
+    }
+
+    [Fact]
+    public void Bow_and_ordnance_kinds_resolve_expected_accents()
+    {
+        var bowPlayer = MakePlayer(x: 0, y: 0, "recurve-bow", "ember-crown");
+        var bowModel = CharacterPresentationModel.Create(
+            bowPlayer, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0));
+        Assert.NotNull(bowModel.WeaponAccent);
+        Assert.Equal(CosmeticAccentKind.Bow, bowModel.WeaponAccent.Kind);
+
+        var ordPlayer = MakePlayer(x: 0, y: 0, "ramshot-shell", "ember-crown");
+        var ordModel = CharacterPresentationModel.Create(
+            ordPlayer, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0));
+        Assert.NotNull(ordModel.WeaponAccent);
+        Assert.Equal(CosmeticAccentKind.Ordnance, ordModel.WeaponAccent.Kind);
+    }
+
+    [Fact]
+    public void Aim_vector_reflects_elevation_angle_and_facing()
+    {
+        var player = MakePlayer(x: 10 * 1024, y: 10 * 1024, "ramshot-cannon", "ember-crown");
+        var angle = MathF.PI / 4f; // 45 degrees up
+
+        // Facing right (opponent to the right)
+        var rightModel = CharacterPresentationModel.Create(
+            player, opponentX: 50 * 1024, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0),
+            aimAngleRadians: angle);
+        Assert.NotNull(rightModel.AimVector);
+        Assert.True(rightModel.AimVector.Value.X > 0f);
+        Assert.True(rightModel.AimVector.Value.Y < 0f); // Screen Y is down, so negative Y is up
+
+        // Facing left (opponent to the left)
+        var leftModel = CharacterPresentationModel.Create(
+            player, opponentX: 0, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0),
+            aimAngleRadians: angle);
+        Assert.NotNull(leftModel.AimVector);
+        Assert.True(leftModel.AimVector.Value.X < 0f);
+        Assert.True(leftModel.AimVector.Value.Y < 0f);
+
+        // Not aiming
+        var neutralModel = CharacterPresentationModel.Create(
+            player, opponentX: 50 * 1024, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0));
+        Assert.Null(neutralModel.AimVector);
+        Assert.Null(neutralModel.AimAngleRadians);
+    }
+
+    [Fact]
+    public void Bob_offset_respects_reduced_motion()
+    {
+        var player = MakePlayer(x: 0, y: 0, "ramshot-cannon", "ember-crown");
+        var model = CharacterPresentationModel.Create(
+            player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0));
+
+        // Reduced motion always returns 0
+        Assert.Equal(0f, model.BobOffsetY(500, reduceMotion: true));
+        Assert.Equal(0f, model.BobOffsetY(1500, reduceMotion: true));
+
+        // Normal motion provides subtle cyclic offset
+        var offset = model.BobOffsetY(500, reduceMotion: false);
+        Assert.NotEqual(0f, offset);
+        Assert.InRange(MathF.Abs(offset), 0f, model.Body.Radius * 0.1f);
+    }
 }
