@@ -13,8 +13,6 @@ namespace DungeonBarrage.Client.App;
 /// </summary>
 public partial class Main : Node2D
 {
-    private const ulong HopDurationMsec = 420;
-
     private static readonly Color BackgroundColor = new(0.08f, 0.09f, 0.12f);
     private static readonly Color MenuTextColor = Colors.White;
     private static readonly Color TerrainSoilColor = new(0.45f, 0.32f, 0.18f);
@@ -44,6 +42,7 @@ public partial class Main : Node2D
     private string? _menuError;
     private string? _liveError;
     private bool _started;
+    private ClientUserSettingsContainer _settings = ClientUserSettingsContainer.Default;
 
     private bool _inLocalSetup;
     private IReadOnlyList<ClientItemDefinition>? _roster;
@@ -108,11 +107,10 @@ public partial class Main : Node2D
     private int _lastPreviewPower = int.MinValue;
     private ShotPlayback? _playback;
     private Vector2 _cameraOffset = Vector2.Zero;
+    private Vector2 _cameraEffectOffset = Vector2.Zero;
     private float _cellSize = 12f;
     private Vector2 _worldOrigin = Vector2.Zero;
     private readonly List<string> _combatLog = [];
-    private string? _hopPlayerId;
-    private ulong _hopStartMsec;
 
     /// <summary>
     /// Frozen pre-shot world plus the authority's traces, shown until input unlocks.
@@ -150,7 +148,17 @@ public partial class Main : Node2D
     public override async void _Ready()
 #pragma warning restore CA1849
     {
-        _diagnostics = BuildDiagnostics.Capture();
+        try
+        {
+            _diagnostics = BuildDiagnostics.Capture();
+            _settings = UserSettingsStore.Load(Path.Combine(OS.GetUserDataDir(), "settings.json"));
+        }
+        catch (Exception exception)
+        {
+            LogClientFault("ready-initialization", exception);
+            GD.PushError($"Dungeon Barrage startup failed: {exception}");
+            throw;
+        }
 
         var c7SmokeOptions = C7SmokeOptions.Parse(OS.GetCmdlineUserArgs());
         if (c7SmokeOptions is not null)
@@ -212,16 +220,6 @@ public partial class Main : Node2D
         else if (!IsInputLocked())
         {
             _playback = null;
-        }
-
-        if (_hopPlayerId is not null)
-        {
-            if (Time.GetTicksMsec() - _hopStartMsec >= HopDurationMsec)
-            {
-                _hopPlayerId = null;
-            }
-
-            QueueRedraw();
         }
 
         if (_inLoadoutSelect)
@@ -823,7 +821,6 @@ public partial class Main : Node2D
             _menuError = null;
             _cameraOffset = Vector2.Zero;
             _combatLog.Clear();
-            _hopPlayerId = null;
         }
         catch (Exception exception)
         {
@@ -928,7 +925,6 @@ public partial class Main : Node2D
                 case Key.W:
                 case Key.Space:
                     GetViewport().SetInputAsHandled();
-                    BeginHopPresentation();
                     _ = SubmitAndRedrawAsync(() => _live.SubmitJumpAsync());
                     return;
                 case Key.Left:
@@ -1273,6 +1269,20 @@ public partial class Main : Node2D
         return true;
     }
 
+    private TransitionPresentationFrame CurrentPresentationFrame()
+    {
+        if (_playback is null)
+        {
+            return TransitionPresentationFrame.Empty;
+        }
+
+        return TransitionCueResolver.Resolve(
+            _playback.Events,
+            Time.GetTicksMsec() - _playback.StartMsec,
+            _playback.TickRate,
+            _settings.Accessibility.ReduceMotion);
+    }
+
     private static ulong LockDurationMsecFor(LiveMatch live) =>
         live.PresentationTickRate == 0
             ? 0
@@ -1527,8 +1537,16 @@ public partial class Main : Node2D
         var snapshot = live.CurrentSnapshot;
         if (IsInputLocked() && _playback is not null)
         {
-            DrawMatch(_playback.PreSnapshot, _playback.PreTerrain);
-            DrawPlaybackProjectiles();
+            var presentation = CurrentPresentationFrame();
+            try
+            {
+                DrawMatch(_playback.PreSnapshot, _playback.PreTerrain, presentation);
+                DrawPlaybackProjectiles(presentation);
+            }
+            finally
+            {
+                _cameraEffectOffset = Vector2.Zero;
+            }
         }
         else
         {
@@ -1630,9 +1648,16 @@ public partial class Main : Node2D
         DrawString(font, pos, "Press [R] or [ENTER] to REMATCH", fontSize: 16, modulate: Colors.Cyan);
     }
 
-    private void DrawMatch(ClientMatchSnapshot snapshot, TerrainRead terrain)
+    private void DrawMatch(
+        ClientMatchSnapshot snapshot,
+        TerrainRead terrain,
+        TransitionPresentationFrame? presentation = null)
     {
         FitWorld(snapshot.TerrainWidth, snapshot.TerrainHeight);
+        var impulse = presentation?.CameraImpulse ?? PresentationCameraImpulse.None;
+        _cameraEffectOffset = new Vector2(
+            impulse.CellX * _cellSize,
+            impulse.CellY * _cellSize);
         DrawArena(snapshot.TerrainWidth, snapshot.TerrainHeight);
         DrawTerrain(snapshot, terrain);
         foreach (var block in snapshot.Blocks)
@@ -1646,7 +1671,8 @@ public partial class Main : Node2D
                 snapshot.Players[index],
                 index == 0 ? PlayerAColor : PlayerBColor,
                 index,
-                snapshot.PositionScale);
+                snapshot.PositionScale,
+                presentation?.CueFor(snapshot.Players[index].PlayerId));
         }
 
         var font = ThemeDB.FallbackFont;
@@ -1677,15 +1703,17 @@ public partial class Main : Node2D
             padTop + ((availH - mapH) * 0.5f));
     }
 
+    private Vector2 EffectiveCameraOffset => _cameraOffset + _cameraEffectOffset;
+
     private Rect2 ArenaRect(uint widthCells, uint heightCells) =>
         new(
-            _worldOrigin + _cameraOffset,
+            _worldOrigin + EffectiveCameraOffset,
             new Vector2(widthCells * _cellSize, heightCells * _cellSize));
 
     private Rect2 CellRect(int x, int y) =>
         new(
-            _worldOrigin.X + _cameraOffset.X + (x * _cellSize),
-            _worldOrigin.Y + _cameraOffset.Y + (y * _cellSize),
+            _worldOrigin.X + EffectiveCameraOffset.X + (x * _cellSize),
+            _worldOrigin.Y + EffectiveCameraOffset.Y + (y * _cellSize),
             _cellSize,
             _cellSize);
 
@@ -1876,21 +1904,24 @@ public partial class Main : Node2D
         ClientPlayerSnapshot player,
         Color color,
         int index,
-        int positionScale)
+        int positionScale,
+        ActorPresentationCue? cue)
     {
         var body = CharacterBodyGeometry.FromPlayer(player);
         var projected = body.Project(
             positionScale,
             _cellSize,
             new PresentationPoint(_worldOrigin.X, _worldOrigin.Y),
-            new PresentationPoint(_cameraOffset.X, _cameraOffset.Y));
+            new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y));
         var center = new Vector2(projected.Center.X, projected.Center.Y);
         var radius = projected.Radius;
-        var bodyColor = player.IsEliminated ? Colors.Gray : color;
+        var defeated = player.IsEliminated || cue is { Kind: ActorPresentationCueKind.Defeat };
+        var bodyColor = defeated ? Colors.Gray : color;
 
         DrawCircle(center + new Vector2(0, radius * 0.85f), radius * 0.45f, new Color(0, 0, 0, 0.35f));
         DrawCircle(center, radius, bodyColor);
         DrawCircle(center + new Vector2(0, -radius * 0.15f), radius * 0.62f, bodyColor.Lightened(0.12f));
+        DrawActorCue(center, radius, cue, index);
         var beakDir = index == 0 ? 1f : -1f;
         var beak = new Vector2[]
         {
@@ -1907,9 +1938,62 @@ public partial class Main : Node2D
         DrawString(
             font,
             center + new Vector2(-radius, labelY),
-            $"{player.Loadout.Main} {player.Health}/{player.MaxHealth}  ammo {(player.Ammo.Count > 0 ? player.Ammo[0].Remaining : 0)}",
+            $"{player.Loadout.Main} {player.Health}/{player.MaxHealth}  ammo {(player.Ammo.Count > 0 ? player.Ammo[0].Remaining : 0)}{CueLabel(cue)}",
             fontSize: 12,
             modulate: MenuTextColor);
+    }
+
+    private static string CueLabel(ActorPresentationCue? cue) => cue?.Kind switch
+    {
+        ActorPresentationCueKind.Fire => "  FIRE",
+        ActorPresentationCueKind.Hit => "  HIT",
+        ActorPresentationCueKind.Defeat => "  DEFEATED",
+        _ => string.Empty,
+    };
+
+    private void DrawActorCue(Vector2 center, float radius, ActorPresentationCue? cue, int index)
+    {
+        if (cue is not { } activeCue)
+        {
+            return;
+        }
+
+        var intensity = Math.Clamp(1f - activeCue.Age01, 0f, 1f);
+        switch (activeCue.Kind)
+        {
+            case ActorPresentationCueKind.Fire:
+                var facing = index == 0 ? 1f : -1f;
+                var origin = center - new Vector2(facing * radius * 1.1f, radius * 0.06f);
+                var plume = origin - new Vector2(facing * radius * (0.75f + (0.35f * intensity)), 0);
+                DrawLine(origin, plume, new Color(1f, 0.78f, 0.15f, 0.85f * intensity), width: 3f);
+                DrawCircle(origin, radius * (0.20f + (0.10f * intensity)), new Color(1f, 0.86f, 0.35f, 0.7f * intensity));
+                break;
+            case ActorPresentationCueKind.Hit:
+                DrawArc(
+                    center,
+                    radius * (1.08f + (0.14f * intensity)),
+                    0,
+                    MathF.Tau,
+                    24,
+                    new Color(1f, 0.28f, 0.18f, 0.9f * intensity),
+                    width: 3f);
+                DrawCircle(center, radius * 0.56f, new Color(1f, 0.32f, 0.20f, 0.22f * intensity));
+                break;
+            case ActorPresentationCueKind.Defeat:
+                DrawLine(
+                    center + new Vector2(-radius * 0.62f, -radius * 0.62f),
+                    center + new Vector2(radius * 0.62f, radius * 0.62f),
+                    new Color(0.12f, 0.12f, 0.14f, 0.9f),
+                    width: 3f);
+                DrawLine(
+                    center + new Vector2(radius * 0.62f, -radius * 0.62f),
+                    center + new Vector2(-radius * 0.62f, radius * 0.62f),
+                    new Color(0.12f, 0.12f, 0.14f, 0.9f),
+                    width: 3f);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(cue), activeCue.Kind, "Unknown actor presentation cue.");
+        }
     }
 
     private Vector2 ToPixels(ClientPosition position, int positionScale)
@@ -1919,7 +2003,7 @@ public partial class Main : Node2D
             positionScale,
             _cellSize,
             new PresentationPoint(_worldOrigin.X, _worldOrigin.Y),
-            new PresentationPoint(_cameraOffset.X, _cameraOffset.Y));
+            new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y));
         return new Vector2(projected.X, projected.Y);
     }
 
@@ -1985,7 +2069,7 @@ public partial class Main : Node2D
         return best;
     }
 
-    private void DrawPlaybackProjectiles()
+    private void DrawPlaybackProjectiles(TransitionPresentationFrame presentation)
     {
         if (_playback is null)
         {
@@ -2015,20 +2099,54 @@ public partial class Main : Node2D
                 }
             }
 
-            if (tick >= trace.TerminalImpact.Tick)
+            if (tick > trace.TerminalImpact.Tick && returning)
             {
-                var hit = ToPixels(trace.TerminalImpact.Position, scale);
-                var pulse = 1f + (0.25f * MathF.Sin(elapsed * 0.02f));
-                DrawArc(hit, radius * 1.8f * pulse, 0, MathF.Tau, 24, Colors.OrangeRed, width: 3f);
-                DrawCircle(hit, radius * 0.55f, Colors.OrangeRed);
                 DrawString(
                     ThemeDB.FallbackFont,
-                    hit + new Vector2(radius, -radius),
-                    tick > trace.TerminalImpact.Tick && returning ? "RETURNING" : "HIT",
+                    ToPixels(trace.TerminalImpact.Position, scale) + new Vector2(radius, -radius),
+                    "RETURNING",
                     fontSize: 14,
                     modulate: Colors.Yellow);
             }
         }
+
+        for (var index = 0; index < presentation.ImpactCues.Count; index++)
+        {
+            DrawImpactCue(presentation.ImpactCues[index], scale);
+        }
+    }
+
+    private void DrawImpactCue(ImpactPresentationCue cue, int positionScale)
+    {
+        var hit = ToPixels(cue.Position, positionScale);
+        var intensity = Math.Clamp(1f - cue.Age01, 0f, 1f);
+        var baseRadius = Math.Max(8f, _cellSize * 0.42f);
+        var pulse = _settings.Accessibility.ReduceMotion
+            ? 1f
+            : 1f + (0.20f * MathF.Sin(Time.GetTicksMsec() * 0.02f));
+        var color = cue.Cause switch
+        {
+            ClientImpactCause.Character => Colors.OrangeRed,
+            ClientImpactCause.Terrain => new Color(0.82f, 0.62f, 0.34f),
+            ClientImpactCause.OutOfBounds => Colors.LightSkyBlue,
+            ClientImpactCause.Expired => Colors.MediumPurple,
+            _ => throw new ArgumentOutOfRangeException(nameof(cue), cue.Cause, "Unknown impact cause."),
+        };
+        DrawArc(
+            hit,
+            baseRadius * (1.4f + (0.55f * intensity)) * pulse,
+            0,
+            MathF.Tau,
+            24,
+            new Color(color.R, color.G, color.B, 0.95f * intensity),
+            width: 3f);
+        DrawCircle(hit, baseRadius * (0.38f + (0.20f * intensity)), new Color(color.R, color.G, color.B, 0.8f * intensity));
+        DrawString(
+            ThemeDB.FallbackFont,
+            hit + new Vector2(baseRadius, -baseRadius),
+            cue.Cause == ClientImpactCause.Character ? "DIRECT HIT" : "IMPACT",
+            fontSize: 14,
+            modulate: color.Lerp(Colors.White, 0.25f));
     }
 
     private void DrawReturningProjectile(Vector2 screen, float radius, uint tick)
@@ -2255,12 +2373,43 @@ public partial class Main : Node2D
 
             var abilityTransition = await SubmitAndRedrawAsync(() => live.SubmitAbilityAsync(
                 ClientAbilitySlot.Main,
-                angleMillidegrees: 45_000,
-                powerBasisPoints: 1_500,
+                angleMillidegrees: 27_500,
+                powerBasisPoints: 7_800,
                 targetPlayerId: null))
                 .ConfigureAwait(true)
                 ?? throw new InvalidOperationException("The picker-started ability was rejected.");
             var lockedImmediatelyAfterAbility = IsInputLocked();
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var fireFrame = CurrentPresentationFrame();
+            var fireCue = fireFrame.CueFor(beforeActivePlayer ?? string.Empty);
+            var fireCueObserved = fireCue?.Kind ==
+                ActorPresentationCueKind.Fire;
+            var (fireScreenshotWidth, fireScreenshotHeight) = CaptureScreenshot(options.FireScreenshotPath);
+
+            var impactTick = LastImpactTick(abilityTransition.Events);
+            var impactReachedWhileLocked = await WaitForPlaybackTickAsync(impactTick).ConfigureAwait(true);
+            var impactFrame = CurrentPresentationFrame();
+            var hitCue = impactFrame.CueFor(defenderId);
+            var hitCueObserved = hitCue?.Kind == ActorPresentationCueKind.Hit;
+            var impactCueObserved = impactFrame.ImpactCues.Count > 0;
+            var cameraImpulseObserved = impactFrame.CameraImpulse.IsActive;
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (impactScreenshotWidth, impactScreenshotHeight) = CaptureScreenshot(options.ImpactScreenshotPath);
+            if (!impactReachedWhileLocked || !fireCueObserved || !hitCueObserved || !impactCueObserved)
+            {
+                throw new InvalidOperationException(
+                    "C5 must observe fire, hit, and impact feedback while authoritative playback is locked. " +
+                    $"Fire={fireCue?.Kind.ToString() ?? "none"}; " +
+                    $"Hit={hitCue?.Kind.ToString() ?? "none"}; " +
+                    $"ImpactCount={impactFrame.ImpactCues.Count}; " +
+                    $"ImpactReachedWhileLocked={impactReachedWhileLocked}; " +
+                    $"ImpactTick={impactTick}.");
+            }
 
             await WaitTicksAsync(abilityTransition.InputLockTicks, abilityTransition.PresentationTickRate)
                 .ConfigureAwait(true);
@@ -2297,6 +2446,10 @@ public partial class Main : Node2D
                 AbilityInputLockTicks: abilityTransition.InputLockTicks,
                 InputLockedImmediatelyAfterAbility: lockedImmediatelyAfterAbility,
                 InputUnlockedAfterWaitingOutTheAbilityLock: unlockedAfterWaiting,
+                FireCueObserved: fireCueObserved,
+                HitCueObserved: hitCueObserved,
+                ImpactCueObserved: impactCueObserved,
+                CameraImpulseObserved: cameraImpulseObserved,
                 DefenderPlayerId: defenderId,
                 DefenderHealthBeforeAbility: defenderHealthBefore,
                 DefenderHealthAfterAbility: defenderHealthAfter,
@@ -2305,6 +2458,10 @@ public partial class Main : Node2D
                 AfterActivePlayerId: final.ActivePlayerId,
                 TurnHandedOverToTheOtherPlayer: handedOver,
                 TurnNumberAfter: final.TurnNumber,
+                FireScreenshotWidth: fireScreenshotWidth,
+                FireScreenshotHeight: fireScreenshotHeight,
+                ImpactScreenshotWidth: impactScreenshotWidth,
+                ImpactScreenshotHeight: impactScreenshotHeight,
                 ScreenshotWidth: screenshotWidth,
                 ScreenshotHeight: screenshotHeight,
                 MapId: final.MapId,
@@ -2329,6 +2486,10 @@ public partial class Main : Node2D
                 AbilityInputLockTicks: 0,
                 InputLockedImmediatelyAfterAbility: false,
                 InputUnlockedAfterWaitingOutTheAbilityLock: false,
+                FireCueObserved: false,
+                HitCueObserved: false,
+                ImpactCueObserved: false,
+                CameraImpulseObserved: false,
                 DefenderPlayerId: null,
                 DefenderHealthBeforeAbility: 0,
                 DefenderHealthAfterAbility: 0,
@@ -2337,6 +2498,10 @@ public partial class Main : Node2D
                 AfterActivePlayerId: null,
                 TurnHandedOverToTheOtherPlayer: false,
                 TurnNumberAfter: 0,
+                FireScreenshotWidth: 0,
+                FireScreenshotHeight: 0,
+                ImpactScreenshotWidth: 0,
+                ImpactScreenshotHeight: 0,
                 ScreenshotWidth: 0,
                 ScreenshotHeight: 0,
                 MapId: string.Empty,
@@ -3022,35 +3187,6 @@ public partial class Main : Node2D
         _ = snapshot;
     }
 
-    private void BeginHopPresentation()
-    {
-        if (_live is null)
-        {
-            return;
-        }
-
-        _hopPlayerId = _live.CurrentSnapshot.ActivePlayerId;
-        _hopStartMsec = Time.GetTicksMsec();
-    }
-
-    private float HopOffsetPixels(string playerId)
-    {
-        if (_hopPlayerId != playerId)
-        {
-            return 0f;
-        }
-
-        var elapsed = Time.GetTicksMsec() - _hopStartMsec;
-        if (elapsed >= HopDurationMsec)
-        {
-            return 0f;
-        }
-
-        var t = elapsed / (float)HopDurationMsec;
-        var lift = 4f * t * (1f - t);
-        return -lift * _cellSize * 2f;
-    }
-
     private void RecordCombatNotes(ClientMatchTransition transition)
     {
         for (var i = 0; i < transition.Events.Count; i++)
@@ -3181,6 +3317,57 @@ public partial class Main : Node2D
 
         var seconds = ticks / (double)tickRate;
         await Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(true);
+    }
+
+    private static uint LastImpactTick(IReadOnlyList<ClientPresentationEvent> events)
+    {
+        ArgumentNullException.ThrowIfNull(events);
+        var found = false;
+        var latest = 0u;
+        for (var index = 0; index < events.Count; index++)
+        {
+            if (events[index] is not ClientImpactEvent impact)
+            {
+                continue;
+            }
+
+            found = true;
+            if (impact.PresentationTick > latest)
+            {
+                latest = impact.PresentationTick;
+            }
+        }
+
+        return found
+            ? latest
+            : throw new InvalidOperationException("A C5 projectile transition must publish an impact event.");
+    }
+
+    private async Task<bool> WaitForPlaybackTickAsync(uint targetTick)
+    {
+        if (_playback is null)
+        {
+            return false;
+        }
+
+        var deadline = _playback.StartMsec + ProjectilePlayback.PlaybackMsec(
+            _playback.LockTicks,
+            _playback.TickRate) + 1000UL;
+        while (IsInputLocked() && Time.GetTicksMsec() < deadline)
+        {
+            var tick = ProjectilePlayback.TickAt(
+                Time.GetTicksMsec() - _playback.StartMsec,
+                _playback.TickRate,
+                _playback.LockTicks);
+            if (tick >= targetTick)
+            {
+                return true;
+            }
+
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        }
+
+        return false;
     }
 
     private async Task WaitUntilInputUnlockedAsync()

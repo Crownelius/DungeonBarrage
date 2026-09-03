@@ -250,4 +250,19 @@ public sealed class LiveMatchTests
         var terrain = await session.TerrainAsync(ulong.MaxValue);
         return LiveMatch.Create(session, createResponse.Snapshot!, terrain, "test");
     }
+
+    [Fact]
+    public async Task A_ramshot_with_correct_elevation_and_power_hits_the_opponent_on_crow_perch()
+    {
+        await using var live = await CreateLiveOnAsync("crow-perch");
+        _ = await live.SubmitMoveAsync(1024);
+        var defenderId = live.CurrentSnapshot.Players.First(p => p.PlayerId != live.CurrentSnapshot.ActivePlayerId).PlayerId;
+        var hpBefore = live.CurrentSnapshot.Players.First(p => p.PlayerId == defenderId).Health;
+        var transition = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 27_500, 7_800, null);
+        var hpAfter = live.CurrentSnapshot.Players.First(p => p.PlayerId == defenderId).Health;
+        Assert.Equal(ClientTransitionDisposition.Accepted, transition.Disposition);
+        Assert.True(hpAfter < hpBefore, $"Expected damage, before={hpBefore}, after={hpAfter}");
+        var hitEvents = transition.Events.OfType<ClientHealthChangedEvent>().ToList();
+        Assert.NotEmpty(hitEvents);
+    }
 }

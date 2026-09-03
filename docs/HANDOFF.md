@@ -42,6 +42,7 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 |---|---|
 | Envelope: no `characterId`/kits; one crow; items as ammo | **implemented** (`SIMULATION_VERSION` 9, `CONTENT_VERSION` 6). Melee-style stages, crow 280 HP, 2–3 cell craters. Eight ranged, eight one-shot secondaries, eight melee skins, eight charge-gated crowns/anklets. Ramshot knockback is two cells. |
 | Visible fighter body equals the authoritative hitbox | **implemented**: `BODY_WIDTH` is a diameter; Rust publishes a half-body-width collision radius centered one radius above the ground pivot. Preview, apply, bot aim, projectile muzzle/playback, and Godot drawing all consume that geometry. Frozen preview/apply impacts are asserted inside the displayed target. |
+| Event-derived combat feedback | **implemented**: `TransitionCueResolver` is a Godot-free, visual-clock projection of transition events. `projectileTrace` gives a fire cue, decreasing `healthChanged` gives hit feedback, `impact` draws at the exact reported fixed-point position and can add a draw-only camera impulse, and `playerEliminated` gives a defeat accent. It never changes the projected collision circle, authority state, or manual camera pan. Reduced motion retains tactical cues but suppresses shake. |
 | FFI `create`/`apply`/`snapshot` hashes equal direct Rust | **implemented** (`ffi_create_apply_snapshot_matches_direct_rust_on_the_duel_blocks_path`) |
 | 3 stacked maps + bot reaches win/lose | **implemented**: bot-to-terminal on all three maps (`maps_bot_outcome`); Godot C6 `mapsCompleted: crow-perch,broken-battlements,twin-spires` |
 | Stacked structures fall in sim state when support is destroyed | **implemented**: `destroying_support_on_each_stacked_map_drops_the_crown`; C6 `stackedBlocksFell: true` |
@@ -53,6 +54,10 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 | `broken-battlements` spawn ledges | **open owner call**: bot-vs-bot can still end 0hp vs 200hp by a fall. Remedy is floor/wider ledges, not another knockback cut. |
 
 Language boundary (ADR 0006) is unchanged: Godot/C# presents; Rust is the only authority.
+
+`docs/OPENBOUND_CLEAN_ROOM_AUDIT.md` records the external-reference review and the explicit
+clean-room/no-port boundary. Its next safe presentation work is original paper-doll/effect/camera
+composition; movement interpolation remains blocked until Rust retains an actual movement path.
 
 **Adding an item with a displacement effect:** `magnitude_secondary` on a `Knockback` or `Push` is
 a falloff radius, and `displacement.rs` reads `<= 0` as *no radius test at all* — full magnitude

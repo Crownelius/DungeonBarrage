@@ -3548,3 +3548,53 @@ not evidence of a human playthrough. The next dependency remains unchanged: a hu
 match from `PLAY.md` before Steam store-page work starts. The 41 ignored kit-era tests must be
 rewritten for the crow/item envelope if reopened; do not restore kits or rewrite accepted ADR
 history.
+
+---
+
+## 2026-09-03 — Event-derived combat feedback and clean-room audit
+
+This checkpoint implements the clean-room combat presentation layer designed from the OpenBound
+audit (`docs/OPENBOUND_CLEAN_ROOM_AUDIT.md`), resolving visual feedback strictly from authoritative
+events without violating the Rust simulation boundary or modifying the collision contract.
+
+### Delivered
+
+- **Clean-room audit (`docs/OPENBOUND_CLEAN_ROOM_AUDIT.md`):** Recorded legal/provenance boundaries
+  against external reference source; identified reusable presentation responsibilities (cues, effects,
+  camera) while strictly prohibiting code/asset import or client-authoritative simulation models.
+- **`TransitionCueResolver` (`DungeonBarrage.Client.Interop`):** Godot-free visual-clock projection
+  mapping authoritative transition events to cosmetic cues:
+  - `projectileTrace` -> actor fire accent.
+  - Decreasing `healthChanged` -> affected actor hit outline.
+  - `impact` -> burst at exact reported fixed-point position; transient camera impulse.
+  - `playerEliminated` -> temporary defeat accent before terminal snapshot.
+  - At most one highest-priority cue per actor (`defeat` > `hit` > `fire`).
+  - Reduced-motion support suppresses shake and rapid pulse while retaining indicators and event order.
+  - Preserves authoritative `CharacterBodyGeometry` without translating or resizing collision circles.
+- **Client presentation (`Main.cs`):** Renders fire, hit, defeat, and impact cues during locked
+  playback; composes draw-only impact camera impulse with manual pan. Removed obsolete/artificial
+  `HopOffsetPixels` that bypassed physics.
+- **Enhanced C5 smoke verification:** C5 smoke captures fire, impact, and post-shot screenshots;
+  observes locked-playback fire, hit, impact, and camera impulse. Tuned picker shot on `crow-perch`
+  (27.5° at 78% power) to land an authoritative direct hit on the defender, asserting real damage
+  (280 -> 218 HP) and verified event release.
+- **Client test suite:** Added `TransitionCueResolverTests` and `LiveMatchTests` direct-hit regression
+  guard. .NET test suite expanded to 12 contracts + 91 interop = 103 tests.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 active core tests + all integration/doc tests pass; 41 explicitly documented legacy kit tests ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 pass, 1 fixture-writer test intentionally ignored |
+| `cargo deny check` | advisories, bans, licenses, sources pass; only unused license allow-list warnings |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 91 interop = 103 pass |
+| Godot 4.7.1 .NET release export | pass |
+| Headless C5 smoke | pass: `success: true`, real damage, fire/hit/impact cues observed |
+| Headless C6 smoke | pass: `success: true`, 32 items, 3/3 maps, collapse, bot/human actions, rematch |
+| Renderer-backed C5 smoke | pass: 1280×720 fire, impact, and post-shot captures |
+| Renderer-backed C6 smoke | pass: 1280×720 setup, loadout select, hover, and result captures |
+

@@ -1087,12 +1087,39 @@ socket.
 
 ### 13.4 Projectiles and events
 
-- Create one player per `projectileTrace` ID.
+- Create one view per `projectileTrace` ID.
 - Interpolate by transition presentation tick between that trace's samples.
 - Do not extrapolate beyond its last sample or merge samples from different traces.
 - Play impact, terrain, damage, and elimination events at their ordered event tick.
 - If rendering falls behind, drop cosmetic particles before skipping authoritative event
   presentation. The final snapshot is always installed.
+
+#### 13.4.1 Event-derived combat feedback
+
+The first combat-feedback layer is a pure C# projection named `TransitionCueResolver`. It takes the
+immutable transition event list, elapsed playback milliseconds, the *visual* tick rate, and the
+reduced-motion setting. It does not read or mutate Rust state. Event release time is
+`presentationTick * 1000 / visualTickRate`; this keeps an optional client-side slowdown in sync
+with projectile playback without inventing a second authority timeline.
+
+Current cue mappings are intentionally narrow:
+
+| Authoritative event | Presentation-only cue |
+|---|---|
+| `projectileTrace` | owner fire accent |
+| decreasing `healthChanged` | affected actor hit outline |
+| `impact` | burst at the exact authoritative impact position; transient camera impulse |
+| `playerEliminated` | temporary defeat accent before the terminal/post snapshot is drawn |
+
+At most one highest-priority actor cue is drawn per actor (`defeat` > `hit` > `fire`). Cosmetic
+cue drawing may tint, outline, or add adornment around the projected collision circle, but it must
+not translate, resize, replace, or reinterpret that circle. Reduced motion keeps the fire/hit/
+impact indicators and event ordering, while suppressing the camera impulse and rapid pulse.
+
+`entityMoved` is not currently a movement-animation source. Its available net start/end values are
+ground pivots and can be `authoritativeResolution`; they do not define a walk, hop, fall, or
+collision-center path. Add a Rust versioned trajectory/provenance contract and frozen fixtures
+before interpolating actor motion.
 
 ### 13.5 Persistent objects and effects
 

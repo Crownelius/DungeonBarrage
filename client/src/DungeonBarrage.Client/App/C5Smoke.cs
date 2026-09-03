@@ -11,6 +11,12 @@ internal sealed record C5SmokeOptions(string ReportPath, string ScreenshotPath)
     private const string ReportArgument = "--c5-smoke-report";
     private const string ScreenshotArgument = "--c5-screenshot";
 
+    /// <summary>Where the fire-cue frame is written, derived from <see cref="ScreenshotPath"/>.</summary>
+    internal string FireScreenshotPath => DerivedScreenshotPath("-fire");
+
+    /// <summary>Where the authoritative impact-cue frame is written, derived from <see cref="ScreenshotPath"/>.</summary>
+    internal string ImpactScreenshotPath => DerivedScreenshotPath("-impact");
+
     internal static C5SmokeOptions? Parse(IReadOnlyList<string> arguments)
     {
         string? report = null;
@@ -42,6 +48,11 @@ internal sealed record C5SmokeOptions(string ReportPath, string ScreenshotPath)
 
         return new C5SmokeOptions(Path.GetFullPath(report), Path.GetFullPath(screenshot));
     }
+
+    private string DerivedScreenshotPath(string suffix) =>
+        Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + suffix + Path.GetExtension(ScreenshotPath));
 }
 
 /// <summary>
@@ -119,6 +130,10 @@ internal sealed record C5SmokeReport(
     uint AbilityInputLockTicks,
     bool InputLockedImmediatelyAfterAbility,
     bool InputUnlockedAfterWaitingOutTheAbilityLock,
+    bool FireCueObserved,
+    bool HitCueObserved,
+    bool ImpactCueObserved,
+    bool CameraImpulseObserved,
     string? DefenderPlayerId,
     ushort DefenderHealthBeforeAbility,
     ushort DefenderHealthAfterAbility,
@@ -127,6 +142,10 @@ internal sealed record C5SmokeReport(
     string? AfterActivePlayerId,
     bool TurnHandedOverToTheOtherPlayer,
     uint TurnNumberAfter,
+    int FireScreenshotWidth,
+    int FireScreenshotHeight,
+    int ImpactScreenshotWidth,
+    int ImpactScreenshotHeight,
     int ScreenshotWidth,
     int ScreenshotHeight,
     string MapId,

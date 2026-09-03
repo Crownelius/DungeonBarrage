@@ -24,6 +24,8 @@ export_presets.cfg
 # Build output
 /dist/
 /out/
+/export/
+/.agents/
 
 # Credentials — NEVER commit. See docs/SECURITY_BASELINE.md section 4.
 .github-token
