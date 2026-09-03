@@ -106,8 +106,7 @@ public partial class Main : Node2D
     private int _lastPreviewAngle = int.MinValue;
     private int _lastPreviewPower = int.MinValue;
     private ShotPlayback? _playback;
-    private Vector2 _cameraOffset = Vector2.Zero;
-    private Vector2 _cameraEffectOffset = Vector2.Zero;
+    private readonly CameraDirector _camera = new();
     private float _cellSize = 12f;
     private Vector2 _worldOrigin = Vector2.Zero;
     private readonly List<string> _combatLog = [];
@@ -819,7 +818,7 @@ public partial class Main : Node2D
         {
             _live = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(request));
             _menuError = null;
-            _cameraOffset = Vector2.Zero;
+            _camera.Reset();
             _combatLog.Clear();
         }
         catch (Exception exception)
@@ -928,24 +927,24 @@ public partial class Main : Node2D
                     _ = SubmitAndRedrawAsync(() => _live.SubmitJumpAsync());
                     return;
                 case Key.Left:
-                    _cameraOffset += new Vector2(_cellSize * 2f, 0);
+                    _camera.Pan(_cellSize * 2f, 0);
                     QueueRedraw();
                     return;
                 case Key.Right:
-                    _cameraOffset += new Vector2(-_cellSize * 2f, 0);
+                    _camera.Pan(-_cellSize * 2f, 0);
                     QueueRedraw();
                     return;
                 case Key.Up:
-                    _cameraOffset += new Vector2(0, _cellSize * 2f);
+                    _camera.Pan(0, _cellSize * 2f);
                     QueueRedraw();
                     return;
                 case Key.Down:
-                    _cameraOffset += new Vector2(0, -_cellSize * 2f);
+                    _camera.Pan(0, -_cellSize * 2f);
                     QueueRedraw();
                     return;
                 case Key.F:
                 case Key.Home:
-                    _cameraOffset = Vector2.Zero;
+                    _camera.Reset();
                     QueueRedraw();
                     return;
                 case Key.P:
@@ -1545,7 +1544,7 @@ public partial class Main : Node2D
             }
             finally
             {
-                _cameraEffectOffset = Vector2.Zero;
+                _camera.SetImpulse(PresentationCameraImpulse.None, _cellSize);
             }
         }
         else
@@ -1654,10 +1653,7 @@ public partial class Main : Node2D
         TransitionPresentationFrame? presentation = null)
     {
         FitWorld(snapshot.TerrainWidth, snapshot.TerrainHeight);
-        var impulse = presentation?.CameraImpulse ?? PresentationCameraImpulse.None;
-        _cameraEffectOffset = new Vector2(
-            impulse.CellX * _cellSize,
-            impulse.CellY * _cellSize);
+        _camera.SetImpulse(presentation?.CameraImpulse ?? PresentationCameraImpulse.None, _cellSize);
         DrawArena(snapshot.TerrainWidth, snapshot.TerrainHeight);
         DrawTerrain(snapshot, terrain);
         foreach (var block in snapshot.Blocks)
@@ -1667,12 +1663,24 @@ public partial class Main : Node2D
 
         for (var index = 0; index < snapshot.Players.Count; index++)
         {
+            var player = snapshot.Players[index];
+            int? opponentX = null;
+            for (var other = 0; other < snapshot.Players.Count; other++)
+            {
+                if (other != index && !snapshot.Players[other].IsEliminated)
+                {
+                    opponentX = snapshot.Players[other].Position.X;
+                    break;
+                }
+            }
+
             DrawPlayer(
-                snapshot.Players[index],
+                player,
                 index == 0 ? PlayerAColor : PlayerBColor,
                 index,
                 snapshot.PositionScale,
-                presentation?.CueFor(snapshot.Players[index].PlayerId));
+                presentation?.CueFor(player.PlayerId),
+                opponentX);
         }
 
         var font = ThemeDB.FallbackFont;
@@ -1701,9 +1709,11 @@ public partial class Main : Node2D
         _worldOrigin = new Vector2(
             padLeft + ((availW - mapW) * 0.5f),
             padTop + ((availH - mapH) * 0.5f));
+        _camera.UpdateArenaLimits(mapW, mapH, viewport.X, viewport.Y);
     }
 
-    private Vector2 EffectiveCameraOffset => _cameraOffset + _cameraEffectOffset;
+    private Vector2 EffectiveCameraOffset =>
+        new(_camera.EffectiveOffset.X, _camera.EffectiveOffset.Y);
 
     private Rect2 ArenaRect(uint widthCells, uint heightCells) =>
         new(
@@ -1905,33 +1915,94 @@ public partial class Main : Node2D
         Color color,
         int index,
         int positionScale,
-        ActorPresentationCue? cue)
+        ActorPresentationCue? cue,
+        int? opponentX)
     {
-        var body = CharacterBodyGeometry.FromPlayer(player);
-        var projected = body.Project(
+        var model = CharacterPresentationModel.Create(
+            player,
+            opponentX,
             positionScale,
             _cellSize,
             new PresentationPoint(_worldOrigin.X, _worldOrigin.Y),
             new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y));
-        var center = new Vector2(projected.Center.X, projected.Center.Y);
-        var radius = projected.Radius;
+        var center = new Vector2(model.Body.Center.X, model.Body.Center.Y);
+        var radius = model.Body.Radius;
         var defeated = player.IsEliminated || cue is { Kind: ActorPresentationCueKind.Defeat };
         var bodyColor = defeated ? Colors.Gray : color;
 
-        DrawCircle(center + new Vector2(0, radius * 0.85f), radius * 0.45f, new Color(0, 0, 0, 0.35f));
+        // Ground shadow
+        DrawCircle(new Vector2(model.ShadowPivot.X, model.ShadowPivot.Y), radius * 0.45f, new Color(0, 0, 0, 0.35f));
+
+        // Authoritative body
         DrawCircle(center, radius, bodyColor);
         DrawCircle(center + new Vector2(0, -radius * 0.15f), radius * 0.62f, bodyColor.Lightened(0.12f));
-        DrawActorCue(center, radius, cue, index);
-        var beakDir = index == 0 ? 1f : -1f;
-        var beak = new Vector2[]
+
+        // Equipped Trinket (Crown / Gem) socket adornment
+        if (!defeated && model.TrinketAccent is { } trinket)
         {
-            center + new Vector2(beakDir * radius * 0.95f, -radius * 0.05f),
-            center + new Vector2(beakDir * radius * 1.45f, radius * 0.08f),
-            center + new Vector2(beakDir * radius * 0.85f, radius * 0.22f),
-        };
+            var crownPos = new Vector2(model.CrownSocket.X, model.CrownSocket.Y);
+            var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
+            if (trinket.Kind == CosmeticAccentKind.Crown)
+            {
+                var cw = radius * 0.5f;
+                var ch = radius * 0.35f;
+                var crownPoints = new Vector2[]
+                {
+                    crownPos + new Vector2(-cw, ch * 0.5f),
+                    crownPos + new Vector2(-cw, -ch),
+                    crownPos + new Vector2(-cw * 0.5f, -ch * 0.4f),
+                    crownPos + new Vector2(0, -ch * 1.2f),
+                    crownPos + new Vector2(cw * 0.5f, -ch * 0.4f),
+                    crownPos + new Vector2(cw, -ch),
+                    crownPos + new Vector2(cw, ch * 0.5f),
+                };
+                DrawColoredPolygon(crownPoints, accentColor);
+            }
+            else if (trinket.Kind == CosmeticAccentKind.Gem)
+            {
+                var gw = radius * 0.25f;
+                var gh = radius * 0.35f;
+                var gemPoints = new Vector2[]
+                {
+                    crownPos + new Vector2(0, -gh),
+                    crownPos + new Vector2(gw, 0),
+                    crownPos + new Vector2(0, gh * 0.6f),
+                    crownPos + new Vector2(-gw, 0),
+                };
+                DrawColoredPolygon(gemPoints, accentColor);
+            }
+        }
+
+        // Equipped Weapon / Tool socket adornment
+        if (!defeated && model.WeaponAccent is { } weapon)
+        {
+            var weaponPos = new Vector2(model.WeaponSocket.X, model.WeaponSocket.Y);
+            var weaponColor = Color.FromHtml(weapon.PrimaryColorHex);
+            var dir = model.FacingSign;
+            if (weapon.Kind == CosmeticAccentKind.Cannon)
+            {
+                DrawLine(weaponPos, weaponPos + new Vector2(dir * radius * 0.45f, -radius * 0.1f), weaponColor, width: 4f);
+            }
+            else if (weapon.Kind == CosmeticAccentKind.Blade)
+            {
+                DrawLine(weaponPos, weaponPos + new Vector2(dir * radius * 0.35f, radius * 0.35f), weaponColor, width: 3f);
+            }
+        }
+
+        DrawActorCue(center, radius, cue, model.FacingSign);
+
+        // Dynamic beak polygon
+        var beak = new Vector2[model.BeakPolygon.Count];
+        for (var i = 0; i < model.BeakPolygon.Count; i++)
+        {
+            beak[i] = new Vector2(model.BeakPolygon[i].X, model.BeakPolygon[i].Y);
+        }
         DrawColoredPolygon(beak, Colors.Gold);
-        DrawCircle(center + new Vector2(-beakDir * radius * 0.22f, -radius * 0.22f), radius * 0.14f, Colors.White);
-        DrawCircle(center + new Vector2(-beakDir * radius * 0.22f, -radius * 0.22f), radius * 0.06f, Colors.Black);
+
+        // Eye socket
+        var eyePos = new Vector2(model.EyeSocket.X, model.EyeSocket.Y);
+        DrawCircle(eyePos, radius * 0.14f, Colors.White);
+        DrawCircle(eyePos, radius * 0.06f, Colors.Black);
 
         var font = ThemeDB.FallbackFont;
         var labelY = -radius - 6 - (index * 16);
@@ -1951,7 +2022,7 @@ public partial class Main : Node2D
         _ => string.Empty,
     };
 
-    private void DrawActorCue(Vector2 center, float radius, ActorPresentationCue? cue, int index)
+    private void DrawActorCue(Vector2 center, float radius, ActorPresentationCue? cue, float facing)
     {
         if (cue is not { } activeCue)
         {
@@ -1962,7 +2033,6 @@ public partial class Main : Node2D
         switch (activeCue.Kind)
         {
             case ActorPresentationCueKind.Fire:
-                var facing = index == 0 ? 1f : -1f;
                 var origin = center - new Vector2(facing * radius * 1.1f, radius * 0.06f);
                 var plume = origin - new Vector2(facing * radius * (0.75f + (0.35f * intensity)), 0);
                 DrawLine(origin, plume, new Color(1f, 0.78f, 0.15f, 0.85f * intensity), width: 3f);

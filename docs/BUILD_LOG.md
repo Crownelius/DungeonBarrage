@@ -3598,3 +3598,52 @@ events without violating the Rust simulation boundary or modifying the collision
 | Renderer-backed C5 smoke | pass: 1280×720 fire, impact, and post-shot captures |
 | Renderer-backed C6 smoke | pass: 1280×720 setup, loadout select, hover, and result captures |
 
+---
+
+## 2026-09-03 — Camera director and character presentation model
+
+This checkpoint implements items 1 and 2 from `docs/OPENBOUND_CLEAN_ROOM_AUDIT.md` sequenced follow-up:
+a Godot-free camera director with arena-boundary clamping and dynamic playback framing, and a paper-doll
+character presentation model anchoring sockets and dynamic facing to the authoritative collision body.
+
+### Delivered
+
+- **`CameraDirector` (`DungeonBarrage.Client.Interop`):** Godot-free presentation controller managing
+  manual pan, boundary limits based on arena and viewport size, transient combat impulses from
+  `TransitionCueResolver`, and dynamic projectile playback tracking.
+- **`CharacterPresentationModel` (`DungeonBarrage.Client.Interop`):** Pure C# paper-doll presentation
+  model:
+  - Dynamic facing resolved via `AimSolver.FacesRight(actorX, opponentX)` instead of hardcoded player index.
+  - Validated sockets anchored to `CharacterBodyGeometry`: eye socket, beak root/polygon, crown/trinket socket,
+    weapon/tool socket, and ground shadow pivot.
+  - Cosmetic layer resolution for equipped trinkets (Crown, Gem) and weapons (Cannon, Blade) with
+    graceful fallback styling.
+  - Strictly preserves the authoritative `CharacterBodyGeometry` circle as the drawn body collider.
+- **Client Presentation Integration (`Main.cs`):**
+  - Integrated `CameraDirector` for pan input (`Left`/`Right`/`Up`/`Down`), reset (`Home`/`F`), arena clamping,
+    and impulse decay.
+  - Integrated `CharacterPresentationModel` in `DrawPlayer`, rendering dynamic facing, equipped crown/gem
+    adornments, weapon silhouettes, and facing-aware combat cues.
+- **Unit Test Suite:**
+  - Added `CameraDirectorTests` (limits clamping, impulse integration, playback tracking, reset).
+  - Added `CharacterPresentationModelTests` (dynamic facing, socket geometry anchoring, equipment adornment kinds).
+  - .NET test suite expanded to 12 contracts + 100 interop = 112 tests.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 444 passed, 41 ignored |
+| `cargo test --release -p db-sim-ffi --locked` | 23 passed, 1 ignored |
+| `cargo deny check` | pass |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 100 interop = 112 passed |
+| Godot 4.7.1 .NET release export | pass (`export/windows/DungeonBarrage.exe`) |
+| Headless C5 smoke | pass: `success: true`, real damage, all cues observed |
+| Headless C6 smoke | pass: `success: true`, 3/3 maps, collapse, bot/human actions, rematch |
+| Renderer-backed C5 smoke | pass: 1280×720 fire, impact, and post-shot captures |
+| Renderer-backed C6 smoke | pass: 1280×720 setup, loadout select, hover, and result captures |
+
+
