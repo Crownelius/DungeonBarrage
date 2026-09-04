@@ -220,4 +220,56 @@ public sealed class CharacterPresentationModelTests
         Assert.NotEqual(0f, offset);
         Assert.InRange(MathF.Abs(offset), 0f, model.Body.Radius * 0.1f);
     }
+
+    [Theory]
+    [InlineData("ramshot-cannon", ClientAbilitySlot.Main, "crow_ramshot_cannon")]
+    [InlineData("frostfall-mortar", ClientAbilitySlot.Main, "crow_frostfall")]
+    [InlineData("mole-drill", ClientAbilitySlot.Main, "crow_drill")]
+    [InlineData("recurve-bow", ClientAbilitySlot.Main, "crow_bow")]
+    [InlineData("line-repeater", ClientAbilitySlot.Main, "crow_cinder")]
+    [InlineData("service-pistol", ClientAbilitySlot.Secondary, "crow_pistol")]
+    [InlineData("returning-boomerang", ClientAbilitySlot.Secondary, "crow_boomerang")]
+    [InlineData("heavy-flail", ClientAbilitySlot.MeleeTool, "crow_flail")]
+    [InlineData("crane-maul", ClientAbilitySlot.MeleeTool, "crow_flail")]
+    [InlineData("mining-pick", ClientAbilitySlot.MeleeTool, "crow_pickaxe")]
+    [InlineData("revolver", ClientAbilitySlot.Secondary, "crow_revolver")]
+    public void ResolveSpriteSheetKey_resolves_expected_asset_keys(string itemId, ClientAbilitySlot slot, string expectedKey)
+    {
+        var loadout = new ClientLoadout(
+            Main: slot == ClientAbilitySlot.Main ? itemId : "ramshot-cannon",
+            Secondary: slot == ClientAbilitySlot.Secondary ? itemId : "ramshot-shell",
+            MeleeTool: slot == ClientAbilitySlot.MeleeTool ? itemId : "trench-spade",
+            Trinket: "ember-crown");
+
+        var key = CharacterPresentationModel.ResolveSpriteSheetKey(loadout, slot);
+        Assert.Equal(expectedKey, key);
+    }
+
+    [Fact]
+    public void Create_populates_SpriteSheetKey_for_active_slot()
+    {
+        var player = new ClientPlayerSnapshot(
+            PlayerId: "p1",
+            Team: 0,
+            Health: 100,
+            IsEliminated: false,
+            MaxHealth: 100,
+            Position: new ClientPosition(0, 0),
+            CollisionCenter: new ClientPosition(0, -2048),
+            CollisionRadius: 2048,
+            Loadout: new ClientLoadout("recurve-bow", "service-pistol", "heavy-flail", "ember-crown"),
+            Ammo: Array.Empty<ClientAmmoCounter>(),
+            TrinketCharge: 0,
+            Statuses: Array.Empty<ClientStatusSnapshot>(),
+            Appearance: new ClientAppearance("default", Array.Empty<string>(), "default"));
+
+        var mainModel = CharacterPresentationModel.Create(player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0), activeSlot: ClientAbilitySlot.Main);
+        Assert.Equal("crow_bow", mainModel.SpriteSheetKey);
+
+        var secModel = CharacterPresentationModel.Create(player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0), activeSlot: ClientAbilitySlot.Secondary);
+        Assert.Equal("crow_pistol", secModel.SpriteSheetKey);
+
+        var meleeModel = CharacterPresentationModel.Create(player, null, 1024, 12f, new PresentationPoint(0, 0), new PresentationPoint(0, 0), activeSlot: ClientAbilitySlot.MeleeTool);
+        Assert.Equal("crow_flail", meleeModel.SpriteSheetKey);
+    }
 }

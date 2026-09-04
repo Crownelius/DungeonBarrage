@@ -92,6 +92,9 @@ public sealed class CharacterPresentationModel
     /// <summary>The normalized directional aim unit vector in screen coordinates (accounting for facing), or null if not aiming.</summary>
     public PresentationPoint? AimVector { get; }
 
+    /// <summary>Resolved spritesheet asset identifier for equipped gear and presentation.</summary>
+    public string SpriteSheetKey { get; }
+
     private CharacterPresentationModel(
         PresentationCircle body,
         bool facesRight,
@@ -105,7 +108,8 @@ public sealed class CharacterPresentationModel
         EquipmentCosmeticAccent? weaponAccent,
         ClientAbilitySlot activeSlot,
         float? aimAngleRadians,
-        PresentationPoint? aimVector)
+        PresentationPoint? aimVector,
+        string spriteSheetKey)
     {
         Body = body;
         FacesRight = facesRight;
@@ -120,6 +124,7 @@ public sealed class CharacterPresentationModel
         ActiveSlot = activeSlot;
         AimAngleRadians = aimAngleRadians;
         AimVector = aimVector;
+        SpriteSheetKey = spriteSheetKey;
     }
 
     /// <summary>
@@ -186,6 +191,7 @@ public sealed class CharacterPresentationModel
 
         var trinketAccent = ResolveTrinketAccent(player.Loadout.Trinket);
         var weaponAccent = ResolveWeaponAccent(player.Loadout, activeSlot);
+        var spriteSheetKey = ResolveSpriteSheetKey(player.Loadout, activeSlot);
 
         PresentationPoint? aimVector = null;
         if (aimAngleRadians is { } angle)
@@ -208,7 +214,8 @@ public sealed class CharacterPresentationModel
             weaponAccent,
             activeSlot,
             aimAngleRadians,
-            aimVector);
+            aimVector,
+            spriteSheetKey);
     }
 
     private static EquipmentCosmeticAccent? ResolveTrinketAccent(string? itemId)
@@ -280,5 +287,82 @@ public sealed class CharacterPresentationModel
 
         // Fallback for custom/unrecognized weapons
         return new EquipmentCosmeticAccent(itemId, CosmeticAccentKind.Cannon, "#90A4AE");
+    }
+
+    /// <summary>
+    /// Resolves the corresponding spritesheet asset key for equipped gear and active ability slot.
+    /// </summary>
+    /// <param name="loadout">The player loadout.</param>
+    /// <param name="activeSlot">The active ability slot.</param>
+    /// <returns>Asset key matching one of the standardized spritesheets.</returns>
+    public static string ResolveSpriteSheetKey(ClientLoadout loadout, ClientAbilitySlot activeSlot)
+    {
+        ArgumentNullException.ThrowIfNull(loadout);
+        var itemId = activeSlot switch
+        {
+            ClientAbilitySlot.Main => loadout.Main,
+            ClientAbilitySlot.Secondary => loadout.Secondary,
+            ClientAbilitySlot.MeleeTool => loadout.MeleeTool,
+            ClientAbilitySlot.Trinket => loadout.Secondary ?? loadout.Main,
+            _ => loadout.Main,
+        };
+
+        if (string.IsNullOrWhiteSpace(itemId))
+        {
+            return "crow_ramshot_cannon";
+        }
+
+        var lower = itemId.ToLowerInvariant();
+        if (lower.Contains("frostfall") || lower.Contains("mortar"))
+        {
+            return "crow_frostfall";
+        }
+
+        if (lower.Contains("drill"))
+        {
+            return "crow_drill";
+        }
+
+        if (lower.Contains("bow"))
+        {
+            return "crow_bow";
+        }
+
+        if (lower.Contains("cinder") || lower.Contains("repeater"))
+        {
+            return "crow_cinder";
+        }
+
+        if (lower.Contains("flail") || lower.Contains("maul"))
+        {
+            return "crow_flail";
+        }
+
+        if (lower.Contains("pick"))
+        {
+            return "crow_pickaxe";
+        }
+
+        if (lower.Contains("boomerang"))
+        {
+            return "crow_boomerang";
+        }
+
+        if (lower.Contains("pistol"))
+        {
+            return "crow_pistol";
+        }
+
+        if (lower.Contains("revolver"))
+        {
+            return "crow_revolver";
+        }
+
+        if (lower.Contains("ramshot") || lower.Contains("cannon"))
+        {
+            return "crow_ramshot_cannon";
+        }
+
+        return "crow_ramshot_cannon";
     }
 }

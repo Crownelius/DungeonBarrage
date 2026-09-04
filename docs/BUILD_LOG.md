@@ -3906,6 +3906,46 @@ In Turn 7, the player's equipped `ramshot-cannon` reached 0 ammo (`starting_ammo
 | Headless C6-timeout smoke | pass: `success: true` |
 | Headless C7 smoke | pass: `success: true` |
 
+## 2026-09-04 - Complete 13-spritesheet animated arsenal, reaction sheets, and presentation layer integration
+
+Integrated the complete 13-sheet illustrated crow arsenal and reaction sheets into the Godot 4 .NET client presentation layer, replacing procedural paper-doll circles with animated 32-bit transparent sprites while retaining procedural rendering as a resilient fallback:
+
+- **Standardized Asset Pipeline (`scripts/process_spritesheets.py`):**
+  - Standardized all 13 user-provided sheets into clean 32-bit transparent PNGs with uniform 192x160 cells (960px width, centered at x=96, feet baseline at y=145).
+  - Preserved crow eye highlights and white plumage details via BFS perimeter boundary flood-fill transparency.
+  - Sliced and standardized 10 weapon sheets (5x5 grid, 960x800): `crow_ramshot_cannon`, `crow_frostfall`, `crow_drill`, `crow_bow`, `crow_cinder`, `crow_pistol`, `crow_revolver`, `crow_boomerang`, `crow_flail`, `crow_pickaxe`.
+  - Sliced and standardized 3 reaction sheets (5x4 grid, 960x640): `crow_damage` (hit wince/sparks, falling feathers, prone defeat with stars), `crow_flight` (takeoff leap, airborne flight glide loop, touchdown landing), `crow_potion` (bottle uncork, chug drinking, green healing sparkle aura).
+- **Clean-Room State Resolution (`CharacterAnimationFrameResolver.cs`, `CharacterPresentationModel.cs`):**
+  - Extended `CharacterPresentationModel.ResolveSpriteSheetKey` to resolve all equipped weapons across Main, Secondary, MeleeTool, and Trinket slots.
+  - Implemented `CharacterAnimationFrameResolver.Resolve` in `DungeonBarrage.Client.Interop` as pure C#, mapping authoritative player states, cues, and motion into exact sheet keys, rows, and frame columns:
+    - Priority 1: Defeat/Elimination -> `crow_damage` Row 2 (prone knockout with stars).
+    - Priority 2: Taking Damage / Hit -> `crow_damage` Row 0/1 (sparks, feathers, flinch driven by `cue.Age01`).
+    - Priority 3: Healing Potion -> `crow_potion` Row 1 (drinking).
+    - Priority 4: Airborne / Hopping -> `crow_flight` Row 1 (gliding wings loop).
+    - Priority 5: Firing / Attack Cue -> Weapon sheet Row 3 (blast / thrust / slam).
+    - Priority 6: Aiming Stance -> Weapon sheet Row 2 (elevation angle mapped to cols 0..4).
+    - Priority 7: Moving / Walking -> Weapon sheet Row 1 (walk cycle).
+    - Priority 8: Idle Ambient Breathing -> Weapon sheet Row 0 (5-frame ambient breathing cycle).
+- **Godot Presentation Layer (`CharacterSpriteRegistry.cs`, `Main.cs`):**
+  - Implemented `CharacterSpriteRegistry` to cache and manage `Texture2D` instances via `ResourceLoader.Load` and `Image.LoadFromFile` fallback for headless resilience.
+  - Implemented `TryDrawCharacter` in `Main.cs`: anchors sprites directly to `model.ShadowPivot`, scales dynamically to authoritative collision radius, applies horizontal facing flips (`model.FacingSign`), hit flinch, and white hit flash.
+  - Retained procedural paper-doll rendering as a seamless fallback if textures are unavailable.
+  - Crown and gem trinket socket adornments dynamically render atop the sprite's head when equipped.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace --locked` | **509 passed**, 0 failed |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 149 interop = **161 passed**, 0 failed |
+| `dotnet build client/src/DungeonBarrage.Client/DungeonBarrage.Client.csproj -c ExportRelease` | pass, 0 warnings, 0 errors |
+| Godot headless export (`Windows Desktop`) | pass (`DungeonBarrage.exe`) |
+| Headless C5 smoke | pass: `success: true`, cues observed |
+| Headless C6 smoke | pass: `success: true`, 3/3 maps, stacked blocks fell |
+| Headless C7 smoke | pass: `success: true` |
+
+
 
 
 

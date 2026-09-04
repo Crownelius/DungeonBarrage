@@ -108,6 +108,7 @@ public partial class Main : Node2D
     private ShotPlayback? _playback;
     private readonly CameraDirector _camera = new();
     private readonly CombatEffectSystem _effects = new();
+    private readonly CharacterSpriteRegistry _spriteRegistry = new();
     private float _cellSize = 12f;
     private Vector2 _worldOrigin = Vector2.Zero;
     private readonly List<string> _combatLog = [];
@@ -152,6 +153,7 @@ public partial class Main : Node2D
         {
             _diagnostics = BuildDiagnostics.Capture();
             _settings = UserSettingsStore.Load(Path.Combine(OS.GetUserDataDir(), "settings.json"));
+            _spriteRegistry.PreloadAll();
         }
         catch (Exception exception)
         {
@@ -1757,9 +1759,13 @@ public partial class Main : Node2D
         for (var index = 0; index < snapshot.Players.Count; index++)
         {
             var player = snapshot.Players[index];
+            var isMoving = false;
+            var isAirborne = false;
             if (IsInputLocked() && _playback is not null &&
                 MovementPlayback.FindMovementEvent(_playback.Events, player.PlayerId) is { } moved)
             {
+                isMoving = presentationTick >= moved.PresentationTick && presentationTick < _playback.LockTicks;
+                isAirborne = isMoving && (moved.End.Y != moved.Start.Y);
                 player = MovementPlayback.InterpolatePlayer(
                     player,
                     moved,
@@ -1811,7 +1817,9 @@ public partial class Main : Node2D
                 presentation?.CueFor(player.PlayerId),
                 opponentX,
                 slot,
-                aimAngle);
+                aimAngle,
+                isAirborne,
+                isMoving);
         }
 
         DrawCombatEffects();
@@ -2070,7 +2078,9 @@ public partial class Main : Node2D
         ActorPresentationCue? cue,
         int? opponentX,
         ClientAbilitySlot activeSlot = ClientAbilitySlot.Main,
-        float? aimAngleRadians = null)
+        float? aimAngleRadians = null,
+        bool isAirborne = false,
+        bool isMoving = false)
     {
         var model = CharacterPresentationModel.Create(
             player,
@@ -2110,116 +2120,178 @@ public partial class Main : Node2D
         // Ground shadow (anchored to floor)
         DrawCircle(new Vector2(model.ShadowPivot.X, model.ShadowPivot.Y), radius * 0.45f, new Color(0, 0, 0, 0.35f));
 
-        // Authoritative body
-        DrawCircle(center, radius, bodyColor);
-        DrawCircle(center + new Vector2(0, -radius * 0.15f), radius * 0.62f, bodyColor.Lightened(0.12f));
+        var drawnSprite = _spriteRegistry.TryDrawCharacter(
+            this,
+            model,
+            defeated,
+            cue,
+            color,
+            Time.GetTicksMsec(),
+            aimAngleRadians.HasValue,
+            isAirborne,
+            isMoving,
+            aimAngleRadians,
+            flinchX,
+            bobY,
+            flashIntensity);
 
-        // Equipped Trinket (Crown / Gem) socket adornment
-        if (!defeated && model.TrinketAccent is { } trinket)
+        if (drawnSprite)
         {
-            var crownPos = new Vector2(model.CrownSocket.X + flinchX, model.CrownSocket.Y + bobY);
-            var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
-            if (trinket.Kind == CosmeticAccentKind.Crown)
+            // Equipped Trinket (Crown / Gem) socket adornment atop head
+            if (!defeated && model.TrinketAccent is { } trinket)
             {
-                var cw = radius * 0.5f;
-                var ch = radius * 0.35f;
-                var crownPoints = new Vector2[]
+                var crownPos = new Vector2(model.CrownSocket.X + flinchX, model.CrownSocket.Y + bobY);
+                var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
+                if (trinket.Kind == CosmeticAccentKind.Crown)
                 {
-                    crownPos + new Vector2(-cw, ch * 0.5f),
-                    crownPos + new Vector2(-cw, -ch),
-                    crownPos + new Vector2(-cw * 0.5f, -ch * 0.4f),
-                    crownPos + new Vector2(0, -ch * 1.2f),
-                    crownPos + new Vector2(cw * 0.5f, -ch * 0.4f),
-                    crownPos + new Vector2(cw, -ch),
-                    crownPos + new Vector2(cw, ch * 0.5f),
-                };
-                DrawColoredPolygon(crownPoints, accentColor);
-            }
-            else if (trinket.Kind == CosmeticAccentKind.Gem)
-            {
-                var gw = radius * 0.25f;
-                var gh = radius * 0.35f;
-                var gemPoints = new Vector2[]
+                    var cw = radius * 0.45f;
+                    var ch = radius * 0.30f;
+                    var crownPoints = new Vector2[]
+                    {
+                        crownPos + new Vector2(-cw, ch * 0.5f),
+                        crownPos + new Vector2(-cw, -ch),
+                        crownPos + new Vector2(-cw * 0.5f, -ch * 0.4f),
+                        crownPos + new Vector2(0, -ch * 1.2f),
+                        crownPos + new Vector2(cw * 0.5f, -ch * 0.4f),
+                        crownPos + new Vector2(cw, -ch),
+                        crownPos + new Vector2(cw, ch * 0.5f),
+                    };
+                    DrawColoredPolygon(crownPoints, accentColor);
+                }
+                else if (trinket.Kind == CosmeticAccentKind.Gem)
                 {
-                    crownPos + new Vector2(0, -gh),
-                    crownPos + new Vector2(gw, 0),
-                    crownPos + new Vector2(0, gh * 0.6f),
-                    crownPos + new Vector2(-gw, 0),
-                };
-                DrawColoredPolygon(gemPoints, accentColor);
-            }
-        }
-
-        // Equipped Weapon / Tool socket adornment
-        if (!defeated && model.WeaponAccent is { } weapon)
-        {
-            var weaponPos = new Vector2(model.WeaponSocket.X + flinchX, model.WeaponSocket.Y + bobY);
-            var weaponColor = Color.FromHtml(weapon.PrimaryColorHex);
-            var dir = model.FacingSign;
-
-            Vector2 barrelDir;
-            if (model.AimVector is { } aimVec)
-            {
-                barrelDir = new Vector2(aimVec.X, aimVec.Y);
-            }
-            else
-            {
-                barrelDir = new Vector2(dir, -0.2f).Normalized();
+                    var gw = radius * 0.22f;
+                    var gh = radius * 0.30f;
+                    var gemPoints = new Vector2[]
+                    {
+                        crownPos + new Vector2(0, -gh),
+                        crownPos + new Vector2(gw, 0),
+                        crownPos + new Vector2(0, gh * 0.6f),
+                        crownPos + new Vector2(-gw, 0),
+                    };
+                    DrawColoredPolygon(gemPoints, accentColor);
+                }
             }
 
-            if (weapon.Kind == CosmeticAccentKind.Cannon)
+            // Spawn particles/muzzle fire/damage numbers from combat effects
+            if (cue is not { Kind: ActorPresentationCueKind.Defeat })
             {
-                var barrelEnd = weaponPos + (barrelDir * radius * 0.55f);
-                DrawLine(weaponPos, barrelEnd, weaponColor, width: 4.5f);
-                DrawCircle(barrelEnd, 2.5f, weaponColor.Lightened(0.2f));
+                DrawActorCue(center, radius, cue, model.FacingSign);
             }
-            else if (weapon.Kind == CosmeticAccentKind.Blade)
-            {
-                var bladeDir = model.AimVector is not null ? barrelDir : new Vector2(dir * 0.7f, 0.7f).Normalized();
-                var bladeTip = weaponPos + (bladeDir * radius * 0.5f);
-                DrawLine(weaponPos, bladeTip, weaponColor, width: 3.5f);
-                DrawLine(bladeTip, bladeTip + new Vector2(dir * 2.5f, -2.5f), weaponColor.Lightened(0.3f), width: 2f);
-            }
-            else if (weapon.Kind == CosmeticAccentKind.Bow)
-            {
-                var bowCenter = weaponPos + (barrelDir * radius * 0.3f);
-                var perp = new Vector2(-barrelDir.Y, barrelDir.X) * radius * 0.35f;
-                var tip1 = bowCenter + perp;
-                var tip2 = bowCenter - perp;
-                DrawLine(tip1, tip2, weaponColor, width: 3f);
-                var bowstringColor = new Color(0.98f, 0.98f, 0.82f);
-                DrawLine(tip1, weaponPos, bowstringColor, width: 1.5f);
-                DrawLine(tip2, weaponPos, bowstringColor, width: 1.5f);
-            }
-            else if (weapon.Kind == CosmeticAccentKind.Ordnance)
-            {
-                var ordPos = weaponPos + (barrelDir * radius * 0.25f);
-                DrawCircle(ordPos, radius * 0.22f, weaponColor);
-                DrawCircle(ordPos + new Vector2(0, -radius * 0.1f), radius * 0.10f, weaponColor.Lightened(0.3f));
-            }
-        }
-
-        DrawActorCue(center, radius, cue, model.FacingSign);
-
-        // Dynamic beak polygon
-        var beak = new Vector2[model.BeakPolygon.Count];
-        for (var i = 0; i < model.BeakPolygon.Count; i++)
-        {
-            beak[i] = new Vector2(model.BeakPolygon[i].X + flinchX, model.BeakPolygon[i].Y + bobY);
-        }
-        DrawColoredPolygon(beak, Colors.Gold);
-
-        // Eye socket
-        var eyePos = new Vector2(model.EyeSocket.X + flinchX, model.EyeSocket.Y + bobY);
-        if (cue is { Kind: ActorPresentationCueKind.Hit })
-        {
-            var slitDir = new Vector2(model.FacingSign * radius * 0.12f, 0);
-            DrawLine(eyePos - slitDir, eyePos + slitDir, Colors.Black, width: 2.5f);
         }
         else
         {
-            DrawCircle(eyePos, radius * 0.14f, Colors.White);
-            DrawCircle(eyePos, radius * 0.06f, Colors.Black);
+            // Authoritative body (fallback procedural circles)
+            DrawCircle(center, radius, bodyColor);
+            DrawCircle(center + new Vector2(0, -radius * 0.15f), radius * 0.62f, bodyColor.Lightened(0.12f));
+
+            // Equipped Trinket (Crown / Gem) socket adornment
+            if (!defeated && model.TrinketAccent is { } trinket)
+            {
+                var crownPos = new Vector2(model.CrownSocket.X + flinchX, model.CrownSocket.Y + bobY);
+                var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
+                if (trinket.Kind == CosmeticAccentKind.Crown)
+                {
+                    var cw = radius * 0.5f;
+                    var ch = radius * 0.35f;
+                    var crownPoints = new Vector2[]
+                    {
+                        crownPos + new Vector2(-cw, ch * 0.5f),
+                        crownPos + new Vector2(-cw, -ch),
+                        crownPos + new Vector2(-cw * 0.5f, -ch * 0.4f),
+                        crownPos + new Vector2(0, -ch * 1.2f),
+                        crownPos + new Vector2(cw * 0.5f, -ch * 0.4f),
+                        crownPos + new Vector2(cw, -ch),
+                        crownPos + new Vector2(cw, ch * 0.5f),
+                    };
+                    DrawColoredPolygon(crownPoints, accentColor);
+                }
+                else if (trinket.Kind == CosmeticAccentKind.Gem)
+                {
+                    var gw = radius * 0.25f;
+                    var gh = radius * 0.35f;
+                    var gemPoints = new Vector2[]
+                    {
+                        crownPos + new Vector2(0, -gh),
+                        crownPos + new Vector2(gw, 0),
+                        crownPos + new Vector2(0, gh * 0.6f),
+                        crownPos + new Vector2(-gw, 0),
+                    };
+                    DrawColoredPolygon(gemPoints, accentColor);
+                }
+            }
+
+            // Equipped Weapon / Tool socket adornment
+            if (!defeated && model.WeaponAccent is { } weapon)
+            {
+                var weaponPos = new Vector2(model.WeaponSocket.X + flinchX, model.WeaponSocket.Y + bobY);
+                var weaponColor = Color.FromHtml(weapon.PrimaryColorHex);
+                var dir = model.FacingSign;
+
+                Vector2 barrelDir;
+                if (model.AimVector is { } aimVec)
+                {
+                    barrelDir = new Vector2(aimVec.X, aimVec.Y);
+                }
+                else
+                {
+                    barrelDir = new Vector2(dir, -0.2f).Normalized();
+                }
+
+                if (weapon.Kind == CosmeticAccentKind.Cannon)
+                {
+                    var barrelEnd = weaponPos + (barrelDir * radius * 0.55f);
+                    DrawLine(weaponPos, barrelEnd, weaponColor, width: 4.5f);
+                    DrawCircle(barrelEnd, 2.5f, weaponColor.Lightened(0.2f));
+                }
+                else if (weapon.Kind == CosmeticAccentKind.Blade)
+                {
+                    var bladeDir = model.AimVector is not null ? barrelDir : new Vector2(dir * 0.7f, 0.7f).Normalized();
+                    var bladeTip = weaponPos + (bladeDir * radius * 0.5f);
+                    DrawLine(weaponPos, bladeTip, weaponColor, width: 3.5f);
+                    DrawLine(bladeTip, bladeTip + new Vector2(dir * 2.5f, -2.5f), weaponColor.Lightened(0.3f), width: 2f);
+                }
+                else if (weapon.Kind == CosmeticAccentKind.Bow)
+                {
+                    var bowCenter = weaponPos + (barrelDir * radius * 0.3f);
+                    var perp = new Vector2(-barrelDir.Y, barrelDir.X) * radius * 0.35f;
+                    var tip1 = bowCenter + perp;
+                    var tip2 = bowCenter - perp;
+                    DrawLine(tip1, tip2, weaponColor, width: 3f);
+                    var bowstringColor = new Color(0.98f, 0.98f, 0.82f);
+                    DrawLine(tip1, weaponPos, bowstringColor, width: 1.5f);
+                    DrawLine(tip2, weaponPos, bowstringColor, width: 1.5f);
+                }
+                else if (weapon.Kind == CosmeticAccentKind.Ordnance)
+                {
+                    var ordPos = weaponPos + (barrelDir * radius * 0.25f);
+                    DrawCircle(ordPos, radius * 0.22f, weaponColor);
+                    DrawCircle(ordPos + new Vector2(0, -radius * 0.1f), radius * 0.10f, weaponColor.Lightened(0.3f));
+                }
+            }
+
+            DrawActorCue(center, radius, cue, model.FacingSign);
+
+            // Dynamic beak polygon
+            var beak = new Vector2[model.BeakPolygon.Count];
+            for (var i = 0; i < model.BeakPolygon.Count; i++)
+            {
+                beak[i] = new Vector2(model.BeakPolygon[i].X + flinchX, model.BeakPolygon[i].Y + bobY);
+            }
+            DrawColoredPolygon(beak, Colors.Gold);
+
+            // Eye socket
+            var eyePos = new Vector2(model.EyeSocket.X + flinchX, model.EyeSocket.Y + bobY);
+            if (cue is { Kind: ActorPresentationCueKind.Hit })
+            {
+                var slitDir = new Vector2(model.FacingSign * radius * 0.12f, 0);
+                DrawLine(eyePos - slitDir, eyePos + slitDir, Colors.Black, width: 2.5f);
+            }
+            else
+            {
+                DrawCircle(eyePos, radius * 0.14f, Colors.White);
+                DrawCircle(eyePos, radius * 0.06f, Colors.Black);
+            }
         }
 
         // Floating character status plate
