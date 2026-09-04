@@ -202,7 +202,7 @@ public partial class Main : Node2D
     public override void _Process(double delta)
     {
         _effects.Update((float)delta);
-        if (_effects.ActiveParticles.Count > 0 || _effects.ActiveShockwaves.Count > 0 || _effects.ActiveTargetMarkers.Count > 0)
+        if (_effects.ActiveParticles.Count > 0 || _effects.ActiveShockwaves.Count > 0 || _effects.ActiveTargetMarkers.Count > 0 || _effects.ActiveDamageTexts.Count > 0)
         {
             QueueRedraw();
         }
@@ -238,6 +238,15 @@ public partial class Main : Node2D
         if (_live is not null && !IsInputLocked() && _live.PlanningDeadlineUtc is not null)
         {
             QueueRedraw();
+        }
+
+        if (_live is not null && !IsInputLocked())
+        {
+            var active = ActivePlayer(_live.CurrentSnapshot);
+            if (active is not null && !GetSlotAmmo(active, _selectedAbilitySlot).canUse)
+            {
+                AutoSelectAvailableWeapon(active);
+            }
         }
 
         // Automatic bot turn processing when active player is bot-controlled, or an automatic
@@ -907,12 +916,12 @@ public partial class Main : Node2D
                     QueueRedraw();
                     return;
                 case Key.Key2:
-                    _selectedAbilitySlot = ClientAbilitySlot.Secondary;
+                    _selectedAbilitySlot = ClientAbilitySlot.MeleeTool;
                     _lastPreviewAngle = int.MinValue;
                     QueueRedraw();
                     return;
                 case Key.Key3:
-                    _selectedAbilitySlot = ClientAbilitySlot.MeleeTool;
+                    _selectedAbilitySlot = ClientAbilitySlot.Secondary;
                     _lastPreviewAngle = int.MinValue;
                     QueueRedraw();
                     return;
@@ -984,6 +993,19 @@ public partial class Main : Node2D
 
             if (mouseButton.Pressed)
             {
+                var viewportSize = GetViewportRect().Size;
+                for (var s = 0; s < WeaponSlotOrder.Length; s++)
+                {
+                    if (WeaponSlotRect(s, viewportSize).HasPoint(mouseButton.Position))
+                    {
+                        _selectedAbilitySlot = WeaponSlotOrder[s];
+                        _lastPreviewAngle = int.MinValue;
+                        CancelAim();
+                        QueueRedraw();
+                        return;
+                    }
+                }
+
                 _isAiming = true;
                 _aimOrigin = mouseButton.Position;
                 _aimCursor = mouseButton.Position;
@@ -1034,7 +1056,7 @@ public partial class Main : Node2D
         var facesRight = AimSolver.FacesRight(player.Position.X, opponent?.Position.X);
         var allowance = AimSolver.CrowMovementAllowance(_live.CurrentSnapshot.PositionScale);
         var cap = AimSolver.MaxPowerAfterMovement(_live.CurrentSnapshot.MovementRemaining, allowance);
-        return AimSolver.FromDrag(
+        var solution = AimSolver.FromDrag(
             _aimOrigin.X,
             _aimOrigin.Y,
             _aimCursor.X,
@@ -1042,6 +1064,14 @@ public partial class Main : Node2D
             facesRight,
             cap,
             _cellSize);
+
+        var ammoInfo = GetSlotAmmo(player, _selectedAbilitySlot);
+        if (!ammoInfo.canUse)
+        {
+            return solution with { CanFire = false };
+        }
+
+        return solution;
     }
 
     private static ClientPlayerSnapshot? ActivePlayer(ClientMatchSnapshot snapshot)
@@ -1162,7 +1192,7 @@ public partial class Main : Node2D
 
     private async Task FireAimedShotAsync(AimSolution aim)
     {
-        if (_live is null)
+        if (_live is null || !aim.CanFire)
         {
             return;
         }
@@ -1202,6 +1232,7 @@ public partial class Main : Node2D
             if (transition is not null)
             {
                 RecordCombatNotes(transition);
+                AutoSelectAvailableWeapon(ActivePlayer(_live.CurrentSnapshot));
                 if (!BeginShotPlayback(preSnapshot, preTerrain, transition))
                 {
                     _inputLockedUntilMsec = Time.GetTicksMsec() + LockDurationMsecFor(_live);
@@ -1603,16 +1634,26 @@ public partial class Main : Node2D
         var anemometerX = (GetViewportRect().Size.X - 210f) * 0.5f;
         DrawWindAnemometer(snapshot, new Vector2(anemometerX, 6f));
 
+        var active = ActivePlayer(snapshot);
         if (_isAiming)
         {
             hudY += 18;
-            var aim = CurrentAim();
-            var dragSide = aim.FacesRight ? "LEFT" : "RIGHT";
-            var maxPct = aim.MaxPowerBasisPoints / 100;
-            var aimText = aim.CanFire
-                ? $"pull {dragSide}  {aim.AngleDegrees}°  power {aim.PowerPercent}% of {maxPct}% max  — gold line is first impact   release to fire"
-                : $"click anywhere, drag {dragSide} (away from the other crow) — longer line is more power, max this turn {maxPct}%";
-            DrawString(font, new Vector2(8, hudY), aimText, fontSize: 14, modulate: Colors.Gold);
+            var slotInfo = GetSlotAmmo(active, _selectedAbilitySlot);
+            if (!slotInfo.canUse)
+            {
+                var emptyWarning = $"OUT OF AMMO on {slotInfo.itemName} — Click weapon bar or press [1]-[4] to switch!";
+                DrawString(font, new Vector2(8, hudY), emptyWarning, fontSize: 14, modulate: Colors.OrangeRed);
+            }
+            else
+            {
+                var aim = CurrentAim();
+                var dragSide = aim.FacesRight ? "LEFT" : "RIGHT";
+                var maxPct = aim.MaxPowerBasisPoints / 100;
+                var aimText = aim.CanFire
+                    ? $"pull {dragSide}  {aim.AngleDegrees}°  power {aim.PowerPercent}% of {maxPct}% max  — gold line is first impact   release to fire"
+                    : $"click anywhere, drag {dragSide} (away from the other crow) — longer line is more power, max this turn {maxPct}%";
+                DrawString(font, new Vector2(8, hudY), aimText, fontSize: 14, modulate: Colors.Gold);
+            }
         }
 
         if (live.PlanningDeadlineUtc is { } planningDeadline)
@@ -1635,6 +1676,7 @@ public partial class Main : Node2D
             DrawString(font, new Vector2(8, hudY), $"rejected: {_liveError}", fontSize: 12, modulate: Colors.OrangeRed);
         }
 
+        DrawWeaponActionBar(active);
         DrawArenaLegend(snapshot);
 
         if (snapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
@@ -1693,19 +1735,23 @@ public partial class Main : Node2D
         FitWorld(snapshot.TerrainWidth, snapshot.TerrainHeight);
         _camera.SetImpulse(presentation?.CameraImpulse ?? PresentationCameraImpulse.None, _cellSize);
         DrawArena(snapshot.TerrainWidth, snapshot.TerrainHeight);
-        DrawTerrain(snapshot, terrain);
-        foreach (var block in snapshot.Blocks)
-        {
-            DrawBlock(block, terrain, snapshot.TerrainWidth, snapshot.TerrainHeight);
-        }
 
         var presentationTick = 0u;
+        IReadOnlyList<ClientPresentationEvent>? playbackEvents = null;
         if (IsInputLocked() && _playback is not null)
         {
             presentationTick = ProjectilePlayback.TickAt(
                 Time.GetTicksMsec() - _playback.StartMsec,
                 _playback.TickRate,
                 _playback.LockTicks);
+            playbackEvents = _playback.Events;
+        }
+
+        DrawTerrain(snapshot, terrain, playbackEvents, presentationTick);
+        foreach (var block in snapshot.Blocks)
+        {
+            var fallOffset = ComputeBlockFallOffset(block.Id, playbackEvents, presentationTick, _cellSize, _settings.Accessibility.ReduceMotion);
+            DrawBlock(block, terrain, snapshot.TerrainWidth, snapshot.TerrainHeight, fallOffset);
         }
 
         for (var index = 0; index < snapshot.Players.Count; index++)
@@ -1828,7 +1874,11 @@ public partial class Main : Node2D
             modulate: ArenaEdgeColor);
     }
 
-    private void DrawTerrain(ClientMatchSnapshot snapshot, TerrainRead terrain)
+    private void DrawTerrain(
+        ClientMatchSnapshot snapshot,
+        TerrainRead terrain,
+        IReadOnlyList<ClientPresentationEvent>? events = null,
+        uint currentTick = 0)
     {
         var cells = terrain.Cells.Span;
         var width = (int)snapshot.TerrainWidth;
@@ -1849,8 +1899,16 @@ public partial class Main : Node2D
                 }
 
                 var owner = BlockOwningCell(snapshot, x, y);
+                var fallOffset = owner is not null
+                    ? ComputeBlockFallOffset(owner.Id, events, currentTick, _cellSize, _settings.Accessibility.ReduceMotion)
+                    : 0f;
                 var fill = EnvironmentCellColor(material, owner, x, y);
                 var rect = CellRect(x, y);
+                if (fallOffset != 0f)
+                {
+                    rect = new Rect2(rect.Position.X, rect.Position.Y + fallOffset, rect.Size.X, rect.Size.Y);
+                }
+
                 DrawRect(rect, fill);
                 var aboveEmpty = y == 0 || cells[((y - 1) * width) + x] == 0;
                 if (aboveEmpty)
@@ -1866,7 +1924,8 @@ public partial class Main : Node2D
         ClientBlockSnapshot block,
         TerrainRead terrain,
         uint terrainWidth,
-        uint terrainHeight)
+        uint terrainHeight,
+        float pixelYOffset = 0f)
     {
         if (block.Health == 0)
         {
@@ -1903,7 +1962,13 @@ public partial class Main : Node2D
                     continue;
                 }
 
-                DrawRect(CellRect(x, y), mortar, filled: false, width: 1f);
+                var rect = CellRect(x, y);
+                if (pixelYOffset != 0f)
+                {
+                    rect = new Rect2(rect.Position.X, rect.Position.Y + pixelYOffset, rect.Size.X, rect.Size.Y);
+                }
+
+                DrawRect(rect, mortar, filled: false, width: 1f);
             }
         }
     }
@@ -2017,10 +2082,30 @@ public partial class Main : Node2D
             activeSlot,
             aimAngleRadians);
         var bobY = model.BobOffsetY(Time.GetTicksMsec(), _settings.Accessibility.ReduceMotion);
-        var center = new Vector2(model.Body.Center.X, model.Body.Center.Y + bobY);
+
+        var flinchX = 0f;
+        var flashIntensity = 0f;
+        if (cue is { Kind: ActorPresentationCueKind.Hit } hitCue)
+        {
+            var hitAge = hitCue.Age01;
+            var flinchDecay = Math.Clamp(1f - hitAge, 0f, 1f);
+            if (!_settings.Accessibility.ReduceMotion)
+            {
+                flinchX = -model.FacingSign * MathF.Sin(hitAge * MathF.PI * 4f) * flinchDecay * 5.5f;
+            }
+
+            if (hitAge < 0.35f)
+            {
+                flashIntensity = Math.Clamp(1f - (hitAge / 0.35f), 0f, 1f);
+            }
+        }
+
+        var center = new Vector2(model.Body.Center.X + flinchX, model.Body.Center.Y + bobY);
         var radius = model.Body.Radius;
         var defeated = player.IsEliminated || cue is { Kind: ActorPresentationCueKind.Defeat };
-        var bodyColor = defeated ? Colors.Gray : color;
+        var bodyColor = defeated
+            ? Colors.Gray
+            : (flashIntensity > 0f ? color.Lerp(Colors.White, flashIntensity * 0.75f) : color);
 
         // Ground shadow (anchored to floor)
         DrawCircle(new Vector2(model.ShadowPivot.X, model.ShadowPivot.Y), radius * 0.45f, new Color(0, 0, 0, 0.35f));
@@ -2032,7 +2117,7 @@ public partial class Main : Node2D
         // Equipped Trinket (Crown / Gem) socket adornment
         if (!defeated && model.TrinketAccent is { } trinket)
         {
-            var crownPos = new Vector2(model.CrownSocket.X, model.CrownSocket.Y + bobY);
+            var crownPos = new Vector2(model.CrownSocket.X + flinchX, model.CrownSocket.Y + bobY);
             var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
             if (trinket.Kind == CosmeticAccentKind.Crown)
             {
@@ -2068,7 +2153,7 @@ public partial class Main : Node2D
         // Equipped Weapon / Tool socket adornment
         if (!defeated && model.WeaponAccent is { } weapon)
         {
-            var weaponPos = new Vector2(model.WeaponSocket.X, model.WeaponSocket.Y + bobY);
+            var weaponPos = new Vector2(model.WeaponSocket.X + flinchX, model.WeaponSocket.Y + bobY);
             var weaponColor = Color.FromHtml(weapon.PrimaryColorHex);
             var dir = model.FacingSign;
 
@@ -2120,14 +2205,22 @@ public partial class Main : Node2D
         var beak = new Vector2[model.BeakPolygon.Count];
         for (var i = 0; i < model.BeakPolygon.Count; i++)
         {
-            beak[i] = new Vector2(model.BeakPolygon[i].X, model.BeakPolygon[i].Y + bobY);
+            beak[i] = new Vector2(model.BeakPolygon[i].X + flinchX, model.BeakPolygon[i].Y + bobY);
         }
         DrawColoredPolygon(beak, Colors.Gold);
 
         // Eye socket
-        var eyePos = new Vector2(model.EyeSocket.X, model.EyeSocket.Y + bobY);
-        DrawCircle(eyePos, radius * 0.14f, Colors.White);
-        DrawCircle(eyePos, radius * 0.06f, Colors.Black);
+        var eyePos = new Vector2(model.EyeSocket.X + flinchX, model.EyeSocket.Y + bobY);
+        if (cue is { Kind: ActorPresentationCueKind.Hit })
+        {
+            var slitDir = new Vector2(model.FacingSign * radius * 0.12f, 0);
+            DrawLine(eyePos - slitDir, eyePos + slitDir, Colors.Black, width: 2.5f);
+        }
+        else
+        {
+            DrawCircle(eyePos, radius * 0.14f, Colors.White);
+            DrawCircle(eyePos, radius * 0.06f, Colors.Black);
+        }
 
         // Floating character status plate
         var activeItemName = model.WeaponAccent?.ItemId ?? player.Loadout.Main;
@@ -2255,13 +2348,20 @@ public partial class Main : Node2D
                 DrawCircle(origin, radius * (0.20f + (0.10f * intensity)), new Color(1f, 0.86f, 0.35f, 0.7f * intensity));
                 break;
             case ActorPresentationCueKind.Hit:
-                if (activeCue.Age01 < 0.06f)
+                if (activeCue.Age01 < 0.08f)
                 {
                     _effects.SpawnHitSparks(
                         new PresentationPoint(center.X, center.Y),
                         _cellSize,
                         _settings.Performance.Tier,
                         _settings.Accessibility.ReduceMotion);
+
+                    if (activeCue.Value is { } dmg && dmg > 0)
+                    {
+                        _effects.SpawnDamageNumber(
+                            new PresentationPoint(center.X, center.Y - (radius * 0.9f)),
+                            dmg);
+                    }
                 }
                 DrawArc(
                     center,
@@ -2344,6 +2444,16 @@ public partial class Main : Node2D
                     modulate: Colors.OrangeRed);
             }
         }
+
+        if (!aim.CanFire)
+        {
+            DrawString(
+                ThemeDB.FallbackFont,
+                _aimCursor + new Vector2(14, -10),
+                "OUT OF AMMO",
+                fontSize: 13,
+                modulate: Colors.OrangeRed);
+        }
     }
 
     private ClientPosition? FirstPreviewImpact()
@@ -2415,6 +2525,14 @@ public partial class Main : Node2D
                     _cellSize,
                     _settings.Performance.Tier,
                     _settings.Accessibility.ReduceMotion);
+                if (cue.Cause == ClientImpactCause.Terrain)
+                {
+                    _effects.SpawnTerrainDebris(
+                        new PresentationPoint(hitPos.X, hitPos.Y),
+                        _cellSize,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
             }
 
             DrawImpactCue(cue, scale);
@@ -2449,12 +2567,33 @@ public partial class Main : Node2D
                 width: 2.5f);
         }
 
-        // 3. Particles (sparks, embers)
+        // 3. Particles (sparks, embers, debris)
         foreach (var p in _effects.ActiveParticles)
         {
             var pos = new Vector2(p.Position.X, p.Position.Y);
             var color = Color.FromHtml(p.ColorHex);
             DrawCircle(pos, p.Size, new Color(color.R, color.G, color.B, p.Alpha));
+        }
+
+        // 4. Floating Damage Text
+        foreach (var text in _effects.ActiveDamageTexts)
+        {
+            var pos = new Vector2(text.Position.X, text.Position.Y);
+            var color = Color.FromHtml(text.ColorHex);
+            var alphaColor = new Color(color.R, color.G, color.B, text.Alpha);
+            var fontSize = text.IsCrit ? 18 : 14;
+            DrawString(
+                ThemeDB.FallbackFont,
+                pos + new Vector2(1, 1),
+                text.Text,
+                fontSize: fontSize,
+                modulate: new Color(0, 0, 0, text.Alpha * 0.85f));
+            DrawString(
+                ThemeDB.FallbackFont,
+                pos,
+                text.Text,
+                fontSize: fontSize,
+                modulate: alphaColor);
         }
     }
 
@@ -3559,6 +3698,21 @@ public partial class Main : Node2D
             switch (transition.Events[i])
             {
                 case ClientBlockChangedEvent block:
+                    var bounds = block.PreviousSurvivingBounds ?? block.NewSurvivingBounds;
+                    if (bounds is not null && (block.NewHealth is 0 || (block.PreviousSurvivingBounds is { } pb && block.NewSurvivingBounds is { } nb && nb.Y > pb.Y)))
+                    {
+                        var blockWorldX = (bounds.X + (bounds.Width / 2f)) * _cellSize;
+                        var blockWorldY = (bounds.Y + (bounds.Height / 2f)) * _cellSize;
+                        var blockScreen = new Vector2(
+                            _worldOrigin.X + blockWorldX + EffectiveCameraOffset.X,
+                            _worldOrigin.Y + blockWorldY + EffectiveCameraOffset.Y);
+                        _effects.SpawnTerrainDebris(
+                            new PresentationPoint(blockScreen.X, blockScreen.Y),
+                            _cellSize * 1.5f,
+                            _settings.Performance.Tier,
+                            _settings.Accessibility.ReduceMotion);
+                    }
+
                     if (block.PreviousSurvivingBounds is { } previous &&
                         block.NewSurvivingBounds is { } next &&
                         next.Y > previous.Y)
@@ -3760,5 +3914,228 @@ public partial class Main : Node2D
 
         image.SavePng(path);
         return (image.GetWidth(), image.GetHeight());
+    }
+
+    private const float WeaponBarSlotWidth = 158f;
+    private const float WeaponBarSlotHeight = 46f;
+    private const float WeaponBarSlotGap = 8f;
+
+    private static readonly ClientAbilitySlot[] WeaponSlotOrder =
+    [
+        ClientAbilitySlot.Main,
+        ClientAbilitySlot.MeleeTool,
+        ClientAbilitySlot.Secondary,
+        ClientAbilitySlot.Trinket,
+    ];
+
+    private static readonly string[] WeaponSlotBadges =
+    [
+        "[1] RANGED",
+        "[2] MELEE",
+        "[3] SECONDARY",
+        "[4] TRINKET",
+    ];
+
+    private static Rect2 WeaponSlotRect(int slotIndex, Vector2 viewportSize)
+    {
+        const int count = 4;
+        var totalWidth = (count * WeaponBarSlotWidth) + ((count - 1) * WeaponBarSlotGap);
+        var startX = (viewportSize.X - totalWidth) * 0.5f;
+        var y = viewportSize.Y - WeaponBarSlotHeight - 24f;
+        return new Rect2(startX + (slotIndex * (WeaponBarSlotWidth + WeaponBarSlotGap)), y, WeaponBarSlotWidth, WeaponBarSlotHeight);
+    }
+
+    private (int remaining, int max, bool canUse, string itemName) GetSlotAmmo(ClientPlayerSnapshot? player, ClientAbilitySlot slot)
+    {
+        if (player is null)
+        {
+            return (0, 0, false, string.Empty);
+        }
+
+        if (slot == ClientAbilitySlot.Trinket)
+        {
+            var ready = player.TrinketCharge >= 10_000;
+            return (ready ? 1 : 0, 1, ready, ItemDisplayName(player.Loadout.Trinket));
+        }
+
+        var index = slot switch
+        {
+            ClientAbilitySlot.Main => 0,
+            ClientAbilitySlot.Secondary => 1,
+            ClientAbilitySlot.MeleeTool => 2,
+            _ => 0,
+        };
+
+        var itemName = slot switch
+        {
+            ClientAbilitySlot.Main => ItemDisplayName(player.Loadout.Main),
+            ClientAbilitySlot.Secondary => ItemDisplayName(player.Loadout.Secondary),
+            ClientAbilitySlot.MeleeTool => ItemDisplayName(player.Loadout.MeleeTool),
+            _ => string.Empty,
+        };
+
+        if (index < player.Ammo.Count)
+        {
+            var counter = player.Ammo[index];
+            var canUse = counter.Policy == ClientAmmoPolicy.Unlimited || counter.Remaining > 0;
+            return (counter.Remaining, counter.Maximum, canUse, itemName);
+        }
+
+        return (0, 0, false, itemName);
+    }
+
+    private void AutoSelectAvailableWeapon(ClientPlayerSnapshot? player)
+    {
+        if (player is null)
+        {
+            return;
+        }
+
+        var current = GetSlotAmmo(player, _selectedAbilitySlot);
+        if (current.canUse)
+        {
+            return;
+        }
+
+        ReadOnlySpan<ClientAbilitySlot> candidates =
+        [
+            ClientAbilitySlot.Main,
+            ClientAbilitySlot.MeleeTool,
+            ClientAbilitySlot.Secondary,
+            ClientAbilitySlot.Trinket,
+        ];
+
+        foreach (var slot in candidates)
+        {
+            var info = GetSlotAmmo(player, slot);
+            if (info.canUse)
+            {
+                _selectedAbilitySlot = slot;
+                _lastPreviewAngle = int.MinValue;
+                break;
+            }
+        }
+    }
+
+    private void DrawWeaponActionBar(ClientPlayerSnapshot? player)
+    {
+        if (player is null)
+        {
+            return;
+        }
+
+        var font = ThemeDB.FallbackFont;
+        var viewport = GetViewportRect().Size;
+
+        for (var i = 0; i < WeaponSlotOrder.Length; i++)
+        {
+            var slot = WeaponSlotOrder[i];
+            var rect = WeaponSlotRect(i, viewport);
+            var isSelected = _selectedAbilitySlot == slot;
+            var info = GetSlotAmmo(player, slot);
+
+            Color bg;
+            Color border;
+            float borderWidth;
+
+            if (isSelected)
+            {
+                bg = new Color(0.24f, 0.21f, 0.10f, 0.95f);
+                border = Colors.Gold;
+                borderWidth = 2.5f;
+            }
+            else if (!info.canUse)
+            {
+                bg = new Color(0.06f, 0.06f, 0.08f, 0.75f);
+                border = new Color(0.35f, 0.25f, 0.25f, 0.5f);
+                borderWidth = 1f;
+            }
+            else
+            {
+                bg = new Color(0.10f, 0.12f, 0.16f, 0.88f);
+                border = new Color(0.5f, 0.55f, 0.65f, 0.6f);
+                borderWidth = 1.5f;
+            }
+
+            DrawRect(rect, bg);
+            DrawRect(rect, border, filled: false, width: borderWidth);
+
+            var badgeColor = isSelected ? Colors.Gold : (info.canUse ? Colors.White : Colors.Gray);
+            DrawString(font, rect.Position + new Vector2(8, 14), WeaponSlotBadges[i], fontSize: 11, modulate: badgeColor);
+
+            var nameColor = info.canUse ? Colors.White : new Color(0.6f, 0.6f, 0.6f);
+            var displayName = string.IsNullOrEmpty(info.itemName) ? slot.ToString() : info.itemName;
+            DrawString(font, rect.Position + new Vector2(8, 28), displayName, fontSize: 12, modulate: nameColor);
+
+            string statusText;
+            Color statusColor;
+            if (slot == ClientAbilitySlot.Trinket)
+            {
+                if (info.canUse)
+                {
+                    statusText = "READY (4)";
+                    statusColor = Colors.Cyan;
+                }
+                else
+                {
+                    statusText = $"{player.TrinketCharge / 100}% CHARGE";
+                    statusColor = Colors.DarkGray;
+                }
+            }
+            else if (!info.canUse)
+            {
+                statusText = "0 AMMO [EMPTY]";
+                statusColor = Colors.OrangeRed;
+            }
+            else if (info.max == 0)
+            {
+                statusText = "∞ AMMO";
+                statusColor = Colors.LightGreen;
+            }
+            else
+            {
+                statusText = $"{info.remaining}/{info.max} AMMO";
+                statusColor = info.remaining == 1 ? Colors.Khaki : Colors.LightGreen;
+            }
+
+            DrawString(font, rect.Position + new Vector2(8, 41), statusText, fontSize: 10, modulate: statusColor);
+        }
+    }
+
+    private static float ComputeBlockFallOffset(
+        uint blockId,
+        IReadOnlyList<ClientPresentationEvent>? events,
+        uint currentTick,
+        float cellSize,
+        bool reduceMotion)
+    {
+        if (events is null || reduceMotion)
+        {
+            return 0f;
+        }
+
+        for (var i = 0; i < events.Count; i++)
+        {
+            if (events[i] is ClientBlockChangedEvent b &&
+                b.BlockId == blockId &&
+                b.PreviousSurvivingBounds is { } prev &&
+                b.NewSurvivingBounds is { } next &&
+                next.Y > prev.Y)
+            {
+                if (currentTick < b.PresentationTick)
+                {
+                    return 0f;
+                }
+
+                const float fallDurationTicks = 8f;
+                var elapsed = (float)(currentTick - b.PresentationTick);
+                var progress = Math.Clamp(elapsed / fallDurationTicks, 0f, 1f);
+                var ease = progress * progress;
+                var deltaCells = (next.Y - prev.Y) * ease;
+                return deltaCells * cellSize;
+            }
+        }
+
+        return 0f;
     }
 }

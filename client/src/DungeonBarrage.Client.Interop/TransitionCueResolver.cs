@@ -21,12 +21,14 @@ public enum ActorPresentationCueKind
 /// <param name="Age01">Normalized age from 0 at event release toward 1 at expiry.</param>
 /// <param name="Sequence">The source transition-local event sequence.</param>
 /// <param name="AbilityId">The firing ability when <paramref name="Kind"/> is <see cref="ActorPresentationCueKind.Fire"/>.</param>
+/// <param name="Value">Optional damage or health change value associated with the cue.</param>
 public sealed record ActorPresentationCue(
     string PlayerId,
     ActorPresentationCueKind Kind,
     float Age01,
     uint Sequence,
-    string? AbilityId);
+    string? AbilityId,
+    int? Value = null);
 
 /// <summary>One transient, cosmetic impact cue at an authoritative fixed-point position.</summary>
 /// <param name="Position">Exact authoritative impact position.</param>
@@ -188,7 +190,8 @@ public static class TransitionCueResolver
                             ActorPresentationCueKind.Hit,
                             hitAge,
                             healthEvent.Sequence,
-                            AbilityId: null));
+                            AbilityId: null,
+                            Value: (int)(healthEvent.PreviousHealth - healthEvent.NewHealth)));
                     break;
 
                 case ClientPlayerEliminatedEvent eliminatedEvent

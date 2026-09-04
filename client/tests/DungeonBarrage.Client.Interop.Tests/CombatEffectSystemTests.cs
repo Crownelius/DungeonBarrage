@@ -1,4 +1,4 @@
-﻿using DungeonBarrage.Client.Contracts;
+using DungeonBarrage.Client.Contracts;
 using DungeonBarrage.Client.Interop;
 using Xunit;
 
@@ -85,15 +85,71 @@ public sealed class CombatEffectSystemTests
         effects.SpawnImpact(new PresentationPoint(100f, 100f), 12f, ClientPerformanceTier.High, reduceMotion: false);
         effects.SpawnMuzzleFire(new PresentationPoint(50f, 50f), 1f, 12f, ClientPerformanceTier.High, reduceMotion: false);
         effects.SpawnHitSparks(new PresentationPoint(200f, 200f), 12f, ClientPerformanceTier.High, reduceMotion: false);
+        effects.SpawnDamageNumber(new PresentationPoint(200f, 200f), 45);
 
         Assert.NotEmpty(effects.ActiveParticles);
         Assert.NotEmpty(effects.ActiveShockwaves);
         Assert.NotEmpty(effects.ActiveTargetMarkers);
+        Assert.NotEmpty(effects.ActiveDamageTexts);
 
         effects.Clear();
 
         Assert.Empty(effects.ActiveParticles);
         Assert.Empty(effects.ActiveShockwaves);
         Assert.Empty(effects.ActiveTargetMarkers);
+        Assert.Empty(effects.ActiveDamageTexts);
+    }
+
+    [Fact]
+    public void DamageNumber_spawns_and_floats_upward_and_expires()
+    {
+        var effects = new CombatEffectSystem();
+        var origin = new PresentationPoint(150f, 150f);
+
+        effects.SpawnDamageNumber(origin, 32, isCrit: false);
+
+        Assert.Single(effects.ActiveDamageTexts);
+        var dt = effects.ActiveDamageTexts[0];
+        Assert.Equal("-32", dt.Text);
+        Assert.False(dt.IsCrit);
+        Assert.True(dt.Position.Y < origin.Y); // initially offset upward
+
+        var initialY = dt.Position.Y;
+        effects.Update(0.2f);
+        Assert.True(dt.Position.Y < initialY); // floated further upward
+        Assert.True(dt.Alpha < 1.0f);
+
+        // Advance beyond max lifetime
+        effects.Update(1.0f);
+        Assert.Empty(effects.ActiveDamageTexts);
+    }
+
+    [Fact]
+    public void DamageNumber_pool_is_bounded()
+    {
+        var effects = new CombatEffectSystem();
+        for (var i = 1; i <= 30; i++)
+        {
+            effects.SpawnDamageNumber(new PresentationPoint(100f, 100f), i);
+        }
+
+        Assert.Equal(16, effects.ActiveDamageTexts.Count);
+        // Oldest should have been evicted, newest is "-30"
+        Assert.Equal("-30", effects.ActiveDamageTexts[^1].Text);
+    }
+
+    [Fact]
+    public void TerrainDebris_spawns_particles_with_gravity()
+    {
+        var effects = new CombatEffectSystem();
+        effects.SpawnTerrainDebris(new PresentationPoint(80f, 120f), 12f, ClientPerformanceTier.High, reduceMotion: false);
+
+        Assert.NotEmpty(effects.ActiveParticles);
+        Assert.All(effects.ActiveParticles, p => Assert.True(p.GravityY > 0f));
+
+        var initialVy = effects.ActiveParticles[0].Velocity.Y;
+        effects.Update(0.1f);
+        // Vy should accelerate downward (increase towards positive Y in screen coords)
+        Assert.True(effects.ActiveParticles[0].Velocity.Y > initialVy);
     }
 }

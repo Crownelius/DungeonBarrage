@@ -1,4 +1,4 @@
-﻿using DungeonBarrage.Client.Contracts;
+using DungeonBarrage.Client.Contracts;
 
 namespace DungeonBarrage.Client.Interop;
 
@@ -24,6 +24,9 @@ public sealed class EffectParticle
 
     /// <summary>Primary color in hex RGBA/RGB format.</summary>
     public string ColorHex { get; set; } = "#FFFFFF";
+
+    /// <summary>Downward gravity acceleration in pixels per second squared.</summary>
+    public float GravityY { get; set; }
 
     /// <summary>Whether the particle is still actively rendering.</summary>
     public bool IsAlive => LifeSeconds < MaxLifeSeconds;
@@ -96,6 +99,36 @@ public sealed class TargetMarker
 }
 
 /// <summary>
+/// A transient floating combat text displaying damage numbers or critical hits.
+/// </summary>
+public sealed class FloatingDamageText
+{
+    /// <summary>Current display center in presentation pixels.</summary>
+    public PresentationPoint Position { get; set; }
+
+    /// <summary>Formatted text content (e.g., "-25").</summary>
+    public string Text { get; set; } = string.Empty;
+
+    /// <summary>Text color in hex format.</summary>
+    public string ColorHex { get; set; } = "#FF5252";
+
+    /// <summary>Elapsed age in seconds.</summary>
+    public float LifeSeconds { get; set; }
+
+    /// <summary>Total duration in seconds.</summary>
+    public float MaxLifeSeconds { get; set; } = 0.85f;
+
+    /// <summary>Whether this damage instance was a critical hit.</summary>
+    public bool IsCrit { get; set; }
+
+    /// <summary>Whether the text is still actively rendering.</summary>
+    public bool IsAlive => LifeSeconds < MaxLifeSeconds;
+
+    /// <summary>Current normalized opacity from 1.0 down to 0.0.</summary>
+    public float Alpha => Math.Clamp(1f - (LifeSeconds / Math.Max(0.001f, MaxLifeSeconds)), 0f, 1f);
+}
+
+/// <summary>
 /// Tiered, disposal-safe presentation effect system driven by authoritative combat events.
 /// </summary>
 /// <remarks>
@@ -109,10 +142,12 @@ public sealed class CombatEffectSystem
     private const int MaxParticles = 256;
     private const int MaxShockwaves = 32;
     private const int MaxTargetMarkers = 16;
+    private const int MaxDamageTexts = 16;
 
     private readonly List<EffectParticle> _particles = new(MaxParticles);
     private readonly List<ShockwaveRing> _shockwaves = new(MaxShockwaves);
     private readonly List<TargetMarker> _targetMarkers = new(MaxTargetMarkers);
+    private readonly List<FloatingDamageText> _damageTexts = new(MaxDamageTexts);
 
     /// <summary>Active particles.</summary>
     public IReadOnlyList<EffectParticle> ActiveParticles => _particles;
@@ -122,6 +157,9 @@ public sealed class CombatEffectSystem
 
     /// <summary>Active target markers.</summary>
     public IReadOnlyList<TargetMarker> ActiveTargetMarkers => _targetMarkers;
+
+    /// <summary>Active floating damage texts.</summary>
+    public IReadOnlyList<FloatingDamageText> ActiveDamageTexts => _damageTexts;
 
     /// <summary>
     /// Advances active effects by the given delta time, updating positions and pruning expired items.
@@ -149,10 +187,10 @@ public sealed class CombatEffectSystem
                 p.Position.X + (p.Velocity.X * deltaSeconds),
                 p.Position.Y + (p.Velocity.Y * deltaSeconds));
 
-            // Velocity damping
-            p.Velocity = new PresentationPoint(
-                p.Velocity.X * (1f - (2.5f * deltaSeconds)),
-                p.Velocity.Y * (1f - (2.5f * deltaSeconds)));
+            // Velocity damping with gravity
+            var newVx = p.Velocity.X * (1f - (2.5f * deltaSeconds));
+            var newVy = (p.Velocity.Y + (p.GravityY * deltaSeconds)) * (1f - (1.5f * deltaSeconds));
+            p.Velocity = new PresentationPoint(newVx, newVy);
         }
 
         // Update shockwaves
@@ -175,6 +213,22 @@ public sealed class CombatEffectSystem
             {
                 _targetMarkers.RemoveAt(i);
             }
+        }
+
+        // Update floating damage texts
+        for (var i = _damageTexts.Count - 1; i >= 0; i--)
+        {
+            var dt = _damageTexts[i];
+            dt.LifeSeconds += deltaSeconds;
+            if (!dt.IsAlive)
+            {
+                _damageTexts.RemoveAt(i);
+                continue;
+            }
+
+            dt.Position = new PresentationPoint(
+                dt.Position.X,
+                dt.Position.Y - (30f * deltaSeconds));
         }
     }
 
@@ -347,6 +401,76 @@ public sealed class CombatEffectSystem
     }
 
     /// <summary>
+    /// Spawns a floating damage number above a damaged unit.
+    /// </summary>
+    /// <param name="position">Anchor position in presentation pixels.</param>
+    /// <param name="damage">Damage value to display.</param>
+    /// <param name="isCrit">Whether the attack was a critical hit.</param>
+    public void SpawnDamageNumber(PresentationPoint position, int damage, bool isCrit = false)
+    {
+        if (damage <= 0)
+        {
+            return;
+        }
+
+        if (_damageTexts.Count >= MaxDamageTexts)
+        {
+            _damageTexts.RemoveAt(0);
+        }
+
+        _damageTexts.Add(new FloatingDamageText
+        {
+            Position = new PresentationPoint(position.X, position.Y - 10f),
+            Text = $"-{damage}",
+            ColorHex = isCrit ? "#FFD54F" : "#FF5252",
+            LifeSeconds = 0f,
+            MaxLifeSeconds = isCrit ? 1.0f : 0.8f,
+            IsCrit = isCrit,
+        });
+    }
+
+    /// <summary>
+    /// Spawns crumbling terrain debris particles with downward gravity.
+    /// </summary>
+    /// <param name="impactPoint">Center of terrain destruction in presentation pixels.</param>
+    /// <param name="cellSize">Display cell size in pixels.</param>
+    /// <param name="tier">Performance tier.</param>
+    /// <param name="reduceMotion">Whether reduced motion is enabled.</param>
+    public void SpawnTerrainDebris(
+        PresentationPoint impactPoint,
+        float cellSize,
+        ClientPerformanceTier tier,
+        bool reduceMotion)
+    {
+        if (reduceMotion || tier == ClientPerformanceTier.Low)
+        {
+            return;
+        }
+
+        var count = tier == ClientPerformanceTier.Medium ? 8 : 16;
+        var colors = new[] { "#8D6E63", "#795548", "#5D4037", "#A1887F", "#6D4C41" };
+
+        for (var i = 0; i < count && _particles.Count < MaxParticles; i++)
+        {
+            var norm = (float)i / Math.Max(1, count - 1);
+            var angle = -MathF.PI * (0.15f + (0.7f * norm)); // upward spread arc
+            var speed = cellSize * (2.2f + (2.5f * ((i % 4) / 3f)));
+            var size = Math.Max(2.5f, cellSize * (0.12f + (0.10f * ((i % 3) / 2f))));
+
+            _particles.Add(new EffectParticle
+            {
+                Position = impactPoint,
+                Velocity = new PresentationPoint(MathF.Cos(angle) * speed, MathF.Sin(angle) * speed),
+                LifeSeconds = 0f,
+                MaxLifeSeconds = 0.55f + (0.25f * ((i % 2))),
+                Size = size,
+                ColorHex = colors[i % colors.Length],
+                GravityY = cellSize * 14f, // downward acceleration
+            });
+        }
+    }
+
+    /// <summary>
     /// Clears all active effects and resets pools to empty.
     /// </summary>
     public void Clear()
@@ -354,5 +478,6 @@ public sealed class CombatEffectSystem
         _particles.Clear();
         _shockwaves.Clear();
         _targetMarkers.Clear();
+        _damageTexts.Clear();
     }
 }

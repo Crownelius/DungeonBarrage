@@ -3863,6 +3863,50 @@ This slice resolves all 41 leftover `#[ignore]` C1 tests across the Rust simulat
 | Headless C6-timeout smoke | pass: `success: true`, automatic planning deadline expiration |
 | Headless C7 smoke | pass: `success: true`, all 6 quality checks verified |
 
+---
+
+## 2026-09-03 — Weapon Action Bar, Ammo UX, Character Hit Reactions & Map Destruction Animation
+
+This slice addresses the player's inability to fire upon exhausting Main slot ammo and adds smooth animations for map destruction and character hit reactions.
+
+### Root Cause Analysis
+
+In Turn 7, the player's equipped `ramshot-cannon` reached 0 ammo (`starting_ammo: 3` in `character.rs`). The match UI continued to allow dragging the aim reticle, drawing the gold trajectory, and displayed "release to fire". Upon releasing, the simulation rejected the command with `OutOfAmmo`. The player had unused ammo in Melee (`trench-spade`, 4 charges), Secondary (`ramshot-shell`, 1 charge), and a fully charged Crown (`ember-crown`, `READY (4)`), but had no visual weapon HUD showing slot ammo states, couldn't click to switch slots, had misaligned numeric keys (Key 2 mapped to Secondary instead of Melee), and received no preemptive out-of-ammo warning.
+
+### Delivered
+
+- **Interactive Weapon Action Bar & Ammo UX (`Main.cs`):**
+  - Added a centered bottom action bar displaying 4 slots: `[1] RANGED`, `[2] MELEE`, `[3] SECONDARY`, and `[4] TRINKET`, with active highlight, item names, and real-time ammo status (`AMMO x/y`, `[EMPTY]`, `[READY] (4)`, `CHARGE %`).
+  - Added direct mouse click selection: clicking any of the 4 weapon slot boxes instantly selects that weapon without triggering an aim drag.
+  - Aligned keyboard switching with the 4-page loadout selection order: Key 1 = Main, Key 2 = MeleeTool, Key 3 = Secondary, Key 4 = Trinket.
+  - Added out-of-ammo aiming prevention: when aiming with an empty slot, `CurrentAim().CanFire` is set to `false`, the drag line turns red, trajectory preview is suppressed, and `"OUT OF AMMO"` warnings are displayed both on the cursor and HUD with instructions to switch.
+  - Added automatic weapon fallback: upon turn start or immediately after a shot exhausts a weapon's remaining ammo, the client auto-switches to the next available slot with ammo or charge.
+- **Character Hit Reactions (`CharacterPresentationModel.cs`, `TransitionCueResolver.cs`, `Main.cs`):**
+  - Decaying sine flinch: characters hit by attacks flinch backward away from the impact with a decaying sine wave oscillation (`-facing * sin(age * 4pi) * (1 - age) * 5.5px`).
+  - White hit flash: hit characters flash with a white color blend for the first 0.35s of the hit cue.
+  - Wincing eyes: hit characters squint with a tight wincing eye slit during impact rather than staring blankly.
+  - Floating damage numbers: `FloatingDamageText` pool in `CombatEffectSystem` displays rising, fading damage numbers (`-XX`) above damaged players based on authoritative health drops.
+- **Smooth Map Destruction & Crumbling Physics (`CombatEffectSystem.cs`, `Main.cs`):**
+  - Added gravity acceleration (`GravityY`) to `EffectParticle` in `CombatEffectSystem`.
+  - Added `SpawnTerrainDebris`: blasts masonry, stone, and soil chunks in an upward arc that tumble down under gravity upon projectile terrain impact or tower collapse.
+  - Smooth collapsing towers: when a tower collapses (`ClientBlockChangedEvent`), the falling masonry interpolates smoothly downward over time using quadratic gravity ease rather than snapping instantaneously.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | **509 passed**, 0 failed, 1 ignored |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release` | 12 contracts + 130 interop = **142 passed**, 0 failed |
+| `dotnet build client/src/DungeonBarrage.Client/DungeonBarrage.Client.csproj -c ExportRelease` | pass, 0 warnings, 0 errors |
+| Headless C5 smoke | pass: `success: true` |
+| Headless C6 smoke | pass: `success: true`, 3/3 maps, stacked blocks fell |
+| Headless C6-timeout smoke | pass: `success: true` |
+| Headless C7 smoke | pass: `success: true` |
+
+
 
 
 

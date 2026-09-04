@@ -10,8 +10,10 @@ fighter is the one crow. Equipped items are ammunition. Loadout is a four-page w
 (ranged, melee, one-shot secondary, crown/anklet) with eight items per page. Crowns and
 anklets charge on two damaging hits. Leftover C1 realignment is complete (0 ignored tests
 in `db-sim-core`, 485 unit/integration tests passing). Smooth walking/hopping movement visual
-interpolation (`MovementPlayback`) is active during transition playback, smoothly lerping
-ground pivots while preserving `CharacterBodyGeometry` collision circles.
+interpolation (`MovementPlayback`) is active during transition playback. Centered bottom interactive
+weapon action bar (`1`–`4`) with ammo counters, out-of-ammo aiming prevention, and automatic weapon
+fallback is live. Character hit reactions (decaying sine flinch, white hit flash, wincing eyes, floating damage text)
+and crumbling terrain debris with downward gravity physics and smooth falling towers are implemented.
 
 Steam page work is **after C5 only** and is not part of this checkpoint.
 
@@ -56,6 +58,7 @@ Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
 | C5 human-finishable match + `PLAY.md` | **implemented**: C5 now starts through the picker on `crow-perch`, not the embedded fixture. Windowed C5 shows MATCH COMPLETE. Not a live human sitting at the keyboard. |
 | C7 desktop quality & planning clock | **implemented**: Settings recovery, audio clamping, accessibility scaling, localization infrastructure, performance tier switching, and multiplatform export presets verified (`c7-report.json`, `c7-windowed-report.json`). Real wall-clock planning countdown and automatic timeout verified (`c6-timeout-report.json`, `c6-timeout-windowed-report.json`). |
 | Leftover C1 realignment & movement interpolation | **implemented**: all 41 leftover C1 tests realigned or pruned against the crow + 32-item catalog. Core has 0 ignored tests (485 unit/integration tests passing). Smooth walking/hopping movement visual interpolation (`MovementPlayback`) smoothly lerps ground pivots between `EntityMoved.Start` and `EntityMoved.End` during transition playback while preserving `CharacterBodyGeometry` collision circles (127 interop unit tests, C5/C6/C6t/C7 smoke suites green). |
+| Weapon action bar, ammo UX & combat reactions | **implemented**: Interactive 4-slot weapon action bar (`1`–`4`), ammo status badges, out-of-ammo aiming prevention, automatic weapon fallback, decaying sine hit flinch, white hit flash, wincing eye squint, floating damage text (`-XX`), crumbling terrain debris with downward gravity, and smooth falling tower blocks. |
 | Steam page | **not started** (after C5 only) |
 | `broken-battlements` spawn ledges | **open owner call**: bot-vs-bot can still end 0hp vs 200hp by a fall. Remedy is floor/wider ledges, not another knockback cut. |
 
