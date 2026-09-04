@@ -43,7 +43,8 @@ public sealed class CharacterSpriteRegistry
     {
         foreach (var key in KnownSheetKeys)
         {
-            _ = GetTexture(key);
+            var tex = GetTexture(key);
+            GD.Print($"[SpriteRegistry] Preload '{key}': {(tex is not null ? $"SUCCESS ({tex.GetWidth()}x{tex.GetHeight()})" : "FAILED")}");
         }
     }
 
@@ -76,9 +77,9 @@ public sealed class CharacterSpriteRegistry
                     return loaded;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Fall back to direct file read if Godot resource loader fails (e.g. headless/unimported).
+                GD.PrintErr($"[SpriteRegistry] GD.Load failed for {resPath}: {ex.Message}");
             }
         }
 
@@ -93,10 +94,14 @@ public sealed class CharacterSpriteRegistry
                     return ImageTexture.CreateFromImage(image);
                 }
             }
+            else
+            {
+                GD.PrintErr($"[SpriteRegistry] File not found at global path: {globalPath}");
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // Headless dummy server or missing asset fallback.
+            GD.PrintErr($"[SpriteRegistry] ImageTexture fallback failed for {resPath}: {ex.Message}");
         }
 
         return null;
