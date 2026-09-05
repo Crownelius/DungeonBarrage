@@ -105,6 +105,7 @@ cargo test --release -p db-sim-ffi --locked
 cargo build --release -p db-sim-ffi --locked
 cargo deny check
 Copy-Item -Force .\target\release\db_sim_ffi.dll .\client\native\win-x64\db_sim_ffi.dll
+dotnet restore .\client\DungeonBarrage.sln --locked-mode
 dotnet format .\client\DungeonBarrage.sln --verify-no-changes --no-restore
 dotnet test .\client\DungeonBarrage.sln -c Release --no-restore
 git diff --check

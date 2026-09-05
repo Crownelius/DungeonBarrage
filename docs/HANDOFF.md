@@ -126,6 +126,8 @@ bot parity before adding presentation.
 - Rust workspace: 514 passed, 0 failed, 1 explicitly ignored fixture writer.
 - Release FFI: 23 passed, 0 failed, 1 explicitly ignored fixture writer.
 - .NET: 12 contract + 152 interop = 164 passed, 0 failed.
+- Exact CI restore `dotnet restore client/DungeonBarrage.sln --locked-mode`: passed after
+  regenerating RID-neutral production lock files and restoring `GodotSharpEditor` to the app lock.
 - Strict Clippy, rustfmt check, `cargo deny`, .NET format, release export, and diff checks passed.
 - C5: Crow selected through Character Select; one-cell move and direct Precision .57 hit; one
   dotted gold guide; 34 real damage; fire/hit/impact cues; input lock/unlock; turn handoff.
@@ -147,6 +149,7 @@ cargo test --release -p db-sim-ffi --locked
 cargo build --release -p db-sim-ffi --locked
 cargo deny check
 Copy-Item -Force .\target\release\db_sim_ffi.dll .\client\native\win-x64\db_sim_ffi.dll
+dotnet restore .\client\DungeonBarrage.sln --locked-mode
 dotnet format .\client\DungeonBarrage.sln --verify-no-changes --no-restore
 dotnet test .\client\DungeonBarrage.sln -c Release --no-restore
 git diff --check

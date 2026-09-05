@@ -4001,3 +4001,16 @@ vectors were regenerated in their dedicated test file with old/new provenance co
 Renderer evidence was inspected, not inferred from report booleans. The local evidence bundle is
 `C:\tmp\DungeonBarrage-character-smoke-20260904`; the C6 terminal hash is
 `6b28cd9b5e7c4f3c`.
+
+## 2026-09-05 — cross-platform locked-restore repair
+
+Linux CI rejected locked restore because the Contracts, Interop, and Godot app lock files had been
+regenerated from a Windows RID-qualified graph. The two libraries are RID-neutral, but their locks
+contained empty `net10.0/win-x64` targets. The app lock had the same stale RID and was also missing
+the `GodotSharpEditor` direct dependency declared by Godot.NET.Sdk 4.7.1.
+
+`dotnet restore client/DungeonBarrage.sln --force-evaluate` regenerated all project locks from the
+current solution graph without an explicit runtime identifier. The resulting production locks now
+contain only `net10.0`, and the app lock contains all three Godot SDK dependencies. The exact CI
+command `dotnet restore client/DungeonBarrage.sln --locked-mode` passes, followed by .NET format,
+12 contract tests, 152 interop tests, and `git diff --check`.
