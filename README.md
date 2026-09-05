@@ -9,17 +9,19 @@ the game rules.
 
 ## Status
 
-Early. The Rust `MatchHost` is tested end to end: it drives real maps, movement, ability
-resolution, destructible blocks, turn rotation, status expiry, and victory through frozen,
-versioned golden vectors in the current working tree. The C1 working tree now also has validated
-match creation, atomic client snapshots, normalized commands, a generation/idempotency-owning
-`MatchSessionHost` with exact entry/byte bounds, ordered transitions, exact terrain dirty row-runs,
-and a shared raw JSON duel fixture with frozen direct-Rust hashes.
+The C0 local toolchain gate, C1 Rust transition contract, and C2 client-only C ABI are complete at
+this checkpoint. `MatchSessionHost` owns validated match creation, atomic snapshots and commands,
+bounded idempotent receipts, authority-only timeouts, read-only previews, complete in-process
+checkpoint/restore, and producer-owned random/strike/status provenance with detached exact replay.
+The real `db-sim-ffi` adapter owns a session behind a poisonable serialized handle and exposes the
+ten frozen ABI-version-1 exports with strict bounded JSON, Rust-owned buffers, and exact
+cross-boundary request/response fixtures. The current workspace has 530 passing Rust tests, plus
+exact Windows/Linux export and Valgrind ownership gates.
 
-The game is still **not playable**. Transition provenance and preview remain incomplete,
-`db-sim-ffi` does not yet expose a real match, and no C#/Godot client exists. Several mechanics also
-remain partial: selected passives are recorded but not all applied, the turret/gas-cloud/Embers
-lifecycles are incomplete, and the sudden-death hazard is absent. See
+The game is still **not playable** because C3's Godot-free C# interop/session layer and the Godot
+presentation project do not yet exist. Several mechanics also remain deliberately partial: Arzum's
+rated Chain Strike second hit awaits an owner decision; selected passives are not all applied; the
+turret/gas-cloud/Embers lifecycles are incomplete; and the sudden-death hazard is absent. See
 [`docs/CLIENT_SPEC.md`](docs/CLIENT_SPEC.md) §3 and §21 for the ordered gates,
 [`docs/HANDOFF.md`](docs/HANDOFF.md) for the exact committed checkpoint and resume state, and
 [`docs/BUILD_LOG.md`](docs/BUILD_LOG.md) for append-only engineering history.
@@ -33,16 +35,18 @@ crates/
   db-sim-wasm/     Dormant WASM boundary, retained in case web delivery returns.
 docs/              Specifications, architecture decisions, build log.
 reference/         Retired implementations, kept out of the build for reference only.
-tests/fixtures/    Exact cross-language match request bytes and semantic expectations.
+tests/fixtures/    Exact cross-language requests, responses, and semantic expectations.
 ```
 
 ## Build
 
 ```powershell
 .\scripts\verify-toolchain.ps1
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build -p db-sim-ffi --release
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --release -p db-sim-ffi --locked
+cargo build --release -p db-sim-ffi --locked
+cargo deny check
 ```
 
 The FFI release artifact is a `cdylib` (`.dll` / `.so` / `.dylib`) loaded only by the C#

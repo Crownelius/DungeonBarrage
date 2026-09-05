@@ -15,7 +15,7 @@
 //! consumers when to fetch that payload.
 
 use crate::blocks::TerrainBlock;
-use crate::fixed::FixedPoint;
+use crate::fixed::{FIXED_TICK_RATE, FixedPoint, POSITION_SCALE};
 use crate::match_host::MatchHost;
 use crate::types::{
     Appearance, EffectKind, ErosionAxis, MatchOutcome, MatchPhase, Material, PersistentObject,
@@ -26,7 +26,7 @@ use crate::types::{
 ///
 /// Increment this when a field, enum meaning, ordering rule, or normalization rule changes.
 /// It is independent of simulation, content, protocol, and any future C ABI versions.
-pub const CLIENT_CONTRACT_VERSION: u32 = 1;
+pub const CLIENT_CONTRACT_VERSION: u32 = 2;
 
 /// An integer position in authoritative fixed-point simulation units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,14 +242,16 @@ pub struct PlayerSnapshot {
     pub max_health: u16,
     /// Authoritative fixed-point position.
     pub position: PositionSnapshot,
-    /// Stable character definition identifier.
-    pub character_id: String,
-    /// Chosen passive identifier, if the one-time choice has occurred.
-    pub passive_id: Option<String>,
-    /// Special gauge in hundredths, from zero through ten thousand.
-    pub special_gauge: u16,
-    /// Whether the one-time passive-selection gate has been consumed.
-    pub has_chosen_passive: bool,
+    /// Centre of the authoritative projectile collision circle.
+    pub collision_center: PositionSnapshot,
+    /// Radius of the authoritative projectile collision circle, in fixed-point units.
+    pub collision_radius: i32,
+    /// Equipped item identifiers in slot order.
+    pub loadout: crate::types::Loadout,
+    /// Remaining ammunition per combat slot, in canonical slot order.
+    pub ammo: [crate::types::AmmoCounter; 3],
+    /// Charge toward the equipped crown or anklet special. Full is 10_000.
+    pub trinket_charge: u16,
     /// Active statuses in deterministic kind/magnitude/duration order.
     pub statuses: Vec<StatusSnapshot>,
     /// Cosmetic appearance used only by presentation.
@@ -291,6 +293,10 @@ pub struct MatchSnapshot {
     pub simulation_version: u32,
     /// Version of gameplay content definitions.
     pub content_version: u32,
+    /// Number of authoritative fixed-point position units in one terrain cell.
+    pub position_scale: i32,
+    /// Number of authoritative simulation ticks per second.
+    pub fixed_tick_rate: u32,
     /// Caller-supplied monotonic publication generation.
     pub generation: u64,
     /// Authoritative simulation tick.
@@ -354,6 +360,8 @@ impl MatchSnapshot {
             client_contract_version: CLIENT_CONTRACT_VERSION,
             simulation_version: state.simulation_version,
             content_version: state.content_version,
+            position_scale: POSITION_SCALE,
+            fixed_tick_rate: FIXED_TICK_RATE,
             generation,
             tick: state.tick,
             turn_number: state.turn_number,
@@ -540,10 +548,13 @@ fn snapshot_players(source: &[PlayerState]) -> Vec<PlayerSnapshot> {
             is_eliminated: player.is_eliminated(),
             max_health: player.max_health,
             position: snapshot_position(player.position),
-            character_id: player.character_id.clone(),
-            passive_id: player.passive_id.clone(),
-            special_gauge: player.special_gauge,
-            has_chosen_passive: player.has_chosen_passive,
+            collision_center: snapshot_position(crate::fixed::player_collision_center(
+                player.position,
+            )),
+            collision_radius: crate::fixed::PLAYER_COLLISION_RADIUS,
+            loadout: player.loadout.clone(),
+            ammo: player.ammo,
+            trinket_charge: player.trinket_charge,
             statuses: snapshot_statuses(&player.statuses),
             appearance: snapshot_appearance(&player.appearance),
         })
@@ -628,9 +639,9 @@ mod tests {
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
-                player_config("zeta", 2, "zeke", "skin-zeta"),
-                player_config("alpha", 1, "huck", "skin-alpha"),
-                player_config("beta", 3, "huck", "skin-beta"),
+                player_config("zeta", 2, "crow", "skin-zeta"),
+                player_config("alpha", 1, "crow", "skin-alpha"),
+                player_config("beta", 3, "crow", "skin-beta"),
             ],
         };
         let Ok(mut state) = build_initial_state(&config) else {
@@ -645,9 +656,7 @@ mod tests {
             panic!("alpha fixture player must exist");
         };
         alpha.health = 777;
-        alpha.passive_id = Some("huck-unyielding".to_owned());
-        alpha.special_gauge = 8_765;
-        alpha.has_chosen_passive = true;
+        alpha.spend_ammo(crate::types::AbilitySlot::Basic);
         alpha.statuses = vec![
             StatusEffect {
                 kind: EffectKind::GuaranteeCrit,
@@ -713,6 +722,8 @@ mod tests {
             client_contract_version,
             simulation_version,
             content_version,
+            position_scale,
+            fixed_tick_rate,
             generation,
             tick,
             turn_number,
@@ -735,6 +746,8 @@ mod tests {
         assert_eq!(client_contract_version, CLIENT_CONTRACT_VERSION);
         assert_eq!(simulation_version, authoritative.simulation_version);
         assert_eq!(content_version, authoritative.content_version);
+        assert_eq!(position_scale, POSITION_SCALE);
+        assert_eq!(fixed_tick_rate, FIXED_TICK_RATE);
         assert_eq!(generation, 55);
         assert_eq!(tick, 4_242);
         assert_eq!(turn_number, authoritative.turn_number);
@@ -798,10 +811,8 @@ mod tests {
             alpha.position,
             snapshot_position(authoritative_alpha.position)
         );
-        assert_eq!(alpha.character_id, "huck");
-        assert_eq!(alpha.passive_id.as_deref(), Some("huck-unyielding"));
-        assert_eq!(alpha.special_gauge, 8_765);
-        assert!(alpha.has_chosen_passive);
+        assert_eq!(alpha.loadout.main, "crow-precision-57");
+        assert_eq!(alpha.ammo.first().map(|ammo| ammo.remaining), Some(0));
         assert_eq!(alpha.statuses.len(), 2);
         assert!(
             alpha
@@ -886,10 +897,10 @@ mod tests {
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
-                player_config("delta", 4, "huck", "skin-delta"),
-                player_config("bravo", 2, "huck", "skin-bravo"),
-                player_config("alpha", 1, "huck", "skin-alpha"),
-                player_config("charlie", 3, "huck", "skin-charlie"),
+                player_config("delta", 4, "leslie", "skin-delta"),
+                player_config("bravo", 2, "crow", "skin-bravo"),
+                player_config("alpha", 1, "erus", "skin-alpha"),
+                player_config("charlie", 3, "kreena", "skin-charlie"),
             ],
         };
         let Ok(mut state) = build_initial_state(&config) else {

@@ -728,7 +728,7 @@ mod tests {
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObjectChange, PlayerState,
-        TerrainMask,
+        RandomOutcome, TerrainMask,
     };
 
     // -------------------------------------------------------------------------------
@@ -742,10 +742,9 @@ mod tests {
             health,
             max_health: health,
             position,
-            character_id: "test-character".to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -788,6 +787,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         object_changes: Vec<PersistentObjectChange>,
+        random_outcomes: Vec<RandomOutcome>,
         status_changes: Vec<StatusChange>,
     }
 
@@ -800,6 +800,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 object_changes: Vec::new(),
+                random_outcomes: Vec::new(),
                 status_changes: Vec::new(),
             }
         }
@@ -822,6 +823,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 object_changes: &mut self.object_changes,
+                random_outcomes: &mut self.random_outcomes,
                 status_changes: &mut self.status_changes,
             }
         }

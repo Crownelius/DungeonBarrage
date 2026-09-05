@@ -140,19 +140,36 @@ fn remove_owned_objects(
     }));
 }
 
-/// Evaluates the match and, on a terminal outcome, sets `state.phase` to
-/// [`MatchPhase::MatchComplete`].
+/// Canonicalizes cleanup for every health-zero owner, then evaluates the match and, on a
+/// terminal outcome, sets `state.phase` to [`MatchPhase::MatchComplete`].
 ///
-/// The scheduler calls this at [`MatchPhase::VictoryCheck`]. On [`MatchOutcome::InProgress`]
-/// the phase is left untouched — advancing past `VictoryCheck` into the next turn is the
-/// scheduler's job, not this function's.
+/// The scheduler calls this at [`MatchPhase::VictoryCheck`]. Cleanup records are appended in
+/// player and object sequence order and are idempotent. On [`MatchOutcome::InProgress`] the
+/// phase is left untouched — advancing past `VictoryCheck` into the next turn is the scheduler's
+/// job, not this function's.
 ///
 /// # Errors
 ///
 /// Never fails on its own; the `SimResult` return matches this crate's convention that
 /// state-mutating entry points report failure through `SimResult` rather than by panicking,
 /// so a future fallible precondition can be added here without changing the signature.
-pub fn check_and_finalize(state: &mut SimulationState) -> SimResult<MatchOutcome> {
+pub fn check_and_finalize(
+    state: &mut SimulationState,
+    object_changes: &mut Vec<PersistentObjectChange>,
+) -> SimResult<MatchOutcome> {
+    // Damage and falling set health to zero at their authoritative producers. Canonicalize
+    // the ownership side effect here, before evaluating victory, so ordinary elimination
+    // and explicit elimination cannot diverge about whether dead-owned objects survive.
+    let eliminated_ids: Vec<String> = state
+        .players
+        .iter()
+        .filter(|player| player.is_eliminated())
+        .map(|player| player.id.clone())
+        .collect();
+    for player_id in eliminated_ids {
+        remove_owned_objects(&mut state.objects, &player_id, object_changes);
+    }
+
     let outcome = evaluate(state);
     if !matches!(outcome, MatchOutcome::InProgress) {
         state.phase = MatchPhase::MatchComplete;
@@ -182,10 +199,9 @@ mod tests {
             health,
             max_health: 300,
             position: FixedPoint::ZERO,
-            character_id: "test-character".to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -433,9 +449,43 @@ mod tests {
         assert!(object_changes.is_empty());
         state.phase = MatchPhase::VictoryCheck;
 
-        let outcome = check_and_finalize(&mut state);
+        let outcome = check_and_finalize(&mut state, &mut Vec::new());
         assert_eq!(outcome, Ok(MatchOutcome::Victory { team: 0 }));
         assert_eq!(state.phase, MatchPhase::MatchComplete);
+    }
+
+    #[test]
+    fn check_and_finalize_cleans_objects_for_an_owner_already_reduced_to_zero() {
+        let mut state = base_state(vec![player("dead", 0, 0), player("living", 1, 200)]);
+        let owned = object(0, "dead", PersistentObjectKind::EmbeddedKnife);
+        let survivor = object(1, "living", PersistentObjectKind::Turret);
+        state.objects.extend([owned.clone(), survivor.clone()]);
+        let mut object_changes = Vec::new();
+
+        let outcome = check_and_finalize(&mut state, &mut object_changes);
+
+        assert_eq!(outcome, Ok(MatchOutcome::Victory { team: 1 }));
+        assert_eq!(state.objects, vec![survivor]);
+        assert_eq!(
+            object_changes,
+            vec![PersistentObjectChange {
+                object: owned,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::OwnerEliminated,
+                },
+            }],
+            "ordinary damage/fall elimination must use the canonical cleanup producer",
+        );
+
+        let recorded_once = object_changes.clone();
+        assert_eq!(
+            check_and_finalize(&mut state, &mut object_changes),
+            Ok(MatchOutcome::Victory { team: 1 }),
+        );
+        assert_eq!(
+            object_changes, recorded_once,
+            "rechecking terminal state must not duplicate lifecycle records",
+        );
     }
 
     #[test]
@@ -447,7 +497,7 @@ mod tests {
         assert!(object_changes.is_empty());
         state.phase = MatchPhase::VictoryCheck;
 
-        let outcome = check_and_finalize(&mut state);
+        let outcome = check_and_finalize(&mut state, &mut Vec::new());
         assert_eq!(outcome, Ok(MatchOutcome::Draw));
         assert_eq!(state.phase, MatchPhase::MatchComplete);
     }
@@ -457,7 +507,7 @@ mod tests {
         let mut state = base_state(vec![player("a", 0, 200), player("b", 1, 200)]);
         state.phase = MatchPhase::VictoryCheck;
 
-        let outcome = check_and_finalize(&mut state);
+        let outcome = check_and_finalize(&mut state, &mut Vec::new());
         assert_eq!(outcome, Ok(MatchOutcome::InProgress));
         assert_eq!(
             state.phase,

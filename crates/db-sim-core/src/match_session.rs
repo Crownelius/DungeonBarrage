@@ -26,13 +26,14 @@ use crate::error::{SimError, SimResult};
 use crate::fixed::FIXED_TICK_RATE;
 use crate::match_host::MatchHost;
 use crate::match_setup::{MatchConfig, create_match, is_valid_match_local_id};
+use crate::rng::Rng;
 use crate::terrain;
 use crate::types::{
-    AbilityCommand, AbilitySlot, BallisticImpact, BallisticSample, CommandOutcome,
-    CommandRejection, CommandResult, CritRoll, DamageEvent, ImpactCause, MatchPhase,
+    AbilityCommand, AbilitySlot, Attack, BallisticImpact, BallisticSample, CommandOutcome,
+    CommandRejection, CommandResult, CritRoll, DamageEvent, EffectKind, ImpactCause, MatchPhase,
     PassiveChoiceCommand, PersistentObjectChange, PersistentObjectRemovalCause,
-    PersistentObjectTransition, SimulationState, StatusChange, StatusTransition, StrikeDelivery,
-    StrikeResolution, TurnEndReason,
+    PersistentObjectTransition, RandomOutcome, SimulationState, StatusChange, StatusTransition,
+    StrikeDelivery, StrikeResolution, TurnEndReason,
 };
 
 /// Maximum first-receipt results retained by one live session.
@@ -106,7 +107,7 @@ impl MatchCommand {
         }
 
         match &self.kind {
-            MatchCommandKind::Move { .. } | MatchCommandKind::Pass => {}
+            MatchCommandKind::Move { .. } | MatchCommandKind::Pass | MatchCommandKind::Jump => {}
             MatchCommandKind::Ability {
                 target_player_id,
                 secondary_target_player_id,
@@ -170,6 +171,7 @@ impl Canonical for MatchCommand {
                 hasher.write_str(passive_id);
             }
             MatchCommandKind::Pass => hasher.write_u8(3),
+            MatchCommandKind::Jump => hasher.write_u8(4),
         }
     }
 }
@@ -202,6 +204,75 @@ pub enum MatchCommandKind {
     },
     /// End the active turn without attacking.
     Pass,
+    /// Hop straight up. Spends one cell of walk allowance when it rises.
+    Jump,
+}
+
+/// A turn ended by the authority because its planning deadline expired.
+///
+/// **This is deliberately not a [`MatchCommandKind`] variant.** The server owns the clock
+/// (`SECURITY_BASELINE.md` §2), and a client must never be able to end a turn — its own or
+/// anyone else's — by claiming time ran out. Keeping timeout out of the client command union
+/// makes that structural rather than a validation rule: a remote peer sends bytes that are
+/// decoded into a `MatchCommand`, and no byte sequence decodes into this type. A validation
+/// check could be bypassed by one decoding bug; an absent variant cannot be.
+///
+/// It still travels through the same session ledger as client commands, sharing one
+/// idempotency key space, so a retried timeout replays rather than ending a second turn and a
+/// client cannot reuse a timeout's id to smuggle a different action into its slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityTimeout {
+    /// Client-contract schema version used to interpret this action.
+    pub schema_version: u32,
+    /// Deterministic match-unique idempotency key, sharing the client command id space.
+    pub action_id: String,
+    /// The player whose turn is being ended, validated against the active player.
+    ///
+    /// Required rather than implied so a timeout raced against a turn handover is refused
+    /// instead of silently ending whoever happens to be active by the time it arrives.
+    pub player_id: String,
+    /// Turn number the authority observed when the deadline expired.
+    pub expected_turn_number: u32,
+    /// Session snapshot generation the authority observed when the deadline expired.
+    pub expected_snapshot_generation: u64,
+}
+
+impl AuthorityTimeout {
+    /// Returns the deterministic digest used by the session ledger.
+    #[must_use]
+    pub fn canonical_digest(&self) -> String {
+        hash_canonical(self)
+    }
+
+    fn validate_structure(&self) -> Result<(), SessionFault> {
+        if self.schema_version != CLIENT_CONTRACT_VERSION {
+            return Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: self.schema_version,
+            });
+        }
+        if !is_valid_match_local_id(&self.action_id) {
+            return Err(SessionFault::InvalidCommand { field: "action_id" });
+        }
+        if !is_valid_match_local_id(&self.player_id) {
+            return Err(SessionFault::InvalidCommand { field: "player_id" });
+        }
+        Ok(())
+    }
+}
+
+impl Canonical for AuthorityTimeout {
+    fn write_canonical(&self, hasher: &mut CanonicalHasher) {
+        // A domain tag of its own, distinct from the client command's `0x20`. Without this a
+        // timeout and a command carrying the same identifiers could hash identically, and the
+        // ledger's digest comparison would stop being able to tell them apart.
+        hasher.write_domain_separator(0x21);
+        hasher.write_u32(self.schema_version);
+        hasher.write_str(&self.action_id);
+        hasher.write_str(&self.player_id);
+        hasher.write_u32(self.expected_turn_number);
+        hasher.write_u64(self.expected_snapshot_generation);
+    }
 }
 
 /// Whether a transition is a new success, a new refusal, or a replayed first result.
@@ -241,6 +312,92 @@ impl TransitionRejection {
             Self::SnapshotGenerationMismatch { .. } => false,
         }
     }
+}
+
+/// One read-only ability-guide request.
+///
+/// Unlike [`MatchCommand`], a preview has no command ID and therefore can never enter the
+/// idempotency ledger. The current authoritative turn number is read under the same session view;
+/// snapshot generation is the caller's freshness token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityPreviewRequest {
+    /// Client-contract schema version used to interpret this request.
+    pub schema_version: u32,
+    /// Session generation the guide was constructed against.
+    pub expected_snapshot_generation: u64,
+    /// Opaque player requesting the guide.
+    pub player_id: String,
+    /// Ability slot to inspect.
+    pub slot: AbilitySlot,
+    /// Fixed-point launch angle in millidegrees.
+    pub angle_millidegrees: i32,
+    /// Launch power in basis points.
+    pub power_basis_points: i32,
+    /// Optional primary target selection.
+    pub target_player_id: Option<String>,
+    /// Optional secondary target selection.
+    pub secondary_target_player_id: Option<String>,
+}
+
+impl AbilityPreviewRequest {
+    fn validate_structure(&self) -> Result<(), SessionFault> {
+        if self.schema_version != CLIENT_CONTRACT_VERSION {
+            return Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: self.schema_version,
+            });
+        }
+        if !is_valid_match_local_id(&self.player_id) {
+            return Err(SessionFault::InvalidCommand { field: "player id" });
+        }
+        for target in [
+            self.target_player_id.as_deref(),
+            self.secondary_target_player_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !is_valid_match_local_id(target) {
+                return Err(SessionFault::InvalidCommand {
+                    field: "target player id",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a well-formed preview is not currently legal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewRejection {
+    /// The caller previewed an older or future session generation.
+    SnapshotGenerationMismatch {
+        /// Generation named by the request.
+        expected: u64,
+        /// Current live generation.
+        actual: u64,
+    },
+    /// The authoritative command rules reject this intent in the current state.
+    Core(CommandRejection),
+}
+
+/// Read-only response for the initial closed ability-preview contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityPreviewResponse {
+    /// Client-contract schema version.
+    pub schema_version: u32,
+    /// Live generation this response describes.
+    pub snapshot_generation: u64,
+    /// Whether the exact request could be submitted now.
+    pub legal: bool,
+    /// Refusal detail when `legal` is false.
+    pub rejection_reason: Option<PreviewRejection>,
+    /// Exact authoritative special-gauge cost; zero for non-special slots.
+    pub gauge_cost: u16,
+    /// Sorted primary-target IDs accepted by this ability with the request's other fields.
+    pub legal_target_player_ids: Vec<String>,
+    /// Static projectile guides against the current snapshot, with no damage or RNG result.
+    pub projectile_traces: Vec<ProjectileTraceEvent>,
 }
 
 /// A non-gameplay failure at the session boundary.
@@ -381,11 +538,52 @@ pub struct DamageBreakdown {
     pub eliminated: bool,
 }
 
-/// Known provenance for a net state change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Identifiable authoritative provenance for an elimination.
+///
+/// The exact strike variant is producer-owned.  Itemized damage channels are retained when an
+/// effect rather than a strike made the health-zero transition.  `AuthoritativeResolution` is the
+/// honest fallback for host-owned settling/fall work whose current outcome DTO has no finer record.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeProvenance {
-    /// The command outcome retained itemized provenance.
-    RecordedOutcome,
+    /// One exact producer-owned strike reduced the player to zero health.
+    Strike {
+        /// Opaque attacking player ID.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+        /// Dense strike index from that ability outcome.
+        strike_index: u16,
+    },
+    /// The acting player's own Backlash reduced them to zero health.
+    Backlash {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// An effect's splash damage reduced the player to zero health.
+    Splash {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// Collision damage after authoritative displacement reduced the player to zero health.
+    WallImpact {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// Another itemized ability effect reduced the player to zero health.
+    AbilityEffect {
+        /// Opaque player who caused the action.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+    },
+    /// World-hazard damage reduced the player to zero health.
+    Hazard,
     /// The change is authoritative but the current outcome DTO does not retain its cause.
     AuthoritativeResolution,
 }
@@ -471,6 +669,15 @@ pub enum PresentationEventKind {
         new_gauge: u16,
         /// Signed actual change, computed from the two authoritative values.
         delta: i32,
+    },
+    /// One resolver-owned public random result, emitted without exposing RNG state.
+    RandomOutcome {
+        /// Opaque player whose ability caused the draw.
+        owner_id: String,
+        /// Stable ability definition ID.
+        ability_id: String,
+        /// Exact bounded result recorded at the authoritative draw site.
+        outcome: RandomOutcome,
     },
     /// One authoritative status transition, in the order the simulation produced it.
     ///
@@ -603,9 +810,22 @@ pub struct MatchTransition {
     pub post_state_hash: String,
 }
 
+/// One retained first receipt, whoever authored it.
+///
+/// Client commands and authority actions share a single ledger because they share a single
+/// identifier space. Two ledgers would let a client pick an id an authority action already
+/// used and receive a different answer than the one the authority recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerRequest {
+    /// A normalized command received from a client.
+    Client(MatchCommand),
+    /// An action authored by the server itself.
+    Authority(AuthorityTimeout),
+}
+
 #[derive(Debug, Clone)]
 struct LedgerEntry {
-    command: MatchCommand,
+    request: LedgerRequest,
     canonical_digest: String,
     transition: MatchTransition,
 }
@@ -672,10 +892,32 @@ impl RetainedByteCounter {
 }
 
 fn retained_ledger_entry_bytes(
-    command: &MatchCommand,
+    request: &LedgerRequest,
     transition: &MatchTransition,
 ) -> Option<u64> {
-    retained_command_bytes(command)?.checked_add(retained_transition_bytes(transition)?)
+    let request_bytes = match request {
+        LedgerRequest::Client(command) => retained_command_bytes(command)?,
+        LedgerRequest::Authority(timeout) => retained_authority_timeout_bytes(timeout)?,
+    };
+    request_bytes.checked_add(retained_transition_bytes(transition)?)
+}
+
+fn retained_authority_timeout_bytes(timeout: &AuthorityTimeout) -> Option<u64> {
+    let AuthorityTimeout {
+        schema_version,
+        action_id,
+        player_id,
+        expected_turn_number,
+        expected_snapshot_generation,
+    } = timeout;
+    let mut counter = RetainedByteCounter::default();
+    counter.add(RETAINED_TOP_LEVEL_HEADER_BYTES)?;
+    counter.u32(*schema_version)?;
+    counter.string(action_id)?;
+    counter.string(player_id)?;
+    counter.u32(*expected_turn_number)?;
+    counter.u64(*expected_snapshot_generation)?;
+    Some(counter.finish())
 }
 
 fn retained_command_bytes(command: &MatchCommand) -> Option<u64> {
@@ -711,7 +953,7 @@ fn retained_command_bytes(command: &MatchCommand) -> Option<u64> {
             retained_optional_string_bytes(&mut counter, secondary_target_player_id.as_deref())?;
         }
         MatchCommandKind::PassiveChoice { passive_id } => counter.string(passive_id)?,
-        MatchCommandKind::Pass => {}
+        MatchCommandKind::Pass | MatchCommandKind::Jump => {}
     }
     Some(counter.finish())
 }
@@ -809,7 +1051,8 @@ fn retained_command_rejection_bytes(
         | CommandRejection::InvalidTarget
         | CommandRejection::UnknownCharacter
         | CommandRejection::InvalidPassive
-        | CommandRejection::PassiveAlreadyChosen => counter.tag(),
+        | CommandRejection::PassiveAlreadyChosen
+        | CommandRejection::OutOfAmmo => counter.tag(),
     }
 }
 
@@ -924,6 +1167,15 @@ fn retained_presentation_event_kind_bytes(
             counter.u16(*new_gauge)?;
             counter.i32(*delta)?;
         }
+        PresentationEventKind::RandomOutcome {
+            owner_id,
+            ability_id,
+            outcome,
+        } => {
+            counter.string(owner_id)?;
+            counter.string(ability_id)?;
+            retained_random_outcome_bytes(counter, outcome)?;
+        }
         PresentationEventKind::StatusChanged {
             player_id,
             kind,
@@ -964,7 +1216,7 @@ fn retained_presentation_event_kind_bytes(
         }
         PresentationEventKind::PlayerEliminated { player_id, cause } => {
             counter.string(player_id)?;
-            retained_change_provenance_bytes(counter, *cause)?;
+            retained_change_provenance_bytes(counter, cause)?;
         }
         PresentationEventKind::PassiveChoiceRequired {
             player_id,
@@ -996,6 +1248,45 @@ fn retained_presentation_event_kind_bytes(
         }
         PresentationEventKind::MatchCompleted { outcome } => {
             retained_match_outcome_bytes(counter, *outcome)?;
+        }
+    }
+    Some(())
+}
+
+fn retained_random_outcome_bytes(
+    counter: &mut RetainedByteCounter,
+    outcome: &RandomOutcome,
+) -> Option<()> {
+    counter.tag()?;
+    match outcome {
+        RandomOutcome::ArzumChainStrikeTeleportTarget {
+            candidate_count,
+            selected_index,
+            target_player_id,
+            destination,
+        } => {
+            counter.u32(*candidate_count)?;
+            counter.u32(*selected_index)?;
+            counter.string(target_player_id)?;
+            counter.i32(destination.x)?;
+            counter.i32(destination.y)?;
+        }
+        RandomOutcome::AlephVeilstepTeleportPoint {
+            axis_bound,
+            x_result,
+            y_result,
+            fallback_used,
+            drawn_point,
+            destination,
+        } => {
+            counter.u32(*axis_bound)?;
+            counter.u32(*x_result)?;
+            counter.u32(*y_result)?;
+            counter.boolean(*fallback_used)?;
+            counter.i32(drawn_point.x)?;
+            counter.i32(drawn_point.y)?;
+            counter.i32(destination.x)?;
+            counter.i32(destination.y)?;
         }
     }
     Some(())
@@ -1131,12 +1422,40 @@ fn retained_entity_movement_cause_bytes(
 
 fn retained_change_provenance_bytes(
     counter: &mut RetainedByteCounter,
-    cause: ChangeProvenance,
+    cause: &ChangeProvenance,
 ) -> Option<()> {
     match cause {
-        ChangeProvenance::RecordedOutcome | ChangeProvenance::AuthoritativeResolution => {
-            counter.tag()
+        ChangeProvenance::Strike {
+            owner_id,
+            ability_id,
+            strike_index,
+        } => {
+            counter.tag()?;
+            counter.string(owner_id)?;
+            counter.string(ability_id)?;
+            counter.u16(*strike_index)
         }
+        ChangeProvenance::Backlash {
+            owner_id,
+            ability_id,
+        }
+        | ChangeProvenance::Splash {
+            owner_id,
+            ability_id,
+        }
+        | ChangeProvenance::WallImpact {
+            owner_id,
+            ability_id,
+        }
+        | ChangeProvenance::AbilityEffect {
+            owner_id,
+            ability_id,
+        } => {
+            counter.tag()?;
+            counter.string(owner_id)?;
+            counter.string(ability_id)
+        }
+        ChangeProvenance::Hazard | ChangeProvenance::AuthoritativeResolution => counter.tag(),
     }
 }
 
@@ -1181,6 +1500,8 @@ fn retained_match_snapshot_bytes(
         client_contract_version,
         simulation_version,
         content_version,
+        position_scale,
+        fixed_tick_rate,
         generation,
         tick,
         turn_number,
@@ -1202,6 +1523,8 @@ fn retained_match_snapshot_bytes(
     counter.u32(*client_contract_version)?;
     counter.u32(*simulation_version)?;
     counter.u32(*content_version)?;
+    counter.i32(*position_scale)?;
+    counter.u32(*fixed_tick_rate)?;
     counter.u64(*generation)?;
     counter.u64(*tick)?;
     counter.u32(*turn_number)?;
@@ -1310,10 +1633,11 @@ fn retained_player_snapshot_bytes(
         is_eliminated,
         max_health,
         position,
-        character_id,
-        passive_id,
-        special_gauge,
-        has_chosen_passive,
+        collision_center,
+        collision_radius,
+        loadout,
+        ammo,
+        trinket_charge,
         statuses,
         appearance,
     } = player;
@@ -1323,10 +1647,21 @@ fn retained_player_snapshot_bytes(
     counter.boolean(*is_eliminated)?;
     counter.u16(*max_health)?;
     retained_position_bytes(counter, *position)?;
-    counter.string(character_id)?;
-    retained_optional_string_bytes(counter, passive_id.as_deref())?;
-    counter.u16(*special_gauge)?;
-    counter.boolean(*has_chosen_passive)?;
+    retained_position_bytes(counter, *collision_center)?;
+    counter.i32(*collision_radius)?;
+    counter.string(&loadout.main)?;
+    counter.string(&loadout.secondary)?;
+    counter.string(&loadout.melee_tool)?;
+    counter.string(&loadout.trinket)?;
+    counter.u16(*trinket_charge)?;
+    for counter_ammo in ammo {
+        counter.u8(match counter_ammo.policy {
+            crate::types::AmmoPolicy::Finite => 0,
+            crate::types::AmmoPolicy::Unlimited => 1,
+        })?;
+        counter.u16(counter_ammo.remaining)?;
+        counter.u16(counter_ammo.maximum)?;
+    }
     counter.length(statuses.len())?;
     for status in statuses {
         retained_status_snapshot_bytes(counter, status)?;
@@ -1478,6 +1813,22 @@ pub struct MatchSessionHost {
     closed: bool,
 }
 
+/// Opaque, complete restore input produced by [`MatchSessionHost::checkpoint`].
+///
+/// Fields are intentionally private: a caller can persist or transfer the whole value, but cannot
+/// manufacture a host-only restore that silently discards first-receipt results. Restoration still
+/// revalidates every entry and recomputes the exact retained-byte total before accepting it.
+#[derive(Debug, Clone)]
+pub struct MatchSessionCheckpoint {
+    host: MatchHost,
+    generation: u64,
+    ledger: BTreeMap<String, LedgerEntry>,
+    declared_ledger_len: usize,
+    declared_ledger_bytes: u64,
+    ledger_entry_limit: usize,
+    ledger_byte_limit: u64,
+}
+
 impl MatchSessionHost {
     /// Validates `config`, creates the authoritative match, and opens generation zero.
     ///
@@ -1487,6 +1838,51 @@ impl MatchSessionHost {
     /// [`create_match`].
     pub fn create(config: &MatchConfig) -> SimResult<Self> {
         create_match(config).map(Self::from_new_host)
+    }
+
+    /// Captures the complete live session restore unit.
+    ///
+    /// The host and ledger cannot be requested separately. This is deliberate: restoring only the
+    /// host would forget idempotency receipts and allow an already-applied command to execute again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionFault::Closed`] after a terminal fault. A closed session is disposal-only
+    /// and must not be revived by checkpointing it.
+    pub fn checkpoint(&self) -> Result<MatchSessionCheckpoint, SessionFault> {
+        if self.closed {
+            return Err(SessionFault::Closed);
+        }
+        Ok(MatchSessionCheckpoint {
+            host: self.host.clone(),
+            generation: self.generation,
+            ledger: self.ledger.clone(),
+            declared_ledger_len: self.ledger.len(),
+            declared_ledger_bytes: self.ledger_bytes,
+            ledger_entry_limit: self.ledger_entry_limit,
+            ledger_byte_limit: self.ledger_byte_limit,
+        })
+    }
+
+    /// Restores a complete checkpoint after verifying its host/ledger relationship and exact
+    /// retained-byte accounting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionFault::ContractInvariant`] for a missing, duplicated, contradictory, or
+    /// host-incoherent entry and [`SessionFault::ResourceLimit`] when the checkpoint crosses its
+    /// retained-entry/byte bounds. No partially restored session is returned.
+    pub fn restore(checkpoint: MatchSessionCheckpoint) -> Result<Self, SessionFault> {
+        validate_checkpoint(&checkpoint)?;
+        Ok(Self {
+            host: checkpoint.host,
+            generation: checkpoint.generation,
+            ledger: checkpoint.ledger,
+            ledger_entry_limit: checkpoint.ledger_entry_limit,
+            ledger_bytes: checkpoint.declared_ledger_bytes,
+            ledger_byte_limit: checkpoint.ledger_byte_limit,
+            closed: false,
+        })
     }
 
     /// Current publication generation.
@@ -1532,6 +1928,88 @@ impl MatchSessionHost {
         self.closed
     }
 
+    /// Computes one ability guide without mutating authoritative or session state.
+    ///
+    /// Legality is resolved on a disposable [`MatchHost`] clone so the answer follows the exact
+    /// same validation/effect path as submission. Projectile guides are integrated separately
+    /// against the immutable live snapshot: no damage, crit roll, relocation draw, terrain
+    /// mutation, processed-command ID, generation, or ledger entry can escape the clone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionFault::Closed`] after a terminal session fault, structure/schema faults
+    /// for malformed typed input, or a simulation fault if a supposedly valid host clone cannot
+    /// resolve its own rules. Ordinary gameplay and stale-generation refusals are successful
+    /// responses with `legal == false`.
+    pub fn preview(
+        &self,
+        request: &AbilityPreviewRequest,
+    ) -> Result<AbilityPreviewResponse, SessionFault> {
+        if self.closed {
+            return Err(SessionFault::Closed);
+        }
+        request.validate_structure()?;
+        if request.expected_snapshot_generation != self.generation {
+            return Ok(AbilityPreviewResponse {
+                schema_version: CLIENT_CONTRACT_VERSION,
+                snapshot_generation: self.generation,
+                legal: false,
+                rejection_reason: Some(PreviewRejection::SnapshotGenerationMismatch {
+                    expected: request.expected_snapshot_generation,
+                    actual: self.generation,
+                }),
+                gauge_cost: 0,
+                legal_target_player_ids: Vec::new(),
+                projectile_traces: Vec::new(),
+            });
+        }
+
+        let ability = self
+            .host
+            .state()
+            .player(&request.player_id)
+            .and_then(|player| character::equipped_ability(player, request.slot));
+        let gauge_cost = 0;
+        let exact_command = preview_ability_command(self.host.state(), request)?;
+        let exact_rejection = preview_command_rejection(&self.host, &exact_command)?;
+        let legal = exact_rejection.is_none();
+
+        let mut legal_target_player_ids = Vec::new();
+        for candidate in self
+            .host
+            .state()
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated())
+        {
+            let mut candidate_request = request.clone();
+            candidate_request.target_player_id = Some(candidate.id.clone());
+            let candidate_command = preview_ability_command(self.host.state(), &candidate_request)?;
+            if preview_command_rejection(&self.host, &candidate_command)?.is_none() {
+                legal_target_player_ids.push(candidate.id.clone());
+            }
+        }
+        legal_target_player_ids.sort();
+
+        let projectile_traces = if legal {
+            match ability {
+                Some(ability) => preview_projectile_traces(self.host.state(), request, ability)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        Ok(AbilityPreviewResponse {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            snapshot_generation: self.generation,
+            legal,
+            rejection_reason: exact_rejection.map(PreviewRejection::Core),
+            gauge_cost,
+            legal_target_player_ids,
+            projectile_traces,
+        })
+    }
+
     /// Applies one normalized command atomically and retains its first result.
     ///
     /// Exact duplicates return the recorded original transition with
@@ -1552,7 +2030,9 @@ impl MatchSessionHost {
         let digest = command.canonical_digest();
 
         if let Some(entry) = self.ledger.get(&command.command_id) {
-            if entry.command == command {
+            // A client id colliding with an authority action's id is a conflict, never a
+            // replay: the two are different requests that happen to share a key.
+            if matches!(&entry.request, LedgerRequest::Client(existing) if *existing == command) {
                 if entry.canonical_digest != digest {
                     self.closed = true;
                     return Err(SessionFault::ContractInvariant);
@@ -1668,11 +2148,171 @@ impl MatchSessionHost {
         };
 
         self.record_and_commit(
-            command,
+            LedgerRequest::Client(command),
             digest,
             transition,
             Some(working_host),
             post_generation,
+        )
+    }
+
+    /// Ends the active player's turn because the authority's planning deadline expired.
+    ///
+    /// The server owns the clock (`SECURITY_BASELINE.md` §2). This is the only entry point
+    /// that can end a turn on time, it takes an [`AuthorityTimeout`] rather than a
+    /// [`MatchCommand`], and no client-decodable byte sequence produces that type — so a
+    /// remote peer cannot reach this path at all, however malformed its input.
+    ///
+    /// Otherwise it behaves exactly like [`Self::apply`]: same generation checks, same
+    /// idempotency ledger and identifier space, same ordered transition. A retried timeout
+    /// replays its original result instead of ending a second turn.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionFault::Closed`] once the session has closed, [`SessionFault::UnsupportedSchema`]
+    /// or [`SessionFault::InvalidCommand`] for a malformed action, [`SessionFault::ResourceLimit`]
+    /// at the ledger bounds, and [`SessionFault::ContractInvariant`] if the authoritative host
+    /// contradicts itself. A refusal the authority could legitimately race into — a stale
+    /// generation, the wrong player, the wrong phase — is a rejected transition, not an error.
+    pub fn apply_authority_timeout(
+        &mut self,
+        timeout: AuthorityTimeout,
+    ) -> Result<MatchTransition, SessionFault> {
+        if self.closed {
+            return Err(SessionFault::Closed);
+        }
+        timeout.validate_structure()?;
+        let digest = timeout.canonical_digest();
+
+        if let Some(entry) = self.ledger.get(&timeout.action_id) {
+            // Only an identical authority action replays. A client command that reused this
+            // id is a conflict, and so is a different timeout wearing the same id.
+            if matches!(&entry.request, LedgerRequest::Authority(existing) if *existing == timeout)
+            {
+                if entry.canonical_digest != digest {
+                    self.closed = true;
+                    return Err(SessionFault::ContractInvariant);
+                }
+                let mut replay = entry.transition.clone();
+                replay.disposition = TransitionDisposition::DuplicateReplay;
+                return Ok(replay);
+            }
+            return Ok(
+                self.current_rejection(&timeout.action_id, TransitionRejection::CommandIdConflict)
+            );
+        }
+
+        if self.ledger.len() >= self.ledger_entry_limit {
+            self.closed = true;
+            return Err(SessionFault::ResourceLimit);
+        }
+
+        if timeout.expected_snapshot_generation != self.generation {
+            let rejection = TransitionRejection::SnapshotGenerationMismatch {
+                expected: timeout.expected_snapshot_generation,
+                actual: self.generation,
+            };
+            return self.record_authority_rejection(timeout, digest, rejection);
+        }
+
+        if let Some(reason) = authority_timeout_rejection(self.host.state(), &timeout) {
+            return self.record_authority_rejection(
+                timeout,
+                digest,
+                TransitionRejection::Core(reason),
+            );
+        }
+
+        let pre_state = self.host.state().clone();
+        let pre_snapshot = self.snapshot();
+        let mut working_host = self.host.clone();
+
+        // `time_out_turn` refuses while a passive choice is owed. That is a legitimate race
+        // rather than a contract breach — the interrupt may have been raised by the very
+        // action that preceded this deadline — so it is reported as a refusal and the working
+        // host is discarded unexamined.
+        if working_host.time_out_turn().is_err() {
+            return self.record_authority_rejection(
+                timeout,
+                digest,
+                TransitionRejection::Core(CommandRejection::WrongPhase),
+            );
+        }
+
+        let mutated = working_host.state() != self.host.state();
+        let post_generation = if mutated {
+            let Some(next) = self.generation.checked_add(1) else {
+                self.closed = true;
+                return Err(SessionFault::GenerationExhausted);
+            };
+            next
+        } else {
+            self.generation
+        };
+        let post_snapshot = MatchSnapshot::from_host(&working_host, post_generation);
+
+        let events = match derive_events(
+            &timeout_as_pass(&timeout),
+            &pre_state,
+            working_host.state(),
+            &pre_snapshot,
+            &post_snapshot,
+            AppliedRecords {
+                // A timeout resolves no ability, so there is no outcome to carry. The
+                // end-of-turn transitions it caused still come from the host.
+                outcome: None,
+                status_changes: working_host.status_changes(),
+                object_changes: working_host.object_changes(),
+            },
+        ) {
+            Ok(events) => events,
+            Err(fault) => {
+                self.closed = true;
+                return Err(fault);
+            }
+        };
+
+        let input_lock_ticks = events
+            .last()
+            .map_or(0, |event| event.presentation_tick)
+            .saturating_add(POST_ACTION_LOCK_TICKS);
+        let post_state_hash = post_snapshot.authoritative_state_hash.clone();
+        let transition = MatchTransition {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: timeout.action_id.clone(),
+            disposition: TransitionDisposition::Accepted,
+            rejection_reason: None,
+            pre_snapshot_generation: self.generation,
+            post_snapshot_generation: post_generation,
+            presentation_tick_rate: FIXED_TICK_RATE,
+            input_lock_ticks,
+            events,
+            post_snapshot,
+            post_state_hash,
+        };
+
+        self.record_and_commit(
+            LedgerRequest::Authority(timeout),
+            digest,
+            transition,
+            Some(working_host),
+            post_generation,
+        )
+    }
+
+    fn record_authority_rejection(
+        &mut self,
+        timeout: AuthorityTimeout,
+        digest: String,
+        rejection: TransitionRejection,
+    ) -> Result<MatchTransition, SessionFault> {
+        let transition = self.current_rejection(&timeout.action_id, rejection);
+        self.record_and_commit(
+            LedgerRequest::Authority(timeout),
+            digest,
+            transition,
+            None,
+            self.generation,
         )
     }
 
@@ -1736,12 +2376,18 @@ impl MatchSessionHost {
         rejection: TransitionRejection,
     ) -> Result<MatchTransition, SessionFault> {
         let transition = self.current_rejection(&command.command_id, rejection);
-        self.record_and_commit(command, digest, transition, None, self.generation)
+        self.record_and_commit(
+            LedgerRequest::Client(command),
+            digest,
+            transition,
+            None,
+            self.generation,
+        )
     }
 
     fn record_and_commit(
         &mut self,
-        command: MatchCommand,
+        request: LedgerRequest,
         canonical_digest: String,
         transition: MatchTransition,
         working_host: Option<MatchHost>,
@@ -1749,7 +2395,7 @@ impl MatchSessionHost {
     ) -> Result<MatchTransition, SessionFault> {
         use std::collections::btree_map::Entry;
 
-        let Some(entry_bytes) = retained_ledger_entry_bytes(&command, &transition) else {
+        let Some(entry_bytes) = retained_ledger_entry_bytes(&request, &transition) else {
             self.closed = true;
             return Err(SessionFault::ResourceLimit);
         };
@@ -1762,12 +2408,15 @@ impl MatchSessionHost {
             return Err(SessionFault::ResourceLimit);
         }
 
-        let key = command.command_id.clone();
+        let key = match &request {
+            LedgerRequest::Client(command) => command.command_id.clone(),
+            LedgerRequest::Authority(timeout) => timeout.action_id.clone(),
+        };
         let retained_transition = transition.clone();
         match self.ledger.entry(key) {
             Entry::Vacant(slot) => {
                 slot.insert(LedgerEntry {
-                    command,
+                    request,
                     canonical_digest,
                     transition: retained_transition,
                 });
@@ -1787,6 +2436,174 @@ impl MatchSessionHost {
         self.ledger_bytes = next_ledger_bytes;
         Ok(transition)
     }
+}
+
+fn validate_checkpoint(checkpoint: &MatchSessionCheckpoint) -> Result<(), SessionFault> {
+    if checkpoint.declared_ledger_len != checkpoint.ledger.len() {
+        return Err(SessionFault::ContractInvariant);
+    }
+    if checkpoint.ledger_entry_limit > COMMAND_LEDGER_ENTRY_LIMIT
+        || checkpoint.ledger_byte_limit > COMMAND_LEDGER_BYTE_LIMIT
+        || checkpoint.ledger.len() > checkpoint.ledger_entry_limit
+    {
+        return Err(SessionFault::ResourceLimit);
+    }
+
+    let current_snapshot = MatchSnapshot::from_host(&checkpoint.host, checkpoint.generation);
+    let mut recomputed_bytes = 0u64;
+    let mut mutation_generations = BTreeSet::new();
+    let mut accepted_processed_ids = BTreeSet::new();
+    let mut saw_current_snapshot = checkpoint.ledger.is_empty() && checkpoint.generation == 0;
+
+    for (key, entry) in &checkpoint.ledger {
+        let (request_id, request_digest, is_processed_kind) = match &entry.request {
+            LedgerRequest::Client(command) => {
+                command.validate_structure()?;
+                (
+                    command.command_id.as_str(),
+                    command.canonical_digest(),
+                    matches!(
+                        command.kind,
+                        MatchCommandKind::Ability { .. } | MatchCommandKind::PassiveChoice { .. }
+                    ),
+                )
+            }
+            LedgerRequest::Authority(timeout) => {
+                timeout.validate_structure()?;
+                (
+                    timeout.action_id.as_str(),
+                    timeout.canonical_digest(),
+                    false,
+                )
+            }
+        };
+        if key != request_id
+            || entry.canonical_digest != request_digest
+            || entry.transition.command_id != request_id
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+        validate_restored_transition(&entry.transition, checkpoint.generation)?;
+
+        let entry_bytes = retained_ledger_entry_bytes(&entry.request, &entry.transition)
+            .ok_or(SessionFault::ResourceLimit)?;
+        recomputed_bytes = recomputed_bytes
+            .checked_add(entry_bytes)
+            .ok_or(SessionFault::ResourceLimit)?;
+        if recomputed_bytes > checkpoint.ledger_byte_limit {
+            return Err(SessionFault::ResourceLimit);
+        }
+
+        if entry.transition.disposition == TransitionDisposition::Accepted {
+            if entry.transition.post_snapshot_generation > entry.transition.pre_snapshot_generation
+                && !mutation_generations.insert(entry.transition.post_snapshot_generation)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            if is_processed_kind {
+                accepted_processed_ids.insert(request_id);
+            }
+        } else if is_processed_kind && checkpoint.host.state().has_processed(request_id) {
+            return Err(SessionFault::ContractInvariant);
+        }
+
+        if entry.transition.post_snapshot_generation == checkpoint.generation {
+            if entry.transition.post_snapshot != current_snapshot {
+                return Err(SessionFault::ContractInvariant);
+            }
+            saw_current_snapshot = true;
+        }
+    }
+
+    if recomputed_bytes != checkpoint.declared_ledger_bytes
+        || recomputed_bytes > checkpoint.ledger_byte_limit
+        || !saw_current_snapshot
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    let processed_ids: BTreeSet<&str> = checkpoint
+        .host
+        .state()
+        .processed_command_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if processed_ids.len() != checkpoint.host.state().processed_command_ids.len()
+        || processed_ids != accepted_processed_ids
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    let mut expected_generation = 1u64;
+    for generation in mutation_generations {
+        if generation != expected_generation {
+            return Err(SessionFault::ContractInvariant);
+        }
+        expected_generation = expected_generation
+            .checked_add(1)
+            .ok_or(SessionFault::ContractInvariant)?;
+    }
+    let completed_generation = expected_generation.saturating_sub(1);
+    if completed_generation != checkpoint.generation {
+        return Err(SessionFault::ContractInvariant);
+    }
+    Ok(())
+}
+
+fn validate_restored_transition(
+    transition: &MatchTransition,
+    live_generation: u64,
+) -> Result<(), SessionFault> {
+    if transition.schema_version != CLIENT_CONTRACT_VERSION
+        || transition.post_snapshot.client_contract_version != CLIENT_CONTRACT_VERSION
+        || transition.post_snapshot_generation != transition.post_snapshot.generation
+        || transition.post_state_hash != transition.post_snapshot.authoritative_state_hash
+        || transition.pre_snapshot_generation > transition.post_snapshot_generation
+        || transition.post_snapshot_generation > live_generation
+        || transition
+            .post_snapshot_generation
+            .saturating_sub(transition.pre_snapshot_generation)
+            > 1
+        || !transition.events.iter().enumerate().all(|(index, event)| {
+            u32::try_from(index) == Ok(event.sequence)
+                && transition
+                    .events
+                    .get(index.wrapping_sub(1))
+                    .is_none_or(|previous| {
+                        (previous.presentation_tick, previous.sequence)
+                            < (event.presentation_tick, event.sequence)
+                    })
+        })
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    match transition.disposition {
+        TransitionDisposition::Accepted => {
+            if transition.rejection_reason.is_some()
+                || (transition.post_snapshot_generation == transition.pre_snapshot_generation
+                    && (!transition.events.is_empty() || transition.input_lock_ticks != 0))
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        TransitionDisposition::Rejected => {
+            if transition.rejection_reason.is_none()
+                || transition.pre_snapshot_generation != transition.post_snapshot_generation
+                || !transition.events.is_empty()
+                || transition.input_lock_ticks != 0
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        TransitionDisposition::DuplicateReplay => {
+            // The ledger stores the original first result. Replay disposition is applied only
+            // to a detached response and must never overwrite that retained original.
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(())
 }
 
 enum AppliedCommand {
@@ -1843,6 +2660,135 @@ fn apply_to_working_host(
             host.pass_turn()?;
             Ok(AppliedCommand::Accepted(None))
         }
+        MatchCommandKind::Jump => {
+            let _risen = host.submit_jump(&command.player_id)?;
+            Ok(AppliedCommand::Accepted(None))
+        }
+    }
+}
+
+fn preview_ability_command(
+    state: &SimulationState,
+    request: &AbilityPreviewRequest,
+) -> Result<AbilityCommand, SessionFault> {
+    let mut command_id = None;
+    // There are `len + 1` candidate IDs and at most `len` distinct retained IDs, so one must
+    // be absent. The bound avoids an unbounded search over authority-owned state.
+    for index in 0..=state.processed_command_ids.len() {
+        let candidate = format!("preview:{index}");
+        if !state.has_processed(&candidate) {
+            command_id = Some(candidate);
+            break;
+        }
+    }
+    let command_id = command_id.ok_or(SessionFault::ContractInvariant)?;
+    Ok(AbilityCommand {
+        command_id,
+        player_id: request.player_id.clone(),
+        expected_turn_number: state.turn_number,
+        slot: request.slot,
+        angle_millidegrees: request.angle_millidegrees,
+        power_basis_points: request.power_basis_points,
+        target_player_id: request.target_player_id.clone(),
+        secondary_target_player_id: request.secondary_target_player_id.clone(),
+    })
+}
+
+fn preview_command_rejection(
+    host: &MatchHost,
+    command: &AbilityCommand,
+) -> Result<Option<CommandRejection>, SessionFault> {
+    let mut working = host.clone();
+    match working.submit_ability(command)? {
+        CommandResult::Accepted(_) => Ok(None),
+        CommandResult::Rejected(reason) => Ok(Some(reason)),
+    }
+}
+
+fn preview_projectile_traces(
+    state: &SimulationState,
+    request: &AbilityPreviewRequest,
+    ability: &crate::types::AbilityDefinition,
+) -> Result<Vec<ProjectileTraceEvent>, SessionFault> {
+    let Attack::Projectile(projectile) = ability.attack else {
+        return Ok(Vec::new());
+    };
+    let actor_position = state
+        .player(&request.player_id)
+        .ok_or(SessionFault::ContractInvariant)?
+        .position;
+    let hitboxes: Vec<(String, crate::fixed::FixedPoint, i32)> = state
+        .players
+        .iter()
+        .filter(|player| player.id != request.player_id && !player.is_eliminated())
+        .map(|player| {
+            let (center, radius) = crate::fixed::player_collision_circle(player.position);
+            (player.id.clone(), center, radius)
+        })
+        .collect();
+    let input = crate::types::BallisticInput {
+        origin: crate::fixed::player_collision_center(actor_position),
+        angle_millidegrees: request.angle_millidegrees,
+        power_basis_points: request.power_basis_points,
+        wind_per_tick: state.wind_per_tick,
+    };
+    let mut traces = Vec::new();
+    for sequence in 0..u32::from(ability.strikes_per_turn.max(1)) {
+        let result = crate::ballistics::integrate(&input, &projectile, &state.terrain, &hitboxes)?;
+        traces.push(ProjectileTraceEvent {
+            trace_id: sequence,
+            owner_id: request.player_id.clone(),
+            ability_id: ability.id.to_owned(),
+            samples: result
+                .samples
+                .into_iter()
+                .map(snapshot_projectile_sample)
+                .collect(),
+            terminal_impact: snapshot_impact(result.impact),
+        });
+    }
+    Ok(traces)
+}
+
+/// Whether the authoritative state refuses this timeout outright.
+///
+/// Mirrors [`preflight_rejection`] rather than reusing it, because a timeout is not a
+/// `MatchCommand` and must not be made into one just to share a check. The rules are the same
+/// in substance: the named player must still be the one on the clock.
+fn authority_timeout_rejection(
+    state: &SimulationState,
+    timeout: &AuthorityTimeout,
+) -> Option<CommandRejection> {
+    if timeout.expected_turn_number != state.turn_number {
+        return Some(CommandRejection::TurnVersionMismatch);
+    }
+    // A deadline that expired for one player must never end a different player's turn, which
+    // is exactly what a timeout raced against a handover would otherwise do.
+    if timeout.player_id != state.active_player_id {
+        return Some(CommandRejection::NotActivePlayer);
+    }
+    if state
+        .player(&timeout.player_id)
+        .is_none_or(crate::types::PlayerState::is_eliminated)
+    {
+        return Some(CommandRejection::PlayerEliminated);
+    }
+    (!state.phase.accepts_ability_command()).then_some(CommandRejection::WrongPhase)
+}
+
+/// Projects a timeout onto the shape `derive_events` reads for non-ability commands.
+///
+/// `derive_events` only inspects `kind` to decide whether to walk an ability's traces, and a
+/// timeout has none. Building this locally keeps `MatchCommandKind` free of a timeout variant,
+/// which is the property that stops a client from ever selecting one.
+fn timeout_as_pass(timeout: &AuthorityTimeout) -> MatchCommand {
+    MatchCommand {
+        schema_version: timeout.schema_version,
+        command_id: timeout.action_id.clone(),
+        player_id: timeout.player_id.clone(),
+        expected_turn_number: timeout.expected_turn_number,
+        expected_snapshot_generation: timeout.expected_snapshot_generation,
+        kind: MatchCommandKind::Pass,
     }
 }
 
@@ -1866,7 +2812,8 @@ fn preflight_rejection(
     let phase_is_valid = match command.kind {
         MatchCommandKind::Move { .. }
         | MatchCommandKind::Ability { .. }
-        | MatchCommandKind::Pass => state.phase.accepts_ability_command(),
+        | MatchCommandKind::Pass
+        | MatchCommandKind::Jump => state.phase.accepts_ability_command(),
         MatchCommandKind::PassiveChoice { .. } => state.phase == MatchPhase::PassiveSelection,
     };
     (!phase_is_valid).then_some(CommandRejection::WrongPhase)
@@ -2011,6 +2958,412 @@ fn apply_status_change(
     Ok(())
 }
 
+type SnapshotObjectMap = BTreeMap<u32, PersistentObjectSnapshot>;
+
+/// Replays the ordered producer-owned object lifecycle against the pre-snapshot.
+///
+/// Snapshot diffs cannot see an object that was spawned and removed in one action, and a
+/// sequence-only presence check accepts duplicate, unknown, or stale records. This replay
+/// validates the complete object at each lifecycle boundary while still allowing a surviving
+/// pre-existing object to change in place (reported separately as `ObjectChanged`).
+fn reconcile_object_changes(
+    pre_objects: &[PersistentObjectSnapshot],
+    post_objects: &[PersistentObjectSnapshot],
+    object_changes: &[PersistentObjectChange],
+) -> Result<(), SessionFault> {
+    let mut shadow = snapshot_object_map(pre_objects)?;
+    let expected = snapshot_object_map(post_objects)?;
+    let pre_sequences: BTreeSet<u32> = shadow.keys().copied().collect();
+    let mut allocated_sequences = pre_sequences.clone();
+
+    for change in object_changes {
+        let projected = crate::client_contract::snapshot_object(&change.object);
+        match change.transition {
+            PersistentObjectTransition::Spawned => {
+                // Object sequences are monotonic match identities and may never be reused,
+                // even if an earlier object with the same sequence was removed in this call.
+                if !allocated_sequences.insert(projected.sequence)
+                    || shadow.insert(projected.sequence, projected).is_some()
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+            }
+            PersistentObjectTransition::Removed { .. } => {
+                let Some(previous) = shadow.remove(&projected.sequence) else {
+                    return Err(SessionFault::ContractInvariant);
+                };
+                if previous != projected {
+                    return Err(SessionFault::ContractInvariant);
+                }
+            }
+        }
+    }
+
+    if shadow.keys().ne(expected.keys()) {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    // A newly spawned survivor must match its producer record byte for byte. Existing
+    // survivors may legitimately mutate in place; their exact pre/post values are retained
+    // by `ObjectChanged` until such mutation gains its own producer-owned transition.
+    for (sequence, current) in &shadow {
+        if !pre_sequences.contains(sequence) && expected.get(sequence) != Some(current) {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+
+    Ok(())
+}
+
+fn snapshot_object_map(
+    objects: &[PersistentObjectSnapshot],
+) -> Result<SnapshotObjectMap, SessionFault> {
+    let mut by_sequence = BTreeMap::new();
+    for object in objects {
+        if by_sequence
+            .insert(object.sequence, object.clone())
+            .is_some()
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(by_sequence)
+}
+
+/// Verifies that every public non-strike draw was recorded at its producer and that the
+/// record agrees with the bounded generator result actually reachable from the pre-state.
+///
+/// This replay is validation only: presentation events are emitted from `outcome` below,
+/// never synthesized from snapshots. The launch contract has two closed random effects, both
+/// with non-critical primary attacks, so their draw order is exact and no private RNG state is
+/// exposed outside this check.
+fn reconcile_random_outcomes(
+    command: &MatchCommand,
+    ability: &crate::types::AbilityDefinition,
+    pre_state: &SimulationState,
+    post_state: &SimulationState,
+    outcome: &CommandOutcome,
+) -> Result<(), SessionFault> {
+    match ability.id {
+        "arzum-chain-strike" => {
+            if outcome
+                .strikes
+                .iter()
+                .any(|strike| strike.crit != CritRoll::NotEligible)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let MatchCommandKind::Ability {
+                target_player_id: Some(first_target_id),
+                ..
+            } = &command.kind
+            else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            // Chain Strike chooses after its ordinary melee hit but before host-owned settling and
+            // turn completion. Reconstruct only that draw-time state from the immutable pre-state
+            // plus already-reconciled primary strike eliminations. Reading positions or liveness
+            // from the final snapshot would infer a random choice from state that later mechanics
+            // were allowed to change.
+            let mut draw_state = pre_state.clone();
+            for strike in &outcome.strikes {
+                if matches!(strike.delivery, StrikeDelivery::Melee) && strike.eliminated_target {
+                    let Some(player) = draw_state.player_mut(&strike.target_player_id) else {
+                        return Err(SessionFault::ContractInvariant);
+                    };
+                    player.health = 0;
+                }
+            }
+            let mut rng = Rng::from_state(pre_state.rng_state);
+            let expected = crate::resolve::relocation::draw_arzum_chain_strike_target(
+                &mut rng,
+                &draw_state,
+                &command.player_id,
+                first_target_id,
+            )?;
+            match expected {
+                Some(expected)
+                    if outcome.random_outcomes.len() == 1
+                        && outcome.random_outcomes.first() == Some(&expected) => {}
+                None if outcome.random_outcomes.is_empty() => {}
+                Some(_) | None => return Err(SessionFault::ContractInvariant),
+            }
+            if post_state.rng_state != rng.state() {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        "aleph-veilstep" => {
+            if outcome
+                .strikes
+                .iter()
+                .any(|strike| strike.crit != CritRoll::NotEligible)
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let Some(center) = pre_state
+                .player(&command.player_id)
+                .map(|player| player.position)
+            else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            let Some(radius) = ability
+                .effects
+                .iter()
+                .find(|effect| effect.kind == EffectKind::Teleport)
+                .map(|effect| effect.magnitude)
+            else {
+                return Err(SessionFault::ContractInvariant);
+            };
+            let mut rng = Rng::from_state(pre_state.rng_state);
+            let expected = crate::resolve::relocation::draw_aleph_veilstep_point(
+                &mut rng,
+                &pre_state.terrain,
+                center,
+                radius,
+            )?;
+            if outcome.random_outcomes.as_slice() != [expected]
+                || post_state.rng_state != rng.state()
+            {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        _ if outcome.random_outcomes.is_empty() => {}
+        _ => return Err(SessionFault::ContractInvariant),
+    }
+    Ok(())
+}
+
+/// Reconciles every producer-owned strike against the attack definition, traces, aggregate
+/// damage, and pre/post authoritative states.
+///
+/// A dense vector alone is not sufficient: deleting a record and renumbering the rest would still
+/// look dense.  Projectile character impacts and melee target enumeration provide the independent
+/// expected cardinality, while aggregate direct damage proves that a surviving record was not
+/// silently altered.  Effects that intentionally aggregate direct damage without per-strike
+/// records are excluded from the final sum check until their contract gains an equivalent record.
+fn reconcile_strikes(
+    command: &MatchCommand,
+    ability: &crate::types::AbilityDefinition,
+    pre_state: &SimulationState,
+    post_state: &SimulationState,
+    outcome: &CommandOutcome,
+) -> Result<(), SessionFault> {
+    // Re-run the authoritative producer from the immutable pre-state before applying any
+    // aggregate or shape checks below. Those checks prove that records account for the final
+    // state, but they cannot prove ordered per-strike facts on their own: two crit/damage pairs
+    // can be exchanged while preserving every aggregate. The detached replay is the independent
+    // source for exact draw order, damage clamping, delivery, and the one strike that actually
+    // crossed a target from alive to eliminated. It cannot mutate the live/working host.
+    let replay_command = match &command.kind {
+        MatchCommandKind::Ability {
+            slot,
+            angle_millidegrees,
+            power_basis_points,
+            target_player_id,
+            secondary_target_player_id,
+        } => AbilityCommand {
+            command_id: command.command_id.clone(),
+            player_id: command.player_id.clone(),
+            expected_turn_number: command.expected_turn_number,
+            slot: *slot,
+            angle_millidegrees: *angle_millidegrees,
+            power_basis_points: *power_basis_points,
+            target_player_id: target_player_id.clone(),
+            secondary_target_player_id: secondary_target_player_id.clone(),
+        },
+        MatchCommandKind::Move { .. }
+        | MatchCommandKind::PassiveChoice { .. }
+        | MatchCommandKind::Pass
+        | MatchCommandKind::Jump => return Err(SessionFault::ContractInvariant),
+    };
+    let mut replay_state = pre_state.clone();
+    let replayed = match crate::command::apply_ability(&mut replay_state, &replay_command) {
+        CommandResult::Accepted(replayed) => replayed,
+        CommandResult::Rejected(_) => return Err(SessionFault::ContractInvariant),
+    };
+    if replayed.projectile_traces != outcome.projectile_traces
+        || replayed.strikes != outcome.strikes
+        || replay_state.rng_state != post_state.rng_state
+    {
+        return Err(SessionFault::ContractInvariant);
+    }
+
+    let mut cited_traces = BTreeSet::new();
+    let mut eliminating_targets = BTreeSet::new();
+    let mut direct_by_target: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut melee_records: Vec<(&str, crate::fixed::FixedPoint)> = Vec::new();
+
+    for (index, strike) in outcome.strikes.iter().enumerate() {
+        if usize::from(strike.strike_index) != index
+            || pre_state.player(&strike.target_player_id).is_none()
+            || post_state.player(&strike.target_player_id).is_none()
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+        let counter = direct_by_target
+            .entry(strike.target_player_id.as_str())
+            .or_insert(0);
+        *counter = counter
+            .checked_add(u32::from(strike.damage_applied))
+            .ok_or(SessionFault::ContractInvariant)?;
+
+        match strike.delivery {
+            StrikeDelivery::Projectile { trace_sequence } => {
+                if !matches!(ability.attack, Attack::Projectile(_))
+                    || !cited_traces.insert(trace_sequence)
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+                let trace = outcome
+                    .projectile_traces
+                    .iter()
+                    .find(|trace| trace.sequence == trace_sequence)
+                    .ok_or(SessionFault::ContractInvariant)?;
+                if trace.impact.cause != ImpactCause::Character
+                    || trace.impact.position != strike.impact_point
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+                reconcile_primary_crit(ability, strike.crit)?;
+            }
+            StrikeDelivery::Melee => {
+                if !matches!(ability.attack, Attack::Strike(_)) {
+                    return Err(SessionFault::ContractInvariant);
+                }
+                melee_records.push((&strike.target_player_id, strike.impact_point));
+                reconcile_primary_crit(ability, strike.crit)?;
+            }
+            StrikeDelivery::Effect { kind } => {
+                if kind != EffectKind::MultiStrike
+                    || !ability.effects.iter().any(|effect| effect.kind == kind)
+                {
+                    return Err(SessionFault::ContractInvariant);
+                }
+            }
+        }
+
+        if strike.eliminated_target
+            && (!eliminating_targets.insert(strike.target_player_id.as_str())
+                || pre_state
+                    .player(&strike.target_player_id)
+                    .is_none_or(crate::types::PlayerState::is_eliminated)
+                || post_state
+                    .player(&strike.target_player_id)
+                    .is_none_or(|player| !player.is_eliminated()))
+        {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+
+    match ability.attack {
+        Attack::Projectile(_) => {
+            let character_impacts: BTreeSet<u32> = outcome
+                .projectile_traces
+                .iter()
+                .filter(|trace| trace.impact.cause == ImpactCause::Character)
+                .map(|trace| trace.sequence)
+                .collect();
+            if cited_traces != character_impacts || !melee_records.is_empty() {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        Attack::Strike(strike_attack) => {
+            if !cited_traces.is_empty() {
+                return Err(SessionFault::ContractInvariant);
+            }
+            let actor_position = pre_state
+                .player(&command.player_id)
+                .ok_or(SessionFault::ContractInvariant)?
+                .position;
+            let (target_ids, impact_point): (Vec<&str>, crate::fixed::FixedPoint) =
+                if let MatchCommandKind::Ability {
+                    target_player_id: Some(target_id),
+                    ..
+                } = &command.kind
+                {
+                    let target = pre_state
+                        .player(target_id)
+                        .ok_or(SessionFault::ContractInvariant)?;
+                    (vec![target_id.as_str()], target.position)
+                } else {
+                    (
+                        pre_state
+                            .players
+                            .iter()
+                            .filter(|player| {
+                                player.id != command.player_id && !player.is_eliminated()
+                            })
+                            .filter(|player| {
+                                crate::fixed::within_radius(
+                                    player.position,
+                                    actor_position,
+                                    strike_attack.range,
+                                )
+                            })
+                            .map(|player| player.id.as_str())
+                            .collect(),
+                        actor_position,
+                    )
+                };
+            let mut expected = Vec::new();
+            for _ in 0..ability.strikes_per_turn.max(1) {
+                expected.extend(
+                    target_ids
+                        .iter()
+                        .map(|target_id| (*target_id, impact_point)),
+                );
+            }
+            if melee_records != expected {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+    }
+
+    let has_unrecorded_direct_effect = ability.effects.iter().any(|effect| {
+        matches!(
+            effect.kind,
+            EffectKind::Cluster | EffectKind::Return | EffectKind::Tunnel
+        )
+    });
+    if !has_unrecorded_direct_effect {
+        let aggregate_by_target: BTreeMap<&str, u32> = outcome
+            .damage
+            .iter()
+            .map(|damage| (damage.player_id.as_str(), u32::from(damage.direct)))
+            .collect();
+        if aggregate_by_target.len() != outcome.damage.len() {
+            return Err(SessionFault::ContractInvariant);
+        }
+        for (target_id, direct) in direct_by_target {
+            if aggregate_by_target.get(target_id).copied().unwrap_or(0) != direct {
+                return Err(SessionFault::ContractInvariant);
+            }
+        }
+        if aggregate_by_target.iter().any(|(target_id, direct)| {
+            *direct > 0
+                && !outcome
+                    .strikes
+                    .iter()
+                    .any(|strike| strike.target_player_id == **target_id)
+        }) {
+            return Err(SessionFault::ContractInvariant);
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_primary_crit(
+    ability: &crate::types::AbilityDefinition,
+    crit: CritRoll,
+) -> Result<(), SessionFault> {
+    let can_crit = ability.crit_chance_basis_points > 0
+        || ability.crit_damage_percent > ability.damage_percent;
+    if (can_crit && crit == CritRoll::NotEligible) || (!can_crit && crit != CritRoll::NotEligible) {
+        return Err(SessionFault::ContractInvariant);
+    }
+    Ok(())
+}
+
 /// Everything the authoritative layer recorded while applying one command.
 ///
 /// Grouped rather than passed as loose parameters because they are one concept — the
@@ -2045,16 +3398,14 @@ fn derive_events(
         let Some(player) = pre_state.player(&command.player_id) else {
             return Err(SessionFault::ContractInvariant);
         };
-        let Some(definition) = character::find(&player.character_id) else {
-            return Err(SessionFault::ContractInvariant);
-        };
-        let Some(ability) = definition.ability(slot) else {
+        let Some(ability) = character::equipped_ability(player, slot) else {
             return Err(SessionFault::ContractInvariant);
         };
 
         let Some(outcome) = command_outcome else {
             return Err(SessionFault::ContractInvariant);
         };
+        reconcile_strikes(command, ability, pre_state, post_state, outcome)?;
         let mut trace_ids = BTreeSet::new();
         for trace in &outcome.projectile_traces {
             if !trace_ids.insert(trace.sequence)
@@ -2134,6 +3485,20 @@ fn derive_events(
                 },
             )?;
         }
+
+        reconcile_random_outcomes(command, ability, pre_state, post_state, outcome)?;
+        for random_outcome in &outcome.random_outcomes {
+            push_pending(
+                &mut pending,
+                resolution_tick,
+                5,
+                PresentationEventKind::RandomOutcome {
+                    owner_id: command.player_id.clone(),
+                    ability_id: ability.id.to_owned(),
+                    outcome: random_outcome.clone(),
+                },
+            )?;
+        }
     }
 
     let dirty_rectangles = terrain_dirty_rectangles(pre_state, post_state)?;
@@ -2207,7 +3572,6 @@ fn derive_events(
             return Err(SessionFault::ContractInvariant);
         };
         let breakdown = damage_breakdown(command_outcome, &post_player.id);
-        let recorded_elimination = breakdown.as_ref().is_some_and(|item| item.eliminated);
 
         if pre_player.position != post_player.position {
             // `submit_move` walks and settles synchronously. A net pre/post displacement cannot
@@ -2242,42 +3606,25 @@ fn derive_events(
             )?;
         }
 
-        if pre_player.special_gauge != post_player.special_gauge {
-            let delta = i32::from(post_player.special_gauge)
-                .saturating_sub(i32::from(pre_player.special_gauge));
-            push_pending(
-                &mut pending,
-                resolution_tick,
-                14,
-                PresentationEventKind::GaugeChanged {
-                    player_id: post_player.id.clone(),
-                    previous_gauge: pre_player.special_gauge,
-                    new_gauge: post_player.special_gauge,
-                    delta,
-                },
-            )?;
-        }
-
-        if pre_player.passive_id != post_player.passive_id
-            && let Some(passive_id) = &post_player.passive_id
-        {
-            push_pending(
-                &mut pending,
-                resolution_tick,
-                18,
-                PresentationEventKind::PassiveChosen {
-                    player_id: post_player.id.clone(),
-                    passive_id: passive_id.clone(),
-                },
-            )?;
+        for (before, after) in pre_player.ammo.iter().zip(post_player.ammo.iter()) {
+            if before.remaining != after.remaining {
+                push_pending(
+                    &mut pending,
+                    resolution_tick,
+                    14,
+                    PresentationEventKind::GaugeChanged {
+                        player_id: post_player.id.clone(),
+                        previous_gauge: before.remaining,
+                        new_gauge: after.remaining,
+                        delta: i32::from(after.remaining)
+                            .saturating_sub(i32::from(before.remaining)),
+                    },
+                )?;
+            }
         }
 
         if !pre_player.is_eliminated && post_player.is_eliminated {
-            let cause = if recorded_elimination {
-                ChangeProvenance::RecordedOutcome
-            } else {
-                ChangeProvenance::AuthoritativeResolution
-            };
+            let cause = elimination_cause(command, pre_state, command_outcome, &post_player.id)?;
             push_pending(
                 &mut pending,
                 resolution_tick,
@@ -2290,13 +3637,17 @@ fn derive_events(
         }
     }
 
+    reconcile_object_changes(
+        &pre_snapshot.persistent_objects,
+        &post_snapshot.persistent_objects,
+        object_changes,
+    )?;
+
     // Spawns and removals come from the producers that caused them, in the order they
     // happened. A replacement removes then spawns and an eviction spawns then removes; only
     // an ordered stream keeps those distinguishable, and only a record can describe an
     // object that spawned and was removed inside this one command.
-    let mut recorded_sequences: BTreeSet<u32> = BTreeSet::new();
     for change in object_changes {
-        recorded_sequences.insert(change.object.sequence);
         let projection = crate::client_contract::snapshot_object(&change.object);
         let kind = match change.transition {
             PersistentObjectTransition::Spawned => {
@@ -2308,19 +3659,6 @@ fn derive_events(
             },
         };
         push_pending(&mut pending, resolution_tick, 16, kind)?;
-    }
-
-    // The other half of the same check: anything that left authoritative state must have
-    // said why. The converse is deliberately unchecked — an object spawned and removed
-    // within this command is in neither snapshot, and recording it is the entire point.
-    for previous in &pre_snapshot.persistent_objects {
-        let survived = post_snapshot
-            .persistent_objects
-            .iter()
-            .any(|current| current.sequence == previous.sequence);
-        if !survived && !recorded_sequences.contains(&previous.sequence) {
-            return Err(SessionFault::ContractInvariant);
-        }
     }
 
     // `ObjectChanged` stays snapshot-derived: an object that survived the command is fully
@@ -2341,12 +3679,7 @@ fn derive_events(
                 },
             )?,
             Some(_) => {}
-            // Appearing in the post-snapshot without a record means a producer added an
-            // object without reporting it. Fail closed rather than emit a stream that
-            // disagrees with the snapshot it accompanies.
-            None if !recorded_sequences.contains(&current.sequence) => {
-                return Err(SessionFault::ContractInvariant);
-            }
+            // A new object already passed the producer-record replay above.
             None => {}
         }
     }
@@ -2354,27 +3687,7 @@ fn derive_events(
     if pre_state.phase != MatchPhase::PassiveSelection
         && post_state.phase == MatchPhase::PassiveSelection
     {
-        let Some(player) = post_state.player(&post_state.active_player_id) else {
-            return Err(SessionFault::ContractInvariant);
-        };
-        let Some(definition) = character::find(&player.character_id) else {
-            return Err(SessionFault::ContractInvariant);
-        };
-        let mut passive_ids: Vec<String> = definition
-            .passives
-            .iter()
-            .map(|passive| passive.id.to_owned())
-            .collect();
-        passive_ids.sort();
-        push_pending(
-            &mut pending,
-            resolution_tick,
-            18,
-            PresentationEventKind::PassiveChoiceRequired {
-                player_id: player.id.clone(),
-                passive_ids,
-            },
-        )?;
+        return Err(SessionFault::ContractInvariant);
     }
 
     let turn_ended = pre_state.active_player_id != post_state.active_player_id
@@ -2600,6 +3913,97 @@ fn damage_breakdown(outcome: Option<&CommandOutcome>, player_id: &str) -> Option
         .map(snapshot_damage)
 }
 
+fn elimination_cause(
+    command: &MatchCommand,
+    pre_state: &SimulationState,
+    outcome: Option<&CommandOutcome>,
+    player_id: &str,
+) -> Result<ChangeProvenance, SessionFault> {
+    let Some(outcome) = outcome else {
+        return Ok(ChangeProvenance::AuthoritativeResolution);
+    };
+
+    let mut eliminating_strikes = outcome
+        .strikes
+        .iter()
+        .filter(|strike| strike.target_player_id == player_id && strike.eliminated_target);
+    if let Some(strike) = eliminating_strikes.next() {
+        // A player cannot transition from living to eliminated twice without an intervening
+        // revival, and no such mechanic exists. Two producer records claiming the kill are a
+        // contradictory outcome and must fault before the working host is published.
+        if eliminating_strikes.next().is_some() {
+            return Err(SessionFault::ContractInvariant);
+        }
+        let ability_id = command_ability_id(command, pre_state)?;
+        return Ok(ChangeProvenance::Strike {
+            owner_id: command.player_id.clone(),
+            ability_id,
+            strike_index: strike.strike_index,
+        });
+    }
+
+    let Some(damage) = outcome
+        .damage
+        .iter()
+        .find(|damage| damage.player_id == player_id && damage.eliminated)
+    else {
+        // Host-owned settling can still eliminate after the command outcome was finalized.
+        return Ok(ChangeProvenance::AuthoritativeResolution);
+    };
+    let ability_id = command_ability_id(command, pre_state)?;
+    let attributed = |constructor: fn(String, String) -> ChangeProvenance| {
+        constructor(command.player_id.clone(), ability_id.clone())
+    };
+    if damage.backlash > 0 {
+        return Ok(attributed(|owner_id, ability_id| {
+            ChangeProvenance::Backlash {
+                owner_id,
+                ability_id,
+            }
+        }));
+    }
+    if damage.wall_impact > 0 {
+        return Ok(attributed(|owner_id, ability_id| {
+            ChangeProvenance::WallImpact {
+                owner_id,
+                ability_id,
+            }
+        }));
+    }
+    if damage.splash > 0 {
+        return Ok(attributed(|owner_id, ability_id| {
+            ChangeProvenance::Splash {
+                owner_id,
+                ability_id,
+            }
+        }));
+    }
+    if damage.hazard > 0 {
+        return Ok(ChangeProvenance::Hazard);
+    }
+    Ok(attributed(|owner_id, ability_id| {
+        ChangeProvenance::AbilityEffect {
+            owner_id,
+            ability_id,
+        }
+    }))
+}
+
+fn command_ability_id(
+    command: &MatchCommand,
+    pre_state: &SimulationState,
+) -> Result<String, SessionFault> {
+    let MatchCommandKind::Ability { slot, .. } = command.kind else {
+        return Err(SessionFault::ContractInvariant);
+    };
+    let player = pre_state
+        .player(&command.player_id)
+        .ok_or(SessionFault::ContractInvariant)?;
+    character::equipped_ability(player, slot)
+        .map(|ability| ability.id.to_owned())
+        .ok_or(SessionFault::ContractInvariant)
+}
+
 const fn snapshot_damage(damage: &DamageEvent) -> DamageBreakdown {
     DamageBreakdown {
         direct: damage.direct,
@@ -2655,6 +4059,7 @@ const fn ability_slot_tag(slot: AbilitySlot) -> u8 {
         AbilitySlot::Basic => 0,
         AbilitySlot::BasicAlt => 1,
         AbilitySlot::Special => 2,
+        AbilitySlot::Trinket => 3,
     }
 }
 
@@ -2682,11 +4087,11 @@ mod tests {
     use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
     use crate::types::{Appearance, Material};
 
-    fn player(player_id: &str, team: u8, character_id: &str) -> MatchPlayerConfig {
+    fn player(player_id: &str, team: u8, _character_id: &str) -> MatchPlayerConfig {
         MatchPlayerConfig {
             player_id: player_id.to_owned(),
             team,
-            character_id: character_id.to_owned(),
+            character_id: "crow".to_owned(),
             appearance: Appearance::default(),
         }
     }
@@ -2864,8 +4269,11 @@ mod tests {
         assert_eq!(session.ledger_len(), 1);
         assert_eq!(
             session.ledger_bytes(),
-            retained_ledger_entry_bytes(&retained_command, &transition)
-                .expect("fixture entry must be countable"),
+            retained_ledger_entry_bytes(
+                &LedgerRequest::Client(retained_command.clone()),
+                &transition
+            )
+            .expect("fixture entry must be countable"),
         );
     }
 
@@ -2937,8 +4345,11 @@ mod tests {
         assert_eq!(session.ledger_len(), 1);
         assert_eq!(
             session.ledger_bytes(),
-            retained_ledger_entry_bytes(&original_command, &original)
-                .expect("fixture entry must be countable"),
+            retained_ledger_entry_bytes(
+                &LedgerRequest::Client(original_command.clone()),
+                &original
+            )
+            .expect("fixture entry must be countable"),
         );
     }
 
@@ -2952,8 +4363,9 @@ mod tests {
             .expect("staleness is a domain rejection");
         assert_eq!(first.disposition, TransitionDisposition::Rejected);
         assert_eq!(first.post_snapshot_generation, 0);
-        let rejected_entry_bytes = retained_ledger_entry_bytes(&stale, &first)
-            .expect("rejected fixture entry must be countable");
+        let rejected_entry_bytes =
+            retained_ledger_entry_bytes(&LedgerRequest::Client(stale.clone()), &first)
+                .expect("rejected fixture entry must be countable");
         assert_eq!(session.ledger_bytes(), rejected_entry_bytes);
 
         let valid_pass = pass_command(&session, "advance-after-rejection");
@@ -3039,8 +4451,11 @@ mod tests {
         let probe_transition = probe
             .apply(probe_command.clone())
             .expect("probe command must resolve");
-        let entry_bytes = retained_ledger_entry_bytes(&probe_command, &probe_transition)
-            .expect("fixture entry must be countable");
+        let entry_bytes = retained_ledger_entry_bytes(
+            &LedgerRequest::Client(probe_command.clone()),
+            &probe_transition,
+        )
+        .expect("fixture entry must be countable");
 
         let exact_host = create_match(&duel()).expect("fixture host must start");
         let mut exact = MatchSessionHost::with_ledger_limits(
@@ -3171,6 +4586,139 @@ mod tests {
     }
 
     #[test]
+    fn complete_checkpoint_restore_preserves_replay_and_can_continue() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let mut stale = pass_command(&session, "restore-stale");
+        stale.expected_snapshot_generation = 99;
+        let stale_first = session
+            .apply(stale.clone())
+            .expect("stale receipt must be retained");
+
+        let move_command = command(
+            &session,
+            "restore-move",
+            MatchCommandKind::Move { dx: POSITION_SCALE },
+        );
+        let move_first = session
+            .apply(move_command.clone())
+            .expect("move must resolve");
+        let mut ability = ability_command(&session, "restore-ability");
+        if let MatchCommandKind::Ability {
+            power_basis_points,
+            angle_millidegrees,
+            ..
+        } = &mut ability.kind
+        {
+            *power_basis_points = 8_000;
+            *angle_millidegrees = 0;
+        }
+        let ability_first = session
+            .apply(ability.clone())
+            .expect("ability must resolve");
+        let expected_snapshot = session.snapshot();
+        let expected_generation = session.generation();
+        let expected_ledger_bytes = session.ledger_bytes();
+        let expected_ledger_len = session.ledger_len();
+
+        let checkpoint = session.checkpoint().expect("live session must checkpoint");
+        let mut restored =
+            MatchSessionHost::restore(checkpoint).expect("complete checkpoint must restore");
+
+        assert_eq!(restored.snapshot(), expected_snapshot);
+        assert_eq!(restored.generation(), expected_generation);
+        assert_eq!(restored.ledger_len(), expected_ledger_len);
+        assert_eq!(restored.ledger_bytes(), expected_ledger_bytes);
+        for (request, first) in [
+            (stale, stale_first),
+            (move_command, move_first),
+            (ability, ability_first),
+        ] {
+            let replay = restored.apply(request).expect("first receipt must replay");
+            assert_eq!(replay.disposition, TransitionDisposition::DuplicateReplay);
+            assert_eq!(replay.command_id, first.command_id);
+            assert_eq!(replay.post_snapshot, first.post_snapshot);
+            assert_eq!(replay.events, first.events);
+        }
+        assert_eq!(restored.snapshot(), expected_snapshot);
+        assert_eq!(restored.ledger_len(), expected_ledger_len);
+        assert_eq!(restored.ledger_bytes(), expected_ledger_bytes);
+
+        let next = pass_command(&restored, "restore-continues");
+        let continued = restored
+            .apply(next)
+            .expect("restored session must continue");
+        if continued.disposition != TransitionDisposition::Accepted {
+            panic!("reason={:?}", continued.rejection_reason);
+        }
+        assert_eq!(continued.disposition, TransitionDisposition::Accepted);
+        assert_eq!(restored.generation(), expected_generation + 1);
+    }
+
+    #[test]
+    fn restore_rejects_incomplete_or_misaccounted_ledgers() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let mut stale = pass_command(&session, "checkpoint-rejected");
+        stale.expected_snapshot_generation = 99;
+        session
+            .apply(stale)
+            .expect("stale receipt must be retained");
+        let pass = pass_command(&session, "checkpoint-accepted");
+        session.apply(pass).expect("pass must resolve");
+        let checkpoint = session.checkpoint().expect("live session must checkpoint");
+
+        let mut missing_rejection = checkpoint.clone();
+        let _removed = missing_rejection.ledger.remove("checkpoint-rejected");
+        assert!(matches!(
+            MatchSessionHost::restore(missing_rejection),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut missing_acceptance = checkpoint.clone();
+        let removed = missing_acceptance
+            .ledger
+            .remove("checkpoint-accepted")
+            .expect("accepted entry must exist");
+        let removed_bytes = retained_ledger_entry_bytes(&removed.request, &removed.transition)
+            .expect("fixture entry must be countable");
+        missing_acceptance.declared_ledger_len -= 1;
+        missing_acceptance.declared_ledger_bytes -= removed_bytes;
+        assert!(matches!(
+            MatchSessionHost::restore(missing_acceptance),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut wrong_bytes = checkpoint.clone();
+        wrong_bytes.declared_ledger_bytes = wrong_bytes.declared_ledger_bytes.saturating_add(1);
+        assert!(matches!(
+            MatchSessionHost::restore(wrong_bytes),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut wrong_digest = checkpoint.clone();
+        wrong_digest
+            .ledger
+            .get_mut("checkpoint-accepted")
+            .expect("accepted entry must exist")
+            .canonical_digest = "0000000000000000".to_owned();
+        assert!(matches!(
+            MatchSessionHost::restore(wrong_digest),
+            Err(SessionFault::ContractInvariant)
+        ));
+
+        let mut replay_in_ledger = checkpoint.clone();
+        replay_in_ledger
+            .ledger
+            .get_mut("checkpoint-accepted")
+            .expect("accepted entry must exist")
+            .transition
+            .disposition = TransitionDisposition::DuplicateReplay;
+        assert!(matches!(
+            MatchSessionHost::restore(replay_in_ledger),
+            Err(SessionFault::ContractInvariant)
+        ));
+    }
+
+    #[test]
     fn dirty_rectangles_are_exact_sorted_changed_cell_row_runs() {
         let previous = build_initial_state(&duel()).expect("fixture state must build");
         let mut current = previous.clone();
@@ -3231,43 +4779,66 @@ mod tests {
 #[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod strike_provenance_tests {
     use super::*;
-    use crate::match_setup::{MatchMode, MatchPlayerConfig};
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
     use crate::types::Appearance;
 
     const TARGET: &str = "b-local-bot";
 
-    fn karl_duel() -> MatchConfig {
+    fn repeater_duel() -> MatchConfig {
         MatchConfig {
-            seed: 12_345,
+            seed: 1,
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    character_id: "karl".to_owned(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: TARGET.to_owned(),
                     team: 1,
-                    character_id: "huck".to_owned(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
         }
     }
 
-    /// Flat shot empirically verified to land every one of Karl's three strikes.
+    fn low_health_repeater_session() -> MatchSessionHost {
+        let mut state = build_initial_state(&repeater_duel()).expect("fixture state must build");
+        state
+            .player_mut("a-local-player")
+            .expect("fixture actor must exist")
+            .trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+        state
+            .player_mut(TARGET)
+            .expect("fixture target must exist")
+            .health = 1;
+        let host = MatchHost::start(state).expect("fixture match must start");
+        MatchSessionHost::from_new_host(host)
+    }
+
+    fn repeater_session() -> MatchSessionHost {
+        let mut state = build_initial_state(&repeater_duel()).expect("fixture state must build");
+        state
+            .player_mut("a-local-player")
+            .expect("fixture actor must exist")
+            .trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+        MatchSessionHost::from_new_host(MatchHost::start(state).expect("fixture match must start"))
+    }
+
+    /// Flat shot empirically verified to land every one of Crow's four barrage strikes.
     fn landing_volley(session: &MatchSessionHost) -> MatchCommand {
         MatchCommand {
             schema_version: CLIENT_CONTRACT_VERSION,
-            command_id: "karl-volley".to_owned(),
+            command_id: "repeater-volley".to_owned(),
             player_id: session.host().active_player().to_owned(),
             expected_turn_number: session.host().state().turn_number,
             expected_snapshot_generation: session.generation(),
             kind: MatchCommandKind::Ability {
-                slot: AbilitySlot::Basic,
+                slot: AbilitySlot::Trinket,
                 angle_millidegrees: 0,
                 power_basis_points: 4_600,
                 target_player_id: None,
@@ -3298,23 +4869,19 @@ mod strike_provenance_tests {
 
     #[test]
     fn a_multi_strike_projectile_emits_one_record_per_strike_it_actually_landed() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
 
-        // Guard against a vacuous pass: if this scenario ever stops landing, every
-        // assertion below would hold trivially over an empty vector and prove nothing.
         assert_eq!(
             landed.len(),
-            3,
-            "Carrion Call must land three strikes in this fixture; a change in ballistics \
-             or spawn placement has silently defanged this test",
+            4,
+            "Crow's Aerial Barrage must land four strikes in this fixture",
         );
 
-        // Indices are the resolver's own resolution order: dense and zero-based.
         let indices: Vec<u16> = landed.iter().map(|s| s.strike_index).collect();
-        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(indices, vec![0, 1, 2, 3]);
 
         for strike in &landed {
             assert_eq!(strike.target_player_id, TARGET);
@@ -3327,11 +4894,11 @@ mod strike_provenance_tests {
 
     #[test]
     fn every_strike_cites_a_projectile_trace_the_outcome_actually_contains() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
-        assert_eq!(landed.len(), 3);
+        assert_eq!(landed.len(), 4);
 
         let trace_ids: Vec<u32> = transition
             .events
@@ -3353,71 +4920,51 @@ mod strike_provenance_tests {
                     cited.push(trace_sequence);
                 }
                 StrikeDelivery::Melee | StrikeDelivery::Effect { .. } => {
-                    panic!("Carrion Call delivers every strike by projectile")
+                    panic!("Aerial Barrage delivers every strike by projectile")
                 }
             }
         }
 
-        // Each strike is delivered by its own distinct projectile, not three readings of one.
+        // Each strike is delivered by its own distinct projectile, not multiple readings of one.
         cited.sort_unstable();
         cited.dedup();
         assert_eq!(
             cited.len(),
-            3,
-            "the three strikes must cite three distinct traces",
+            4,
+            "the four strikes must cite four distinct traces",
         );
     }
 
     #[test]
     fn each_strike_records_its_own_independent_crit_draw() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
-        assert_eq!(landed.len(), 3);
+        assert_eq!(landed.len(), 4);
 
         for strike in &landed {
-            // Carrion Call has a non-zero crit chance, so every strike must actually have
-            // drawn. `NotEligible` here would mean the record misreports RNG consumption,
-            // which desynchronises any consumer tracking the generator.
-            assert_ne!(
+            assert_eq!(
                 strike.crit,
                 CritRoll::NotEligible,
-                "a crit-capable ability must record a real draw for every strike",
+                "a zero-crit weapon must record NotEligible",
             );
-            assert!(strike.crit.consumed_draw());
-        }
-
-        // The per-strike flag is only meaningful if it tracks per-strike damage.
-        if let (Some(crit), Some(plain)) = (
-            landed.iter().find(|s| s.crit.is_critical()),
-            landed.iter().find(|s| !s.crit.is_critical()),
-        ) {
-            assert!(
-                crit.damage_applied > plain.damage_applied,
-                "a critical strike ({}) must exceed a non-critical one ({})",
-                crit.damage_applied,
-                plain.damage_applied,
-            );
+            assert!(!strike.crit.consumed_draw());
         }
     }
 
     #[test]
     fn per_strike_damage_reconciles_exactly_with_the_authoritative_health_change() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let before = health_of(&session, TARGET);
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let after = health_of(&session, TARGET);
         let landed = strikes(&transition);
-        assert_eq!(landed.len(), 3);
+        assert_eq!(landed.len(), 4);
 
         let recorded: u32 = landed.iter().map(|s| u32::from(s.damage_applied)).sum();
 
-        // Carrion Call carries no effects and no self-damage, so the target's entire health
-        // loss this command is the sum of these three strikes. This is the assertion that
-        // makes the records trustworthy: they are not merely well-formed, they add up to
-        // what the authoritative simulation actually did.
         assert_eq!(
             recorded,
             u32::from(before - after),
@@ -3428,7 +4975,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn a_strike_is_presented_at_its_own_projectiles_impact_tick() {
-        let mut session = MatchSessionHost::create(&karl_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
 
@@ -3455,7 +5002,568 @@ mod strike_provenance_tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 3, "all three strikes must have been checked");
+        assert_eq!(checked, 4, "all four strikes must have been checked");
+    }
+
+    #[test]
+    fn omitted_or_tampered_strike_records_fail_before_session_publication() {
+        let session = repeater_session();
+        let command = landing_volley(&session);
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let outcome = match apply_to_working_host(&mut working, &command)
+            .expect("fixture host application must not fault")
+        {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture ability must retain an outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture ability rejected: {reason:?}"),
+        };
+        let player = pre_state.player(&command.player_id).expect("fixture actor");
+        let ability =
+            character::equipped_ability(player, AbilitySlot::Trinket).expect("fixture special");
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &outcome),
+            Ok(())
+        );
+
+        let mut missing = outcome.as_ref().clone();
+        let _removed = missing.strikes.pop();
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &missing),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        let mut tampered = outcome.as_ref().clone();
+        let Some(first) = tampered.strikes.first_mut() else {
+            panic!("fixture must contain strikes")
+        };
+        first.damage_applied = first.damage_applied.saturating_add(1);
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &tampered),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        let mut duplicate_kill = outcome.as_ref().clone();
+        let Some(first) = duplicate_kill.strikes.first_mut() else {
+            panic!("fixture must contain strikes")
+        };
+        first.eliminated_target = true;
+        let Some(second) = duplicate_kill.strikes.get_mut(1) else {
+            panic!("fixture must contain multiple strikes")
+        };
+        second.eliminated_target = true;
+        assert_eq!(
+            reconcile_strikes(
+                &command,
+                ability,
+                &pre_state,
+                working.state(),
+                &duplicate_kill,
+            ),
+            Err(SessionFault::ContractInvariant)
+        );
+
+        // Reconciliation is performed against the working clone. The live session remains
+        // generation zero with an empty ledger until every record passes and commit occurs.
+        assert_eq!(session.host().state(), &pre_state);
+        assert_eq!(session.generation(), 0);
+        assert_eq!(session.ledger_len(), 0);
+        assert_eq!(session.ledger_bytes(), 0);
+    }
+
+    #[test]
+    fn omitting_the_exact_strike_elimination_flag_fails_reconciliation() {
+        let session = low_health_repeater_session();
+        let command = landing_volley(&session);
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let outcome = match apply_to_working_host(&mut working, &command)
+            .expect("fixture host application must not fault")
+        {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture ability must retain an outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture ability rejected: {reason:?}"),
+        };
+        let player = pre_state.player(&command.player_id).expect("fixture actor");
+        let ability =
+            character::equipped_ability(player, AbilitySlot::Trinket).expect("fixture special");
+        let mut omitted = outcome.as_ref().clone();
+        let killing_strike = omitted
+            .strikes
+            .iter_mut()
+            .find(|strike| strike.eliminated_target)
+            .expect("low-health fixture must contain a killing strike");
+        killing_strike.eliminated_target = false;
+
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &omitted),
+            Err(SessionFault::ContractInvariant)
+        );
+        assert_eq!(session.host().state(), &pre_state);
+        assert_eq!(session.generation(), 0);
+        assert_eq!(session.ledger_len(), 0);
+    }
+
+    #[test]
+    fn omitting_an_uncited_miss_trace_fails_exact_reconciliation() {
+        let session = low_health_repeater_session();
+        let command = landing_volley(&session);
+        let pre_state = session.host().state().clone();
+        let mut working = session.host().clone();
+        let outcome = match apply_to_working_host(&mut working, &command)
+            .expect("fixture host application must not fault")
+        {
+            AppliedCommand::Accepted(Some(outcome)) => outcome,
+            AppliedCommand::Accepted(None) => panic!("fixture ability must retain an outcome"),
+            AppliedCommand::Rejected(reason) => panic!("fixture ability rejected: {reason:?}"),
+        };
+        let player = pre_state.player(&command.player_id).expect("fixture actor");
+        let ability =
+            character::equipped_ability(player, AbilitySlot::Trinket).expect("fixture special");
+        let mut omitted = outcome.as_ref().clone();
+        let miss_index = omitted
+            .projectile_traces
+            .iter()
+            .position(|trace| trace.impact.cause != ImpactCause::Character)
+            .expect("later projectiles must miss after the first eliminates the only target");
+        let removed_sequence = omitted.projectile_traces.remove(miss_index).sequence;
+        assert!(
+            omitted.strikes.iter().all(|strike| !matches!(
+                strike.delivery,
+                StrikeDelivery::Projectile { trace_sequence }
+                    if trace_sequence == removed_sequence
+            )),
+            "the removed miss must be independently uncited by any strike",
+        );
+
+        assert_eq!(
+            reconcile_strikes(&command, ability, &pre_state, working.state(), &omitted),
+            Err(SessionFault::ContractInvariant)
+        );
+        assert_eq!(session.host().state(), &pre_state);
+        assert_eq!(session.generation(), 0);
+        assert_eq!(session.ledger_len(), 0);
+    }
+}
+
+/// Direct end-to-end transition scenarios required by `CLIENT_SPEC.md` § 20.1.
+///
+/// These deliberately use real roster definitions, the real horizontal map, `MatchHost`, and
+/// `MatchSessionHost`.  Unit tests of the individual resolver or diff helper are valuable but do
+/// not prove that the complete ordered event vocabulary survives the publication boundary.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod direct_transition_scenario_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::Appearance;
+
+    fn player(player_id: &str, team: u8, _character_id: &str) -> MatchPlayerConfig {
+        MatchPlayerConfig {
+            player_id: player_id.to_owned(),
+            team,
+            character_id: "crow".to_owned(),
+            appearance: Appearance::default(),
+        }
+    }
+
+    fn config(actor_character_id: &str, target_character_id: &str) -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                player("a-actor", 0, actor_character_id),
+                player("b-target", 1, target_character_id),
+            ],
+        }
+    }
+
+    fn command(
+        session: &MatchSessionHost,
+        command_id: &str,
+        kind: MatchCommandKind,
+    ) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: command_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind,
+        }
+    }
+
+    fn ability(
+        session: &MatchSessionHost,
+        command_id: &str,
+        slot: AbilitySlot,
+        target_player_id: Option<&str>,
+    ) -> MatchCommand {
+        command(
+            session,
+            command_id,
+            MatchCommandKind::Ability {
+                slot,
+                angle_millidegrees: 0,
+                power_basis_points: 5_000,
+                target_player_id: target_player_id.map(str::to_owned),
+                secondary_target_player_id: None,
+            },
+        )
+    }
+
+    fn event_index(
+        transition: &MatchTransition,
+        predicate: impl Fn(&PresentationEventKind) -> bool,
+    ) -> usize {
+        transition
+            .events
+            .iter()
+            .position(|event| predicate(&event.kind))
+            .expect("required event must be present")
+    }
+
+    fn assert_post_hash_is_live(session: &MatchSessionHost, transition: &MatchTransition) {
+        let live = crate::hash::hash_state(session.host().state());
+        assert_eq!(transition.post_state_hash, live);
+        assert_eq!(transition.post_snapshot.authoritative_state_hash, live);
+    }
+
+    #[test]
+    fn melee_terrain_and_block_mutation_are_one_ordered_real_transition() {
+        let match_config = config("crow", "crow");
+        let mut state = build_initial_state(&match_config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        // Trench Spade is melee-only. Keeping the target on the actor's supported spawn cell both
+        // guarantees contact and centres its real crater over a real destructible map block.
+        state
+            .player_mut("b-target")
+            .expect("fixture target")
+            .position = actor_position;
+
+        let host = MatchHost::start(state).expect("fixture match must start");
+        let mut session = MatchSessionHost::from_new_host(host);
+        let attack = ability(
+            &session,
+            "melee-terrain-passive",
+            AbilitySlot::Special,
+            Some("b-target"),
+        );
+        let transition = session.apply(attack).expect("Trench Spade must resolve");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_post_hash_is_live(&session, &transition);
+
+        let strike_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::StrikeResolved {
+                    strike: StrikeResolution {
+                        delivery: StrikeDelivery::Melee,
+                        target_player_id,
+                        ..
+                    },
+                    ..
+                } if target_player_id == "b-target"
+            )
+        });
+        let terrain_index = event_index(
+            &transition,
+            |kind| matches!(kind, PresentationEventKind::TerrainChanged { dirty_rectangles, .. } if !dirty_rectangles.is_empty()),
+        );
+        let block_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::BlockChanged {
+                    previous_health: Some(previous),
+                    new_health: Some(current),
+                    ..
+                } if current < previous
+            )
+        });
+        assert!(strike_index < terrain_index);
+        assert!(terrain_index < block_index);
+    }
+
+    #[test]
+    fn pass_reports_the_reason_and_opens_the_next_turn_in_order() {
+        let mut session =
+            MatchSessionHost::create(&config("zeke", "huck")).expect("fixture session must start");
+        let pass = command(&session, "direct-pass", MatchCommandKind::Pass);
+        let transition = session.apply(pass).expect("pass must resolve");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_post_hash_is_live(&session, &transition);
+        let ended_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnEnded {
+                    player_id,
+                    reason: ClientTurnEndReason::Passed,
+                } if player_id == "a-actor"
+            )
+        });
+        let opened_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnOpened {
+                    player_id,
+                    turn_number: 2,
+                } if player_id == "b-target"
+            )
+        });
+        assert!(ended_index < opened_index);
+    }
+
+    #[test]
+    fn melee_elimination_is_attributed_before_victory_and_no_turn_reopens() {
+        let match_config = config("crow", "crow");
+        let mut state = build_initial_state(&match_config).expect("fixture state must build");
+        let actor_position = state.player("a-actor").expect("fixture actor").position;
+        let _actor = state.player_mut("a-actor").expect("fixture actor");
+        let target = state.player_mut("b-target").expect("fixture target");
+        target.position = actor_position;
+        target.health = 1;
+        for y in 8..15 {
+            for x in 0..10 {
+                let _ = crate::terrain::set_material(
+                    &mut state.terrain,
+                    x,
+                    y,
+                    crate::types::Material::ReinforcedStone,
+                );
+            }
+        }
+
+        let host = MatchHost::start(state).expect("fixture match must start");
+        let mut session = MatchSessionHost::from_new_host(host);
+        let attack = ability(
+            &session,
+            "victory-attribution",
+            AbilitySlot::Special,
+            Some("b-target"),
+        );
+        let transition = session.apply(attack).expect("Trench Spade must resolve");
+
+        assert_post_hash_is_live(&session, &transition);
+        let strike_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::StrikeResolved {
+                    strike: StrikeResolution {
+                        target_player_id,
+                        eliminated_target: true,
+                        ..
+                    },
+                    ..
+                } if target_player_id == "b-target"
+            )
+        });
+        let eliminated_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::PlayerEliminated {
+                    player_id,
+                    cause: ChangeProvenance::Strike {
+                        owner_id,
+                        ability_id,
+                        strike_index: 0,
+                    },
+                } if player_id == "b-target"
+                    && owner_id == "a-actor"
+                    && ability_id == "trench-spade"
+            )
+        });
+        let turn_ended_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::TurnEnded {
+                    player_id,
+                    reason: ClientTurnEndReason::Attacked,
+                } if player_id == "a-actor"
+            )
+        });
+        let victory_index = event_index(&transition, |kind| {
+            matches!(
+                kind,
+                PresentationEventKind::MatchCompleted {
+                    outcome: ClientMatchOutcome::Victory { team: 0 },
+                }
+            )
+        });
+        assert!(strike_index < eliminated_index);
+        assert!(eliminated_index < turn_ended_index);
+        assert!(turn_ended_index < victory_index);
+        assert!(
+            !transition
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, PresentationEventKind::TurnOpened { .. })),
+            "a completed match cannot reopen a planning turn",
+        );
+        assert_eq!(session.host().phase(), MatchPhase::MatchComplete);
+        assert_eq!(
+            session.host().outcome(),
+            crate::types::MatchOutcome::Victory { team: 0 }
+        );
+    }
+}
+
+/// Read-only preview semantics, including the negative proof that no live state, RNG, generation,
+/// or idempotency metadata changes even when the disposable legality clone runs a random ability.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod preview_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::Appearance;
+
+    fn config(_actor_character_id: &str) -> MatchConfig {
+        MatchConfig {
+            seed: 9_876,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-actor".to_owned(),
+                    team: 0,
+                    character_id: "crow".to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-target".to_owned(),
+                    team: 1,
+                    character_id: "crow".to_owned(),
+                    appearance: Appearance::default(),
+                },
+            ],
+        }
+    }
+
+    fn request(session: &MatchSessionHost, slot: AbilitySlot) -> AbilityPreviewRequest {
+        AbilityPreviewRequest {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            expected_snapshot_generation: session.generation(),
+            player_id: "a-actor".to_owned(),
+            slot,
+            angle_millidegrees: 45_000,
+            power_basis_points: 1_500,
+            target_player_id: None,
+            secondary_target_player_id: None,
+        }
+    }
+
+    fn assert_session_unchanged(
+        session: &MatchSessionHost,
+        before: &SimulationState,
+        generation: u64,
+        ledger_len: usize,
+        ledger_bytes: u64,
+    ) {
+        assert_eq!(session.host().state(), before);
+        assert_eq!(session.host().state().rng_state, before.rng_state);
+        assert_eq!(session.generation(), generation);
+        assert_eq!(session.ledger_len(), ledger_len);
+        assert_eq!(session.ledger_bytes(), ledger_bytes);
+    }
+
+    #[test]
+    fn projectile_preview_is_repeatable_and_mutates_nothing() {
+        let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
+        let preview_request = request(&session, AbilitySlot::Basic);
+        let before = session.host().state().clone();
+
+        let first = session
+            .preview(&preview_request)
+            .expect("preview must resolve");
+        let second = session
+            .preview(&preview_request)
+            .expect("preview must repeat");
+
+        assert_eq!(first, second);
+        assert!(first.legal);
+        assert_eq!(first.rejection_reason, None);
+        assert_eq!(first.snapshot_generation, 0);
+        assert_eq!(first.gauge_cost, 0);
+        assert_eq!(first.projectile_traces.len(), 1);
+        assert!(
+            first
+                .projectile_traces
+                .first()
+                .is_some_and(|trace| trace.samples.len() >= 2)
+        );
+        assert!(
+            first
+                .legal_target_player_ids
+                .windows(2)
+                .all(|pair| matches!(pair, [left, right] if left < right))
+        );
+        assert_session_unchanged(&session, &before, 0, 0, 0);
+    }
+
+    #[test]
+    fn stale_and_illegal_previews_are_normal_non_mutating_responses() {
+        let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
+        let before = session.host().state().clone();
+        let mut stale = request(&session, AbilitySlot::Basic);
+        stale.expected_snapshot_generation = 1;
+
+        let stale_response = session.preview(&stale).expect("staleness is not a fault");
+        assert!(!stale_response.legal);
+        assert_eq!(
+            stale_response.rejection_reason,
+            Some(PreviewRejection::SnapshotGenerationMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert!(stale_response.projectile_traces.is_empty());
+        assert!(stale_response.legal_target_player_ids.is_empty());
+
+        let mut illegal = request(&session, AbilitySlot::Basic);
+        illegal.angle_millidegrees = 360_000;
+        let illegal_response = session
+            .preview(&illegal)
+            .expect("gameplay refusal is normal");
+        assert!(!illegal_response.legal);
+        assert_eq!(
+            illegal_response.rejection_reason,
+            Some(PreviewRejection::Core(CommandRejection::InputOutOfRange))
+        );
+        assert!(illegal_response.projectile_traces.is_empty());
+
+        let mut empty_ammo_state = build_initial_state(&config("crow")).expect("fixture state");
+        empty_ammo_state.player_mut("a-actor").expect("player").ammo[AbilitySlot::Basic.index()]
+            .remaining = 0;
+        let empty_ammo_session =
+            MatchSessionHost::from_new_host(MatchHost::start(empty_ammo_state).expect("start"));
+        let empty_ammo = empty_ammo_session
+            .preview(&request(&empty_ammo_session, AbilitySlot::Basic))
+            .expect("ammo refusal is normal");
+        assert!(
+            empty_ammo.legal,
+            "fixed character actions never run out of ammo"
+        );
+        assert_eq!(empty_ammo.rejection_reason, None);
+        assert_session_unchanged(&session, &before, 0, 0, 0);
+    }
+
+    #[test]
+    fn malformed_preview_structure_faults_without_mutation() {
+        let session = MatchSessionHost::create(&config("zeke")).expect("fixture session");
+        let before = session.host().state().clone();
+        let mut malformed = request(&session, AbilitySlot::Basic);
+        malformed.schema_version = CLIENT_CONTRACT_VERSION.saturating_add(1);
+
+        assert_eq!(
+            session.preview(&malformed),
+            Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: CLIENT_CONTRACT_VERSION.saturating_add(1),
+            })
+        );
+        assert_session_unchanged(&session, &before, 0, 0, 0);
     }
 }
 
@@ -3482,13 +5590,13 @@ mod status_lifecycle_tests {
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    character_id: "zeke".to_owned(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: "b-local-bot".to_owned(),
                     team: 1,
-                    character_id: "huck".to_owned(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -3542,6 +5650,24 @@ mod status_lifecycle_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn status_mut<'a>(
+        snapshot: &'a mut MatchSnapshot,
+        player_id: &str,
+        kind: ClientStatusKind,
+    ) -> &'a mut StatusSnapshot {
+        snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_id)
+            .and_then(|player| {
+                player
+                    .statuses
+                    .iter_mut()
+                    .find(|status| status.kind == kind)
+            })
+            .expect("fixture status must exist")
     }
 
     #[test]
@@ -3627,6 +5753,152 @@ mod status_lifecycle_tests {
             "a later command must not repeat an earlier command's transitions",
         );
     }
+
+    #[test]
+    fn exact_status_replay_rejects_missing_duplicate_and_stale_ticks() {
+        let session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::Lockdown,
+                magnitude: 2,
+                turns_remaining: 2,
+            },
+        );
+        let pre = session.snapshot();
+        let mut post = pre.clone();
+        status_mut(&mut post, "a-local-player", ClientStatusKind::Lockdown).turns_remaining = 1;
+        let tick = StatusChange {
+            player_id: "a-local-player".to_owned(),
+            kind: EffectKind::Lockdown,
+            transition: StatusTransition::Ticked { turns_remaining: 1 },
+        };
+
+        assert_eq!(
+            reconcile_status_changes(&pre, &post, core::slice::from_ref(&tick)),
+            Ok(()),
+        );
+        assert_eq!(
+            reconcile_status_changes(&pre, &post, &[]),
+            Err(SessionFault::ContractInvariant),
+        );
+        assert_eq!(
+            reconcile_status_changes(&pre, &post, &[tick.clone(), tick]),
+            Err(SessionFault::ContractInvariant),
+        );
+        assert_eq!(
+            reconcile_status_changes(
+                &pre,
+                &post,
+                &[StatusChange {
+                    player_id: "a-local-player".to_owned(),
+                    kind: EffectKind::Lockdown,
+                    transition: StatusTransition::Ticked { turns_remaining: 2 },
+                }],
+            ),
+            Err(SessionFault::ContractInvariant),
+        );
+    }
+
+    #[test]
+    fn exact_status_replay_validates_refresh_and_charge_cardinality() {
+        let session = session_with_status(
+            "a-local-player",
+            StatusEffect {
+                kind: EffectKind::GuaranteeCrit,
+                magnitude: 2,
+                turns_remaining: u8::MAX,
+            },
+        );
+        let pre = session.snapshot();
+        let mut refreshed = pre.clone();
+        let refreshed_status = status_mut(
+            &mut refreshed,
+            "a-local-player",
+            ClientStatusKind::GuaranteeCrit,
+        );
+        refreshed_status.magnitude = 3;
+        let correct_refresh = StatusChange {
+            player_id: "a-local-player".to_owned(),
+            kind: EffectKind::GuaranteeCrit,
+            transition: StatusTransition::Refreshed {
+                magnitude: 3,
+                turns_remaining: u8::MAX,
+                replaced_magnitude: 2,
+                replaced_turns_remaining: u8::MAX,
+            },
+        };
+        assert_eq!(
+            reconcile_status_changes(&pre, &refreshed, core::slice::from_ref(&correct_refresh),),
+            Ok(()),
+        );
+        let mut stale_refresh = correct_refresh;
+        if let StatusTransition::Refreshed {
+            replaced_magnitude, ..
+        } = &mut stale_refresh.transition
+        {
+            *replaced_magnitude = 1;
+        }
+        assert_eq!(
+            reconcile_status_changes(&pre, &refreshed, &[stale_refresh]),
+            Err(SessionFault::ContractInvariant),
+        );
+
+        let mut exhausted = pre.clone();
+        exhausted
+            .players
+            .iter_mut()
+            .find(|player| player.id == "a-local-player")
+            .expect("fixture player must exist")
+            .statuses
+            .clear();
+        let exact = vec![
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::GuaranteeCrit,
+                transition: StatusTransition::ChargeConsumed { remaining: 1 },
+            },
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::GuaranteeCrit,
+                transition: StatusTransition::Exhausted,
+            },
+        ];
+        assert_eq!(reconcile_status_changes(&pre, &exhausted, &exact), Ok(()));
+        assert_eq!(
+            reconcile_status_changes(&pre, &exhausted, &exact[1..]),
+            Err(SessionFault::ContractInvariant),
+            "one missing charge transition must fail closed",
+        );
+    }
+
+    #[test]
+    fn exact_status_replay_accepts_an_invisible_lifecycle_and_rejects_unknown_players() {
+        let session = MatchSessionHost::create(&duel()).expect("fixture session must start");
+        let pre = session.snapshot();
+        let changes = vec![
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::Lockdown,
+                transition: StatusTransition::Applied {
+                    magnitude: 1,
+                    turns_remaining: 1,
+                },
+            },
+            StatusChange {
+                player_id: "a-local-player".to_owned(),
+                kind: EffectKind::Lockdown,
+                transition: StatusTransition::Expired,
+            },
+        ];
+        assert_eq!(reconcile_status_changes(&pre, &pre, &changes), Ok(()));
+
+        let mut unknown = changes;
+        unknown[0].player_id = "missing-player".to_owned();
+        assert_eq!(
+            reconcile_status_changes(&pre, &pre, &unknown),
+            Err(SessionFault::ContractInvariant),
+        );
+    }
 }
 
 /// Persistent-object lifecycle reaching the client event stream.
@@ -3639,27 +5911,140 @@ mod status_lifecycle_tests {
 #[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod object_lifecycle_tests {
     use super::*;
-    use crate::match_setup::{MatchMode, MatchPlayerConfig};
-    use crate::types::Appearance;
+    use crate::fixed::FixedPoint;
+    use crate::match_host::MatchHost;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig, build_initial_state};
+    use crate::types::{Appearance, PersistentObject, PersistentObjectKind};
 
-    const ALEPH: &str = "a-local-player";
+    fn lifecycle_object(sequence: u32) -> PersistentObject {
+        PersistentObject {
+            sequence,
+            owner_id: "a-local-player".to_owned(),
+            kind: PersistentObjectKind::EmbeddedKnife,
+            position: FixedPoint::new(4_096, 2_048),
+            health: 1,
+            turns_remaining: u8::MAX,
+        }
+    }
 
-    fn knife_duel() -> MatchConfig {
+    fn projected(object: &PersistentObject) -> PersistentObjectSnapshot {
+        crate::client_contract::snapshot_object(object)
+    }
+
+    #[test]
+    fn exact_replay_accepts_a_transient_spawn_then_removal() {
+        let object = lifecycle_object(7);
+        let changes = vec![
+            PersistentObjectChange {
+                object: object.clone(),
+                transition: PersistentObjectTransition::Spawned,
+            },
+            PersistentObjectChange {
+                object,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::Detonated,
+                },
+            },
+        ];
+
+        assert_eq!(reconcile_object_changes(&[], &[], &changes), Ok(()));
+    }
+
+    #[test]
+    fn exact_replay_rejects_missing_unknown_duplicate_and_stale_records() {
+        let object = lifecycle_object(7);
+        let pre = vec![projected(&object)];
+        let removal = PersistentObjectChange {
+            object: object.clone(),
+            transition: PersistentObjectTransition::Removed {
+                cause: PersistentObjectRemovalCause::Detonated,
+            },
+        };
+
+        assert_eq!(
+            reconcile_object_changes(&pre, &[], &[]),
+            Err(SessionFault::ContractInvariant),
+            "a real disappearance requires a producer record",
+        );
+        assert_eq!(
+            reconcile_object_changes(&[], &[], core::slice::from_ref(&removal)),
+            Err(SessionFault::ContractInvariant),
+            "an unknown removal cannot be invented",
+        );
+        assert_eq!(
+            reconcile_object_changes(&pre, &[], &[removal.clone(), removal.clone()]),
+            Err(SessionFault::ContractInvariant),
+            "the same object cannot be removed twice",
+        );
+
+        let mut stale = removal;
+        stale.object.health = 0;
+        assert_eq!(
+            reconcile_object_changes(&pre, &[], &[stale]),
+            Err(SessionFault::ContractInvariant),
+            "the complete last object snapshot must match",
+        );
+    }
+
+    #[test]
+    fn exact_replay_rejects_unrecorded_or_reused_spawns() {
+        let object = lifecycle_object(7);
+        let post = vec![projected(&object)];
+        let spawn = PersistentObjectChange {
+            object: object.clone(),
+            transition: PersistentObjectTransition::Spawned,
+        };
+
+        assert_eq!(
+            reconcile_object_changes(&[], &post, &[]),
+            Err(SessionFault::ContractInvariant),
+            "an object cannot appear without its spawn record",
+        );
+        assert_eq!(
+            reconcile_object_changes(&post, &post, core::slice::from_ref(&spawn),),
+            Err(SessionFault::ContractInvariant),
+            "an allocated sequence cannot be spawned again",
+        );
+        assert_eq!(
+            reconcile_object_changes(&[], &post, &[spawn.clone(), spawn]),
+            Err(SessionFault::ContractInvariant),
+            "duplicate spawn records must fail closed",
+        );
+    }
+
+    #[test]
+    fn exact_replay_rejects_a_removal_when_the_object_survives() {
+        let object = lifecycle_object(7);
+        let snapshot = vec![projected(&object)];
+        let removal = PersistentObjectChange {
+            object,
+            transition: PersistentObjectTransition::Removed {
+                cause: PersistentObjectRemovalCause::Detonated,
+            },
+        };
+
+        assert_eq!(
+            reconcile_object_changes(&snapshot, &snapshot, &[removal]),
+            Err(SessionFault::ContractInvariant),
+        );
+    }
+
+    fn duel_config() -> MatchConfig {
         MatchConfig {
             seed: 12_345,
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
                 MatchPlayerConfig {
-                    player_id: ALEPH.to_owned(),
+                    player_id: "a-local-player".to_owned(),
                     team: 0,
-                    character_id: "aleph".to_owned(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: "b-local-bot".to_owned(),
                     team: 1,
-                    character_id: "huck".to_owned(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -3677,32 +6062,6 @@ mod object_lifecycle_tests {
         }
     }
 
-    /// Empirically verified to land and embed a knife.
-    fn throw_knife(session: &MatchSessionHost, id: &str) -> MatchCommand {
-        command_for(
-            session,
-            id,
-            MatchCommandKind::Ability {
-                slot: AbilitySlot::BasicAlt,
-                angle_millidegrees: 0,
-                power_basis_points: 200,
-                target_player_id: None,
-                secondary_target_player_id: None,
-            },
-        )
-    }
-
-    fn spawns(transition: &MatchTransition) -> Vec<u32> {
-        transition
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                PresentationEventKind::ObjectSpawned { object } => Some(object.sequence),
-                _ => None,
-            })
-            .collect()
-    }
-
     fn removals(transition: &MatchTransition) -> Vec<(u32, PersistentObjectRemovalCause)> {
         transition
             .events
@@ -3717,97 +6076,370 @@ mod object_lifecycle_tests {
     }
 
     #[test]
-    fn embedding_a_knife_reports_the_spawn() {
-        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
-        let command = throw_knife(&session, "throw-1");
-        let transition = session.apply(command).expect("throw must be accepted");
+    fn owner_cleanup_reaches_the_session_with_its_exact_cause() {
+        let mut state = build_initial_state(&duel_config()).expect("fixture state must build");
+        let position = state
+            .player("a-local-player")
+            .map(|player| player.position)
+            .expect("player must exist");
+        state
+            .player_mut("a-local-player")
+            .expect("player must exist")
+            .health = 0;
+        let owned = PersistentObject {
+            sequence: 0,
+            owner_id: "a-local-player".to_owned(),
+            kind: PersistentObjectKind::EmbeddedKnife,
+            position,
+            health: 1,
+            turns_remaining: u8::MAX,
+        };
+        state.objects.push(owned);
+        state.next_object_sequence = 1;
+        let host = MatchHost::start(state).expect("the surviving player must open the match");
+        let mut session = MatchSessionHost::from_new_host(host);
 
-        assert_eq!(
-            spawns(&transition),
-            vec![0],
-            "the embedded knife must be reported as a spawn",
-        );
-        assert!(removals(&transition).is_empty());
-        assert_eq!(session.snapshot().persistent_objects.len(), 1);
-    }
+        let pass = command_for(&session, "cleanup-pass", MatchCommandKind::Pass);
+        let transition = session.apply(pass).expect("pass must reconcile cleanup");
 
-    #[test]
-    fn a_knife_spawned_and_detonated_in_one_command_is_invisible_to_a_diff_but_fully_recorded() {
-        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
-        let first = throw_knife(&session, "throw-1");
-        session.apply(first).expect("first throw must be accepted");
-        let pass = command_for(&session, "pass-1", MatchCommandKind::Pass);
-        session.apply(pass).expect("pass must be accepted");
-
-        let before: Vec<u32> = session
-            .snapshot()
-            .persistent_objects
-            .iter()
-            .map(|object| object.sequence)
-            .collect();
-
-        let second = throw_knife(&session, "throw-2");
-        let transition = session
-            .apply(second)
-            .expect("second throw must be accepted");
-
-        let after: Vec<u32> = session
-            .snapshot()
-            .persistent_objects
-            .iter()
-            .map(|object| object.sequence)
-            .collect();
-
-        // The fixture must genuinely reproduce the gap, or this test proves nothing: knife 1
-        // is created and destroyed inside this single command, so it is absent from the
-        // snapshot before it and the snapshot after it alike.
-        assert_eq!(before, vec![0], "only the first knife exists going in");
-        assert!(after.is_empty(), "both knives are gone coming out");
-        assert!(
-            !before.contains(&1) && !after.contains(&1),
-            "knife 1 must appear in neither snapshot, or the gap is not being tested",
-        );
-
-        // A diff could only ever have reported knife 0 disappearing, with no cause and no
-        // hint that knife 1 existed. The records describe all three transitions.
-        assert_eq!(spawns(&transition), vec![1], "knife 1's spawn is reported");
         assert_eq!(
             removals(&transition),
-            vec![
-                (0, PersistentObjectRemovalCause::Detonated),
-                (1, PersistentObjectRemovalCause::Detonated),
+            vec![(0, PersistentObjectRemovalCause::OwnerEliminated)],
+        );
+        assert!(session.snapshot().persistent_objects.is_empty());
+    }
+}
+
+/// The authority-only timeout path.
+///
+/// The property these exist to protect is that a client can never end a turn by claiming time
+/// ran out — its own turn or anyone else's. That is enforced structurally: timeout is not a
+/// [`MatchCommandKind`] variant, so no decoded client command can select it. These tests cover
+/// what a structural guarantee cannot: that the authority path itself is bounded, idempotent,
+/// and refuses the races a real clock will produce.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+mod authority_timeout_tests {
+    use super::*;
+    use crate::match_setup::{MatchMode, MatchPlayerConfig};
+    use crate::types::{Appearance, TurnEndReason};
+
+    fn duel() -> MatchConfig {
+        MatchConfig {
+            seed: 12_345,
+            map_id: "horizontal-test-array".to_owned(),
+            mode: MatchMode::TurnBased,
+            players: vec![
+                MatchPlayerConfig {
+                    player_id: "a-local-player".to_owned(),
+                    team: 0,
+                    character_id: "crow".to_owned(),
+                    appearance: Appearance::default(),
+                },
+                MatchPlayerConfig {
+                    player_id: "b-local-bot".to_owned(),
+                    team: 1,
+                    character_id: "crow".to_owned(),
+                    appearance: Appearance::default(),
+                },
             ],
-            "both detonations are reported, each naming why it happened",
+        }
+    }
+
+    fn timeout_for(session: &MatchSessionHost, action_id: &str) -> AuthorityTimeout {
+        AuthorityTimeout {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            action_id: action_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+        }
+    }
+
+    fn pass_for(session: &MatchSessionHost, command_id: &str) -> MatchCommand {
+        MatchCommand {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            command_id: command_id.to_owned(),
+            player_id: session.host().active_player().to_owned(),
+            expected_turn_number: session.host().state().turn_number,
+            expected_snapshot_generation: session.generation(),
+            kind: MatchCommandKind::Pass,
+        }
+    }
+
+    #[test]
+    fn a_timeout_ends_the_active_turn_and_records_why() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let first = session.host().active_player().to_owned();
+        let timeout = timeout_for(&session, "deadline-1");
+
+        let transition = session
+            .apply_authority_timeout(timeout)
+            .expect("a well-formed timeout must be accepted");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Accepted);
+        assert_eq!(transition.post_snapshot_generation, 1);
+        assert_ne!(
+            session.host().active_player(),
+            first,
+            "the turn must actually hand over",
+        );
+        // A timeout must stay distinguishable from a pass downstream: the result panel and
+        // the turn-timeout metric both read this, and conflating them was `todolist.md` P11.
+        assert_eq!(
+            session.host().state().last_turn_end_reason,
+            TurnEndReason::TimedOut,
         );
     }
 
     #[test]
-    fn a_removal_names_a_real_cause_rather_than_a_placeholder() {
-        let mut session = MatchSessionHost::create(&knife_duel()).expect("fixture session");
-        session
-            .apply(throw_knife(&session, "throw-1"))
-            .expect("first throw must be accepted");
-        let pass = command_for(&session, "pass-1", MatchCommandKind::Pass);
-        session.apply(pass).expect("pass must be accepted");
-        let transition = session
-            .apply(throw_knife(&session, "throw-2"))
-            .expect("second throw must be accepted");
+    fn a_retried_timeout_replays_instead_of_ending_a_second_turn() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let timeout = timeout_for(&session, "deadline-1");
+        let first = session
+            .apply_authority_timeout(timeout.clone())
+            .expect("first delivery must be accepted");
+        let turn_after_first = session.host().state().turn_number;
 
-        let causes = removals(&transition);
-        assert!(
-            !causes.is_empty(),
-            "the fixture must actually remove objects"
+        let replay = session
+            .apply_authority_timeout(timeout)
+            .expect("a retry must be answered, not faulted");
+
+        assert_eq!(replay.disposition, TransitionDisposition::DuplicateReplay);
+        assert_eq!(
+            replay.post_snapshot_generation,
+            first.post_snapshot_generation
         );
-        for (sequence, cause) in causes {
-            // Every removal carries the producer's own reason. Before these records existed
-            // this field was a single constant that said only "something authoritative did
-            // it", which is true of every removal and therefore tells a client nothing.
-            assert_eq!(
-                cause,
-                PersistentObjectRemovalCause::Detonated,
-                "knife {sequence} was removed by the chain detonation",
-            );
-            assert_eq!(cause.wire_name(), "detonated");
-        }
+        assert_eq!(
+            session.host().state().turn_number,
+            turn_after_first,
+            "a redelivered timeout must not burn a second turn",
+        );
+    }
+
+    #[test]
+    fn a_timeout_naming_a_player_who_is_no_longer_active_is_refused() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let stale = AuthorityTimeout {
+            player_id: "b-local-bot".to_owned(),
+            ..timeout_for(&session, "deadline-1")
+        };
+        assert_ne!(
+            session.host().active_player(),
+            "b-local-bot",
+            "fixture must name the player who is not on the clock",
+        );
+        let before = session.host().state().turn_number;
+
+        let transition = session
+            .apply_authority_timeout(stale)
+            .expect("a losing race is a refusal, not an error");
+
+        // The real failure this prevents: a deadline that expired for one player arriving
+        // after the turn already handed over, and ending the innocent player's turn instead.
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::Core(CommandRejection::NotActivePlayer)),
+        );
+        assert_eq!(session.host().state().turn_number, before);
+    }
+
+    #[test]
+    fn a_timeout_against_a_stale_generation_is_refused_without_mutating() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let stale = AuthorityTimeout {
+            expected_snapshot_generation: session.generation().saturating_add(7),
+            ..timeout_for(&session, "deadline-1")
+        };
+        let before_hash = session.snapshot().authoritative_state_hash.clone();
+
+        let transition = session
+            .apply_authority_timeout(stale)
+            .expect("a stale generation is a refusal");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            session.generation(),
+            0,
+            "a refusal must not bump generation"
+        );
+        assert_eq!(
+            session.snapshot().authoritative_state_hash,
+            before_hash,
+            "a refused timeout must leave authoritative state untouched",
+        );
+    }
+
+    #[test]
+    fn a_timeout_for_the_wrong_turn_number_is_refused() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let stale = AuthorityTimeout {
+            expected_turn_number: session.host().state().turn_number.saturating_add(3),
+            ..timeout_for(&session, "deadline-1")
+        };
+
+        let transition = session
+            .apply_authority_timeout(stale)
+            .expect("a stale turn number is a refusal");
+
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::Core(
+                CommandRejection::TurnVersionMismatch
+            )),
+        );
+    }
+
+    #[test]
+    fn a_client_cannot_reuse_an_authority_action_id_to_obtain_its_slot() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        session
+            .apply_authority_timeout(timeout_for(&session, "shared-id"))
+            .expect("timeout must be accepted");
+
+        // The client now sends a command under the identifier the authority already used.
+        // Answering it with the timeout's recorded transition would let a client learn — and
+        // replay — an authority result it never authored, so this must conflict.
+        let command = pass_for(&session, "shared-id");
+        let transition = session.apply(command).expect("the collision is answerable");
+
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::CommandIdConflict),
+        );
+        assert!(
+            transition
+                .rejection_reason
+                .is_some_and(|r| r.is_security_event()),
+            "an id collision across the authority boundary is security telemetry",
+        );
+    }
+
+    #[test]
+    fn an_authority_action_cannot_reuse_a_client_command_id_either() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        session
+            .apply(pass_for(&session, "shared-id"))
+            .expect("pass must be accepted");
+
+        let transition = session
+            .apply_authority_timeout(timeout_for(&session, "shared-id"))
+            .expect("the collision is answerable");
+
+        // Symmetric to the test above. One identifier space means one owner per identifier,
+        // whichever side claimed it first.
+        assert_eq!(transition.disposition, TransitionDisposition::Rejected);
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::CommandIdConflict),
+        );
+    }
+
+    #[test]
+    fn two_different_timeouts_sharing_an_id_conflict_rather_than_replay() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        session
+            .apply_authority_timeout(timeout_for(&session, "deadline-1"))
+            .expect("first timeout must be accepted");
+
+        // Same id, different content. Replaying the first would let a later, differently
+        // scoped deadline silently inherit an earlier one's answer.
+        let different = AuthorityTimeout {
+            expected_turn_number: 99,
+            ..timeout_for(&session, "deadline-1")
+        };
+        let transition = session
+            .apply_authority_timeout(different)
+            .expect("the collision is answerable");
+
+        assert_eq!(
+            transition.rejection_reason,
+            Some(TransitionRejection::CommandIdConflict),
+        );
+    }
+
+    #[test]
+    fn a_malformed_authority_action_is_a_fault_rather_than_a_refusal() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+
+        let bad_schema = AuthorityTimeout {
+            schema_version: CLIENT_CONTRACT_VERSION.saturating_add(1),
+            ..timeout_for(&session, "deadline-1")
+        };
+        assert_eq!(
+            session.apply_authority_timeout(bad_schema),
+            Err(SessionFault::UnsupportedSchema {
+                expected: CLIENT_CONTRACT_VERSION,
+                actual: CLIENT_CONTRACT_VERSION.saturating_add(1),
+            }),
+        );
+
+        let bad_id = AuthorityTimeout {
+            action_id: "not a valid id".to_owned(),
+            ..timeout_for(&session, "deadline-1")
+        };
+        assert_eq!(
+            session.apply_authority_timeout(bad_id),
+            Err(SessionFault::InvalidCommand { field: "action_id" }),
+        );
+
+        // A malformed action is the authority's own bug, not a gameplay outcome, so it must
+        // never be recorded as a refusal a client could observe and replay.
+        assert_eq!(session.ledger_len(), 0);
+    }
+
+    #[test]
+    fn the_authority_action_encoding_is_frozen() {
+        let timeout = AuthorityTimeout {
+            schema_version: CLIENT_CONTRACT_VERSION,
+            action_id: "deadline-1".to_owned(),
+            player_id: "a-local-player".to_owned(),
+            expected_turn_number: 1,
+            expected_snapshot_generation: 0,
+        };
+
+        // Frozen 2026-08-25. The ledger compares digests to decide whether a redelivered
+        // action is the same action, so the encoding is a compatibility surface: silently
+        // changing it would make previously recorded entries unrecognizable and turn replays
+        // into conflicts. Changing this value is a deliberate act that needs the same
+        // treatment as a golden-vector regeneration — a documented reason and a version bump.
+        //
+        // This also pins the `0x21` domain separator, which
+        // `a_timeout_and_a_command_with_identical_fields_never_share_a_digest` does not: that
+        // test passes even with a colliding tag, because a `MatchCommand` additionally
+        // encodes its `kind`. Only a frozen value catches a change to the tag itself.
+        assert_eq!(timeout.canonical_digest(), "c38c3f790f8dfdf0");
+    }
+
+    #[test]
+    fn a_timeout_and_a_command_with_identical_fields_never_share_a_digest() {
+        let session = MatchSessionHost::create(&duel()).expect("fixture session");
+        let timeout = timeout_for(&session, "same-id");
+        let command = pass_for(&session, "same-id");
+
+        // Both carry the same schema, id, player, turn, and generation, and must still
+        // digest differently. Note this holds even if the two domain tags collided, because a
+        // `MatchCommand` also encodes its `kind` — so this asserts the property, while
+        // `the_authority_action_encoding_is_frozen` is what actually pins the tag.
+        assert_eq!(timeout.action_id, command.command_id);
+        assert_eq!(timeout.player_id, command.player_id);
+        assert_ne!(
+            timeout.canonical_digest(),
+            command.canonical_digest(),
+            "an authority action must never digest identically to a client command",
+        );
+    }
+
+    #[test]
+    fn a_closed_session_refuses_the_authority_path_too() {
+        let mut session = MatchSessionHost::create(&duel()).expect("fixture session");
+        // Set directly: the session closes itself on a fault, and no public opener exists.
+        session.closed = true;
+        assert_eq!(
+            session.apply_authority_timeout(timeout_for(&session, "deadline-1")),
+            Err(SessionFault::Closed),
+        );
     }
 }

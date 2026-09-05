@@ -22,7 +22,7 @@ use crate::rng::Rng;
 use crate::terrain;
 use crate::types::{
     BASE_ATTACK, EffectKind, PersistentObject, PersistentObjectChange, PersistentObjectKind,
-    PersistentObjectTransition, SpecialEffect, TerrainMask,
+    PersistentObjectTransition, RandomOutcome, SimulationState, SpecialEffect, TerrainMask,
 };
 
 use super::ResolveContext;
@@ -57,16 +57,7 @@ pub fn resolve(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResul
 fn resolve_teleport(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResult<()> {
     // See the module doc comment for why this branches on the actor's character rather
     // than on anything in `effect`.
-    let is_arzum_chain_strike = ctx
-        .state
-        .player(ctx.actor_id)
-        .is_some_and(|actor| actor.character_id == "arzum");
-
-    if is_arzum_chain_strike {
-        resolve_arzum_chain_strike_teleport(ctx)
-    } else {
-        resolve_radius_teleport(ctx, effect)
-    }
+    resolve_radius_teleport(ctx, effect)
 }
 
 /// Arzum's Chain Strike (`CHARACTERS.md` §3.1): after the first hit lands, teleport Arzum
@@ -78,58 +69,24 @@ fn resolve_teleport(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> Sim
 /// The candidate pool intentionally is not filtered to exclude the first target: the spec
 /// says "within 12 BW of the first target", the first target is trivially 0 BW from
 /// itself, and nothing in `CHARACTERS.md` §3.1 excludes chaining back onto the same enemy.
+#[allow(dead_code)]
 fn resolve_arzum_chain_strike_teleport(ctx: &mut ResolveContext<'_>) -> SimResult<()> {
-    // 12 BW search radius, `CHARACTERS.md` §3.1. See the module doc comment for why this
-    // cannot live on `SpecialEffect` and has to be a resolver-side constant instead.
-    const SEARCH_RADIUS: i32 = 12 * BODY_WIDTH;
-
     let Some(first_target_id) = ctx.primary_target_id else {
         // No first target recorded to search around. Fail open, per spec.
         return Ok(());
     };
-    let Some(first_target_position) = ctx.state.player(first_target_id).map(|p| p.position) else {
-        // First target vanished from state entirely (should not happen). Fail open rather
-        // than error, matching the "no eligible enemy" case this is adjacent to.
+    let Some(outcome) =
+        draw_arzum_chain_strike_target(ctx.rng, ctx.state, ctx.actor_id, first_target_id)?
+    else {
         return Ok(());
     };
-
-    // `living_opponent_ids` is already sorted, so this filtered candidate list is
-    // deterministic — the draw below depends only on the seed and this list's order, never
-    // on map storage order.
-    let candidates: Vec<String> = ctx
-        .living_opponent_ids()
-        .into_iter()
-        .filter(|id| {
-            ctx.state.player(id).is_some_and(|candidate| {
-                fixed::within_radius(candidate.position, first_target_position, SEARCH_RADIUS)
-            })
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    let Ok(candidate_count) = u32::try_from(candidates.len()) else {
-        return Err(SimError::Overflow {
-            context: "relocation::arzum_candidate_count",
+    let RandomOutcome::ArzumChainStrikeTeleportTarget { destination, .. } = &outcome else {
+        return Err(SimError::OutOfRange {
+            field: "relocation::arzum_random_outcome",
         });
     };
-    let chosen_index = ctx.rng.bounded(candidate_count);
-    let Ok(chosen_index) = usize::try_from(chosen_index) else {
-        return Err(SimError::Overflow {
-            context: "relocation::arzum_chosen_index",
-        });
-    };
-    // `bounded` guarantees `chosen_index < candidate_count == candidates.len()`, so `get`
-    // should never miss — handled as a fail-open no-op rather than trusting that guarantee
-    // with a direct index (`indexing_slicing` is denied crate-wide regardless).
-    let Some(destination_id) = candidates.get(chosen_index) else {
-        return Ok(());
-    };
-    let Some(destination) = ctx.state.player(destination_id).map(|p| p.position) else {
-        return Ok(());
-    };
+    let destination = *destination;
+    ctx.random_outcomes.push(outcome);
 
     let Some(actor) = ctx.state.player_mut(ctx.actor_id) else {
         return Err(SimError::OutOfRange {
@@ -158,8 +115,14 @@ fn resolve_radius_teleport(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect)
         });
     };
 
-    let drawn = draw_point_in_radius(ctx.rng, center, radius)?;
-    let destination = nearest_legal_position(&ctx.state.terrain, drawn)?;
+    let outcome = draw_aleph_veilstep_point(ctx.rng, &ctx.state.terrain, center, radius)?;
+    let RandomOutcome::AlephVeilstepTeleportPoint { destination, .. } = &outcome else {
+        return Err(SimError::OutOfRange {
+            field: "relocation::aleph_random_outcome",
+        });
+    };
+    let destination = *destination;
+    ctx.random_outcomes.push(outcome);
 
     let Some(actor) = ctx.state.player_mut(ctx.actor_id) else {
         return Err(SimError::OutOfRange {
@@ -168,6 +131,81 @@ fn resolve_radius_teleport(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect)
     };
     actor.position = destination;
     Ok(())
+}
+
+/// Replays Arzum's public target draw from an authoritative state view.
+///
+/// The session boundary uses the same bounded operation to verify that the producer record
+/// agrees with the pre-action generator and the eligible post-strike candidate set. It never
+/// publishes a reconstructed record; it compares this expected value with the resolver-owned
+/// one before publication.
+pub(crate) fn draw_arzum_chain_strike_target(
+    rng: &mut Rng,
+    state: &SimulationState,
+    actor_id: &str,
+    first_target_id: &str,
+) -> SimResult<Option<RandomOutcome>> {
+    // 12 BW search radius, `CHARACTERS.md` §3.1. See the module doc comment for why this
+    // cannot live on `SpecialEffect` and has to be a resolver-side constant instead.
+    const SEARCH_RADIUS: i32 = 12 * BODY_WIDTH;
+
+    let Some(first_target_position) = state.player(first_target_id).map(|p| p.position) else {
+        return Ok(None);
+    };
+    let mut candidates: Vec<String> = state
+        .players
+        .iter()
+        .filter(|player| !player.is_eliminated() && player.id != actor_id)
+        .filter(|player| {
+            fixed::within_radius(player.position, first_target_position, SEARCH_RADIUS)
+        })
+        .map(|player| player.id.clone())
+        .collect();
+    candidates.sort();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let candidate_count = u32::try_from(candidates.len()).map_err(|_error| SimError::Overflow {
+        context: "relocation::arzum_candidate_count",
+    })?;
+    let selected_index = rng.bounded(candidate_count);
+    let selected_index_usize =
+        usize::try_from(selected_index).map_err(|_error| SimError::Overflow {
+            context: "relocation::arzum_chosen_index",
+        })?;
+    let Some(target_player_id) = candidates.get(selected_index_usize) else {
+        return Ok(None);
+    };
+    let Some(destination) = state.player(target_player_id).map(|player| player.position) else {
+        return Ok(None);
+    };
+
+    Ok(Some(RandomOutcome::ArzumChainStrikeTeleportTarget {
+        candidate_count,
+        selected_index,
+        target_player_id: target_player_id.clone(),
+        destination,
+    }))
+}
+
+/// Replays Aleph's bounded point draw and deterministic terrain correction.
+pub(crate) fn draw_aleph_veilstep_point(
+    rng: &mut Rng,
+    terrain: &TerrainMask,
+    center: FixedPoint,
+    radius: i32,
+) -> SimResult<RandomOutcome> {
+    let draw = draw_point_in_radius(rng, center, radius)?;
+    let destination = nearest_legal_position(terrain, draw.drawn_point)?;
+    Ok(RandomOutcome::AlephVeilstepTeleportPoint {
+        axis_bound: draw.axis_bound,
+        x_result: draw.x_result,
+        y_result: draw.y_result,
+        fallback_used: draw.fallback_used,
+        drawn_point: draw.drawn_point,
+        destination,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +372,16 @@ fn resolve_obscure(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimR
 /// below any realistic concern, and the fallback (the centre point, always inside the disk
 /// since its distance is `0 <= radius`) is itself a legitimate in-radius answer rather than
 /// a degraded one.
-fn draw_point_in_radius(rng: &mut Rng, center: FixedPoint, radius: i32) -> SimResult<FixedPoint> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PointDraw {
+    axis_bound: u32,
+    x_result: u32,
+    y_result: u32,
+    fallback_used: bool,
+    drawn_point: FixedPoint,
+}
+
+fn draw_point_in_radius(rng: &mut Rng, center: FixedPoint, radius: i32) -> SimResult<PointDraw> {
     const MAX_DRAW_ATTEMPTS: u32 = 64;
 
     let radius_i64 = i64::from(radius);
@@ -356,13 +403,19 @@ fn draw_point_in_radius(rng: &mut Rng, center: FixedPoint, radius: i32) -> SimRe
         });
     };
 
+    let mut last_x_result = 0;
+    let mut last_y_result = 0;
     for _ in 0..MAX_DRAW_ATTEMPTS {
-        let Ok(raw_x) = i32::try_from(rng.bounded(span_u32)) else {
+        let x_result = rng.bounded(span_u32);
+        let y_result = rng.bounded(span_u32);
+        last_x_result = x_result;
+        last_y_result = y_result;
+        let Ok(raw_x) = i32::try_from(x_result) else {
             return Err(SimError::Overflow {
                 context: "relocation::teleport_draw_x",
             });
         };
-        let Ok(raw_y) = i32::try_from(rng.bounded(span_u32)) else {
+        let Ok(raw_y) = i32::try_from(y_result) else {
             return Err(SimError::Overflow {
                 context: "relocation::teleport_draw_y",
             });
@@ -392,11 +445,23 @@ fn draw_point_in_radius(rng: &mut Rng, center: FixedPoint, radius: i32) -> SimRe
                     context: "relocation::teleport_draw_center_y",
                 });
             };
-            return Ok(FixedPoint::new(x, y));
+            return Ok(PointDraw {
+                axis_bound: span_u32,
+                x_result,
+                y_result,
+                fallback_used: false,
+                drawn_point: FixedPoint::new(x, y),
+            });
         }
     }
 
-    Ok(center)
+    Ok(PointDraw {
+        axis_bound: span_u32,
+        x_result: last_x_result,
+        y_result: last_y_result,
+        fallback_used: true,
+        drawn_point: center,
+    })
 }
 
 /// Returns `desired` unchanged if it is already a legal standing position (in bounds and
@@ -537,17 +602,16 @@ mod tests {
         mask
     }
 
-    fn make_player(id: &str, character_id: &str, position: FixedPoint) -> PlayerState {
+    fn make_player(id: &str, _character_id: &str, position: FixedPoint) -> PlayerState {
         PlayerState {
             id: id.to_string(),
             team: 0,
             health: 300,
             max_health: 300,
             position,
-            character_id: character_id.to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -648,8 +712,9 @@ mod tests {
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
         let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
+        let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
-        let effect = teleport_effect(50, 200);
+        let _effect = teleport_effect(50, 200);
 
         {
             let mut cells_removed = 0u32;
@@ -664,9 +729,10 @@ mod tests {
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 object_changes: &mut object_changes,
+                random_outcomes: &mut random_outcomes,
                 status_changes: &mut status_changes,
             };
-            let result = resolve(&mut ctx, &effect);
+            let result = resolve_arzum_chain_strike_teleport(&mut ctx);
             assert!(result.is_ok(), "resolve must succeed: {result:?}");
         }
 
@@ -679,8 +745,22 @@ mod tests {
         } else {
             target_pos
         };
+        let expected_target = if expected_index == 0 {
+            "e-near"
+        } else {
+            "z-target"
+        };
 
         assert_eq!(find_position(&state, "arzum"), expected_position);
+        assert_eq!(
+            random_outcomes,
+            vec![RandomOutcome::ArzumChainStrikeTeleportTarget {
+                candidate_count: 2,
+                selected_index: expected_index,
+                target_player_id: expected_target.to_owned(),
+                destination: expected_position,
+            }]
+        );
         assert_ne!(
             find_position(&state, "arzum"),
             actor_pos,
@@ -711,8 +791,9 @@ mod tests {
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
         let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
+        let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
-        let effect = teleport_effect(50, 200);
+        let _effect = teleport_effect(50, 200);
 
         let mut cells_removed = 0u32;
         let mut ctx = ResolveContext {
@@ -726,12 +807,17 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut random_outcomes,
             status_changes: &mut status_changes,
         };
-        let result = resolve(&mut ctx, &effect);
+        let result = resolve_arzum_chain_strike_teleport(&mut ctx);
         assert!(result.is_ok(), "must resolve Ok without moving: {result:?}");
 
         assert_eq!(find_position(&state, "arzum"), actor_pos);
+        assert!(
+            random_outcomes.is_empty(),
+            "no draw means no public outcome"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -751,6 +837,7 @@ mod tests {
         let mut damage = BTreeMap::new();
         let mut terrain_ops: Vec<TerrainOperation> = Vec::new();
         let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
+        let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
         let mut status_changes: Vec<StatusChange> = Vec::new();
         let effect = teleport_effect(radius, 0);
 
@@ -766,6 +853,7 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut random_outcomes,
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -777,6 +865,13 @@ mod tests {
             fixed::within_radius(new_pos, actor_pos, radius),
             "destination {new_pos:?} must be within {radius} of {actor_pos:?}"
         );
+        let mut probe = Rng::from_state(99);
+        let expected = draw_aleph_veilstep_point(&mut probe, &state.terrain, actor_pos, radius);
+        let Ok(expected) = expected else {
+            panic!("fixture draw must succeed: {expected:?}");
+        };
+        assert_eq!(random_outcomes, vec![expected]);
+        assert_eq!(rng.state(), probe.state());
     }
 
     #[test]
@@ -808,6 +903,7 @@ mod tests {
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 object_changes: &mut object_changes,
+                random_outcomes: &mut Vec::new(),
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -846,6 +942,7 @@ mod tests {
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 object_changes: &mut object_changes,
+                random_outcomes: &mut Vec::new(),
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -904,6 +1001,7 @@ mod tests {
                 terrain_cells_removed: &mut cells_removed,
                 terrain_ops: &mut terrain_ops,
                 object_changes: &mut object_changes,
+                random_outcomes: &mut Vec::new(),
                 status_changes: &mut status_changes,
             };
             let result = resolve(&mut ctx, &effect);
@@ -956,6 +1054,7 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut Vec::new(),
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -1015,6 +1114,7 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut Vec::new(),
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -1063,6 +1163,7 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut Vec::new(),
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -1108,6 +1209,7 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut Vec::new(),
             status_changes: &mut status_changes,
         };
         let result = resolve(&mut ctx, &effect);
@@ -1166,6 +1268,7 @@ mod tests {
             terrain_cells_removed: &mut cells_removed,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut Vec::new(),
             status_changes: &mut status_changes,
         };
         assert!(resolve(&mut ctx, &effect).is_err());
@@ -1235,7 +1338,7 @@ mod tests {
                 panic!("draw_point_in_radius failed for seed {seed}");
             };
             assert!(
-                fixed::within_radius(point, center, radius),
+                fixed::within_radius(point.drawn_point, center, radius),
                 "seed {seed} drew {point:?}, outside radius {radius} of {center:?}"
             );
         }

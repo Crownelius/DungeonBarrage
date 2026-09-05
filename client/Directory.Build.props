@@ -1,0 +1,38 @@
+<Project>
+
+  <!--
+    Shared settings for every project in the Godot-free C3 solution.
+
+    The Godot presentation project arrives at C4 and will sit alongside these; nothing here may
+    reference an engine type, so these projects stay testable headlessly (CLIENT_SPEC 8.5).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- The interop layer is the one place unsafe is permitted, mirroring db-sim-ffi being the
+         one crate permitted `unsafe`. Individual projects opt in; nothing opts in by default. -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+
+    <!-- A warning that reaches a reviewer is a warning that gets ignored. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>9999</WarningLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-all</AnalysisLevel>
+
+    <!-- Reproducible output: the same source must produce the same assembly bytes. -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!-- `dotnet restore` in locked mode is a documented gate (CLIENT_SPEC 20), which requires a
+         committed lock file per project. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CA1848;CA1031</NoWarn>
+  </PropertyGroup>
+
+</Project>

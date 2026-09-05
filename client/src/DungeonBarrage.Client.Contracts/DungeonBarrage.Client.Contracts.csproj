@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Managed shapes for the frozen client envelopes. No gameplay model, no engine type, and no
+    behaviour: the authoritative rules live in Rust and this assembly only describes what crosses
+    the boundary (CLIENT_SPEC 8.5).
+  -->
+  <PropertyGroup>
+    <RootNamespace>DungeonBarrage.Client.Contracts</RootNamespace>
+    <AssemblyName>DungeonBarrage.Client.Contracts</AssemblyName>
+  </PropertyGroup>
+
+</Project>

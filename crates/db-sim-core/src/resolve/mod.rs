@@ -35,8 +35,8 @@ use crate::error::SimResult;
 use crate::fixed::FixedPoint;
 use crate::rng::Rng;
 use crate::types::{
-    DamageEvent, EffectKind, PersistentObjectChange, SimulationState, SpecialEffect, StatusChange,
-    StrikeResolution, TerrainOperation,
+    DamageEvent, EffectKind, PersistentObjectChange, RandomOutcome, SimulationState, SpecialEffect,
+    StatusChange, StrikeResolution, TerrainOperation,
 };
 use std::collections::BTreeMap;
 
@@ -65,6 +65,11 @@ pub struct ResolveContext<'a> {
     pub terrain_ops: &'a mut Vec<TerrainOperation>,
     /// Persistent-object lifecycle transitions produced by this action, in exact order.
     pub object_changes: &'a mut Vec<PersistentObjectChange>,
+    /// Public non-strike random outcomes produced by resolvers, in draw-site order.
+    ///
+    /// This records only bounded visible results. The generator state and rejected raw draws
+    /// remain private authoritative details.
+    pub random_outcomes: &'a mut Vec<RandomOutcome>,
     /// Terrain cells removed by this action, accumulated across every
     /// `terrain::apply_operation` call any resolver makes. Seeded by
     /// `command.rs::apply_ability` from the primary attack's own terrain removal and

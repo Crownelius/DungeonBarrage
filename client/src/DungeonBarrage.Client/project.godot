@@ -1,0 +1,34 @@
+; Engine configuration file.
+; Edit through the Godot editor where practical; values here are intentionally reviewable.
+
+config_version=5
+
+[application]
+
+config/name="Dungeon Barrage"
+config/description="Authoritative Rust simulation with a Godot .NET presentation client"
+run/main_scene="res://Scenes/Main.tscn"
+config/features=PackedStringArray("4.7", "C#", "GL Compatibility")
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="canvas_items"
+
+[dotnet]
+
+project/assembly_name="DungeonBarrage.Client"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/default_filters/use_nearest_mipmap_filter=false
+
+[application_run]
+
+disable_stdout=false
+disable_stderr=false

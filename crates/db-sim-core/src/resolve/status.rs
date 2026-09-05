@@ -43,7 +43,7 @@
 //! value.
 
 use crate::error::{SimError, SimResult};
-use crate::fixed::within_radius;
+use crate::fixed::{BODY_WIDTH, within_radius};
 use crate::types::{
     EffectKind, PlayerState, SimulationState, SpecialEffect, StatusChange, StatusEffect,
     StatusTransition,
@@ -72,29 +72,41 @@ pub fn resolve(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResul
 
 /// Chill: reduces the victim's next-turn movement cap.
 ///
-/// Applied to `ctx.primary_target_id` with `magnitude` and `duration_turns` copied
-/// directly from `effect` — the brief states the values come from the effect as-is, with
-/// no scaling performed here. Enforcing the "at most one affected turn" guardrail on
-/// authored content is a validation-time concern (character/content review), not a
-/// runtime one; this resolver transcribes whatever duration the ability was authored with.
+/// A named `ctx.primary_target_id` is applied exactly as authored. Aim-fired projectiles
+/// (Frostfall Mortar from the Godot drag path) name no target; in that case chill the
+/// living opponents standing within one body width of `ctx.impact_point` — the same
+/// window a direct ballistic hit uses. Nobody in range is a no-op, not a command
+/// failure: the mortar still cratered.
 fn resolve_chill(ctx: &mut ResolveContext<'_>, effect: &SpecialEffect) -> SimResult<()> {
-    let Some(target_id) = ctx.primary_target_id else {
-        return Err(SimError::OutOfRange {
-            field: "chill.primary_target_id",
-        });
+    let status = StatusEffect {
+        kind: EffectKind::Chill,
+        magnitude: effect.magnitude,
+        turns_remaining: effect.duration_turns,
     };
-    let Some(target) = ctx.state.player_mut(target_id) else {
-        return Err(SimError::UnknownDefinition);
-    };
-    apply_status(
-        target,
-        StatusEffect {
-            kind: EffectKind::Chill,
-            magnitude: effect.magnitude,
-            turns_remaining: effect.duration_turns,
-        },
-        ctx.status_changes,
-    );
+
+    if let Some(target_id) = ctx.primary_target_id {
+        let Some(target) = ctx.state.player_mut(target_id) else {
+            return Err(SimError::UnknownDefinition);
+        };
+        apply_status(target, status, ctx.status_changes);
+        return Ok(());
+    }
+
+    let impact = ctx.impact_point;
+    let victims: Vec<String> = ctx
+        .living_opponent_ids()
+        .into_iter()
+        .filter(|id| {
+            ctx.state
+                .player(id)
+                .is_some_and(|player| within_radius(player.position, impact, BODY_WIDTH))
+        })
+        .collect();
+    for id in victims {
+        if let Some(target) = ctx.state.player_mut(&id) {
+            apply_status(target, status, ctx.status_changes);
+        }
+    }
     Ok(())
 }
 
@@ -269,8 +281,8 @@ mod tests {
     use crate::rng::Rng;
     use crate::types::TurnEndReason;
     use crate::types::{
-        Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObjectChange, TerrainMask,
-        TerrainOperation,
+        Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObjectChange, RandomOutcome,
+        TerrainMask, TerrainOperation,
     };
     use std::collections::BTreeMap;
 
@@ -285,10 +297,9 @@ mod tests {
             health: 100,
             max_health: 100,
             position,
-            character_id: "test-character".to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -361,6 +372,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         object_changes: Vec<PersistentObjectChange>,
+        random_outcomes: Vec<RandomOutcome>,
         status_changes: Vec<StatusChange>,
     }
 
@@ -373,6 +385,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 object_changes: Vec::new(),
+                random_outcomes: Vec::new(),
                 status_changes: Vec::new(),
             }
         }
@@ -394,6 +407,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 object_changes: &mut self.object_changes,
+                random_outcomes: &mut self.random_outcomes,
                 status_changes: &mut self.status_changes,
             }
         }
@@ -510,16 +524,36 @@ mod tests {
     }
 
     #[test]
-    fn chill_without_primary_target_is_an_error() {
+    fn chill_without_primary_target_and_no_impact_victim_is_a_no_op() {
         let mut harness = Harness::new(vec![make_player("actor", FixedPoint::ZERO)]);
         let mut ctx = harness.ctx("actor", None, FixedPoint::ZERO);
 
+        assert_eq!(resolve(&mut ctx, &chill_effect(2, 1)), Ok(()));
+        assert!(statuses_of(&harness.state, "actor").is_empty());
+    }
+
+    #[test]
+    fn chill_without_primary_target_applies_to_opponent_at_impact() {
+        let mut harness = Harness::new(vec![
+            make_player("actor", FixedPoint::ZERO),
+            make_player("target", FixedPoint::ZERO),
+        ]);
+        let mut ctx = harness.ctx("actor", None, FixedPoint::ZERO);
+
         assert_eq!(
-            resolve(&mut ctx, &chill_effect(2, 1)),
-            Err(SimError::OutOfRange {
-                field: "chill.primary_target_id"
-            })
+            resolve(&mut ctx, &chill_effect(2 * crate::fixed::BODY_WIDTH, 1)),
+            Ok(())
         );
+
+        let statuses = statuses_of(&harness.state, "target");
+        assert_eq!(statuses.len(), 1);
+        let Some(status) = statuses.first() else {
+            panic!("chill must land on the opponent at the impact point");
+        };
+        assert_eq!(status.kind, EffectKind::Chill);
+        assert_eq!(status.magnitude, 2 * crate::fixed::BODY_WIDTH);
+        assert_eq!(status.turns_remaining, 1);
+        assert!(statuses_of(&harness.state, "actor").is_empty());
     }
 
     // -----------------------------------------------------------------------------------

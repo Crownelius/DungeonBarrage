@@ -11,11 +11,13 @@
 
 use std::collections::BTreeSet;
 
-use crate::character;
+use crate::character_roster;
 use crate::error::{SimError, SimResult};
 use crate::map::{self, MapDefinition};
 use crate::match_host::MatchHost;
-use crate::types::{Appearance, MatchPhase, PlayerState, SimulationState, TurnEndReason};
+use crate::types::{
+    Appearance, CHARACTER_KIT_AMMO, MatchPhase, PlayerState, SimulationState, TurnEndReason,
+};
 use crate::{CONTENT_VERSION, SIMULATION_VERSION};
 
 /// Minimum supported roster size for the turn-based mode.
@@ -43,7 +45,7 @@ pub struct MatchPlayerConfig {
     pub player_id: String,
     /// Players with the same team value are allies.
     pub team: u8,
-    /// Stable character definition identifier.
+    /// Stable character identifier. The authority expands it into a fixed kit.
     pub character_id: String,
     /// Cosmetic-only appearance selected before the match.
     pub appearance: Appearance,
@@ -107,18 +109,17 @@ pub fn build_initial_state(config: &MatchConfig) -> SimResult<SimulationState> {
     let mut players = Vec::with_capacity(config.players.len());
 
     for (player_config, spawn) in config.players.iter().zip(definition.spawn_points.iter()) {
-        let character =
-            character::find(&player_config.character_id).ok_or(SimError::UnknownDefinition)?;
+        let profile = character_roster::find(&player_config.character_id)
+            .ok_or(SimError::UnknownDefinition)?;
         players.push(PlayerState {
             id: player_config.player_id.clone(),
             team: player_config.team,
-            health: character.max_health,
-            max_health: character.max_health,
+            health: profile.max_health,
+            max_health: profile.max_health,
             position: *spawn,
-            character_id: player_config.character_id.clone(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: profile.derived_loadout(),
+            ammo: CHARACTER_KIT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: player_config.appearance.clone(),
         });
@@ -163,7 +164,7 @@ fn validate_roster(players: &[MatchPlayerConfig]) -> SimResult<()> {
                 field: "character id",
             });
         }
-        if character::find(&player.character_id).is_none() {
+        if character_roster::find(&player.character_id).is_none() {
             return Err(SimError::UnknownDefinition);
         }
         teams.insert(player.team);
@@ -191,10 +192,7 @@ pub(crate) fn is_valid_match_local_id(id: &str) -> bool {
 }
 
 fn find_map(id: &str) -> Option<MapDefinition> {
-    match id {
-        "horizontal-test-array" => Some(map::horizontal_test_array()),
-        _ => None,
-    }
+    map::find(id)
 }
 
 #[cfg(test)]
@@ -203,11 +201,11 @@ mod tests {
     use super::*;
     use crate::fixed::POSITION_SCALE;
 
-    fn player(id: &str, team: u8, character_id: &str) -> MatchPlayerConfig {
+    fn player(id: &str, team: u8) -> MatchPlayerConfig {
         MatchPlayerConfig {
             player_id: id.to_owned(),
             team,
-            character_id: character_id.to_owned(),
+            character_id: "crow".to_owned(),
             appearance: Appearance::default(),
         }
     }
@@ -217,7 +215,7 @@ mod tests {
             seed: 12_345,
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
-            players: vec![player("z_right", 1, "zeke"), player("a_left", 0, "huck")],
+            players: vec![player("z_right", 1), player("a_left", 0)],
         }
     }
 
@@ -242,14 +240,16 @@ mod tests {
         assert_eq!(host.state().terrain.height, 20);
         assert_eq!(host.state().rng_state, config.seed);
 
-        let Some(huck) = host.state().player("a_left") else {
+        let Some(crow) = host.state().player("a_left") else {
             panic!("configured player must exist");
         };
-        let Some(huck_definition) = character::find("huck") else {
-            panic!("launch roster must contain Huck");
-        };
-        assert_eq!(huck.health, huck_definition.max_health);
-        assert_eq!(huck.max_health, huck_definition.max_health);
+        assert_eq!(crow.health, 250);
+        assert_eq!(crow.max_health, 250);
+        assert_eq!(
+            crate::character_roster::for_player(crow).map(|profile| profile.id.wire_name()),
+            Some("crow")
+        );
+        assert!(crow.ammo_for(crate::types::AbilitySlot::Basic).can_spend());
     }
 
     #[test]
@@ -300,11 +300,9 @@ mod tests {
         );
 
         let mut too_many = duel();
-        too_many.players.extend([
-            player("c", 2, "arzum"),
-            player("d", 3, "emi"),
-            player("e", 4, "karl"),
-        ]);
+        too_many
+            .players
+            .extend([player("c", 2), player("d", 3), player("e", 4)]);
         assert_eq!(
             create_match(&too_many).err(),
             Some(SimError::OutOfRange {
@@ -393,10 +391,10 @@ mod tests {
             Some(SimError::UnknownDefinition)
         );
 
-        let mut bad_character = duel();
-        configured_player_mut(&mut bad_character, 0).character_id = "missing-character".to_owned();
+        let mut bad_item = duel();
+        configured_player_mut(&mut bad_item, 0).character_id = "missing-character".to_owned();
         assert_eq!(
-            create_match(&bad_character).err(),
+            create_match(&bad_item).err(),
             Some(SimError::UnknownDefinition)
         );
     }

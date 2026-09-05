@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "contentVersion": 7,
+  "characters": [
+    {
+      "characterId": "leslie",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "crow",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "erus",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
+    {
+      "characterId": "kreena",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    }
+  ]
+}

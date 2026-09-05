@@ -55,9 +55,9 @@ use crate::blocks::TerrainBlock;
 use crate::canonical::{Canonical, CanonicalHasher, domain, hash_canonical};
 use crate::fixed::FixedPoint;
 use crate::types::{
-    AbilitySlot, EffectKind, EffectTrigger, ErosionAxis, MatchPhase, Material, MaterialMask,
-    MovementClass, PersistentObject, PersistentObjectKind, PlayerState, RangeTier, SimulationState,
-    StatusEffect, TerrainMask, TerrainOperation, TerrainShape, TurnEndReason,
+    AbilitySlot, AmmoPolicy, EffectKind, EffectTrigger, ErosionAxis, MatchPhase, Material,
+    MaterialMask, MovementClass, PersistentObject, PersistentObjectKind, PlayerState, RangeTier,
+    SimulationState, StatusEffect, TerrainMask, TerrainOperation, TerrainShape, TurnEndReason,
 };
 
 // ---------------------------------------------------------------------------
@@ -116,6 +116,20 @@ const fn ability_slot_discriminant(slot: AbilitySlot) -> u8 {
         AbilitySlot::Basic => 0,
         AbilitySlot::BasicAlt => 1,
         AbilitySlot::Special => 2,
+        AbilitySlot::Trinket => 3,
+    }
+}
+
+/// Wire discriminant for [`AmmoPolicy`].
+///
+/// | Variant | Byte |
+/// |---|---:|
+/// | `Finite` | `0` |
+/// | `Unlimited` | `1` |
+const fn ammo_policy_discriminant(policy: AmmoPolicy) -> u8 {
+    match policy {
+        AmmoPolicy::Finite => 0,
+        AmmoPolicy::Unlimited => 1,
     }
 }
 
@@ -440,10 +454,10 @@ impl Canonical for PersistentObject {
 }
 
 impl Canonical for PlayerState {
-    /// Field order: `id`, `team`, `health`, `max_health`, `position`, `character_id`,
-    /// `passive_id` (a presence flag, then the string only if present), `special_gauge`,
-    /// `has_chosen_passive`, then `statuses` — re-sorted by [`EffectKind`] here rather
-    /// than trusted from the field's current order (see this module's top-level docs).
+    /// Field order: `id`, `team`, `health`, `max_health`, `position`, loadout item ids
+    /// (`main`, `secondary`, `melee_tool`, `trinket`), `trinket_charge`, then each ammo
+    /// counter in [`AbilitySlot::COMBAT`] order, then `statuses` — re-sorted by
+    /// [`EffectKind`] here rather than trusted from the field's current order.
     ///
     /// `appearance` is **deliberately never written**: it is cosmetic
     /// (`types.rs`: "Never contributes to the state hash"), and
@@ -454,18 +468,17 @@ impl Canonical for PlayerState {
         hasher.write_u32(u32::from(self.health));
         hasher.write_u32(u32::from(self.max_health));
         self.position.write_canonical(hasher);
-        hasher.write_str(&self.character_id);
-
-        match &self.passive_id {
-            Some(passive_id) => {
-                hasher.write_bool(true);
-                hasher.write_str(passive_id);
-            }
-            None => hasher.write_bool(false),
+        hasher.write_str(&self.loadout.main);
+        hasher.write_str(&self.loadout.secondary);
+        hasher.write_str(&self.loadout.melee_tool);
+        hasher.write_str(&self.loadout.trinket);
+        hasher.write_u32(u32::from(self.trinket_charge));
+        for slot in AbilitySlot::COMBAT {
+            let ammo = self.ammo_for(slot);
+            hasher.write_u8(ammo_policy_discriminant(ammo.policy));
+            hasher.write_u32(u32::from(ammo.remaining));
+            hasher.write_u32(u32::from(ammo.maximum));
         }
-
-        hasher.write_u32(u32::from(self.special_gauge));
-        hasher.write_bool(self.has_chosen_passive);
 
         // Defensive sort: see the "every collection is written in an explicit,
         // defensively-enforced sort order" rule in this module's top-level docs.
@@ -646,19 +659,7 @@ mod tests {
     }
 
     fn sample_player(id: &str) -> PlayerState {
-        PlayerState {
-            id: id.to_string(),
-            team: 0,
-            health: 300,
-            max_health: 300,
-            position: FixedPoint::new(1_024, 2_048),
-            character_id: "arzum".to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
-            statuses: Vec::new(),
-            appearance: Appearance::default(),
-        }
+        PlayerState::crow(id, 0, FixedPoint::new(1_024, 2_048))
     }
 
     fn sample_object(sequence: u32) -> PersistentObject {
@@ -786,41 +787,40 @@ mod tests {
     }
 
     #[test]
-    fn changing_character_id_changes_hash() {
+    fn changing_loadout_item_changes_hash() {
         let baseline = sample_state();
         let mut changed = sample_state();
         if let Some(player) = changed.players.get_mut(0) {
-            player.character_id = "emi".to_string();
+            player.loadout.main = "frostfall-mortar".to_string();
         }
         assert_ne!(hash_state(&baseline), hash_state(&changed));
     }
 
     #[test]
-    fn choosing_a_passive_changes_hash() {
-        let baseline = sample_state();
-        let mut changed = sample_state();
+    fn spending_ammo_changes_hash() {
+        let mut baseline = sample_state();
+        if let Some(player) = baseline.players.get_mut(0)
+            && let Some(counter) = player.ammo.get_mut(AbilitySlot::Basic.index())
+        {
+            *counter = crate::types::AmmoCounter {
+                remaining: 3,
+                maximum: 3,
+                policy: crate::types::AmmoPolicy::Finite,
+            };
+        }
+        let mut changed = baseline.clone();
         if let Some(player) = changed.players.get_mut(0) {
-            player.passive_id = Some("arzum-momentum".to_string());
+            player.spend_ammo(AbilitySlot::Basic);
         }
         assert_ne!(hash_state(&baseline), hash_state(&changed));
     }
 
     #[test]
-    fn special_gauge_changes_hash() {
+    fn changing_secondary_item_changes_hash() {
         let baseline = sample_state();
         let mut changed = sample_state();
         if let Some(player) = changed.players.get_mut(0) {
-            player.special_gauge = 5_000;
-        }
-        assert_ne!(hash_state(&baseline), hash_state(&changed));
-    }
-
-    #[test]
-    fn has_chosen_passive_changes_hash() {
-        let baseline = sample_state();
-        let mut changed = sample_state();
-        if let Some(player) = changed.players.get_mut(0) {
-            player.has_chosen_passive = true;
+            player.loadout.secondary = "longsword".to_string();
         }
         assert_ne!(hash_state(&baseline), hash_state(&changed));
     }
@@ -1016,16 +1016,16 @@ mod tests {
     // -----------------------------------------------------------------------------------
 
     #[test]
-    fn player_id_and_character_id_do_not_alias_across_the_boundary() {
-        // Without length prefixes, id="ab"+character_id="c" would encode identically to
-        // id="a"+character_id="bc". write_str's length prefix (inherited from
+    fn player_id_and_loadout_item_do_not_alias_across_the_boundary() {
+        // Without length prefixes, id="ab"+main="c" would encode identically to
+        // id="a"+main="bc". write_str's length prefix (inherited from
         // CanonicalHasher) prevents this, but the property is worth pinning at this
         // module's boundary specifically, not just canonical.rs's generic string case.
         let mut left = sample_player("ab");
-        left.character_id = "c".to_string();
+        left.loadout.main = "c".to_string();
 
         let mut right = sample_player("a");
-        right.character_id = "bc".to_string();
+        right.loadout.main = "bc".to_string();
 
         let mut left_hasher = CanonicalHasher::new();
         left.write_canonical(&mut left_hasher);
@@ -1176,21 +1176,7 @@ mod tests {
 
     #[test]
     fn known_answer_vector_sample_state() {
-        // REGENERATED 2026-08-07 (second time) when pending_turn_end_reason and
-        // last_turn_end_reason joined the metadata section (todolist.md P11 -- turn-timeout
-        // rate is a named launch metric and cannot be measured from unrecorded state).
-        // Previous value was "f79a8a6acbc1fa38". SIMULATION_VERSION moved 3 -> 4.
-        //
-        // REGENERATED 2026-08-07 (first time) when the destructible-block section was added to the state
-        // encoding (ADR 0005 requires block health to be hashed, since the terrain cells are
-        // derived from it). The previous value was "40c9ceef445ae69d".
-        //
-        // This vector failing was correct behaviour, not an obstacle: it exists to catch a
-        // silent change to the hash format, and the format genuinely changed.
-        // `SIMULATION_VERSION` moved 2 -> 3 in the same commit, so no replay can be
-        // misinterpreted across the boundary. `MODULE_OWNERSHIP.md` forbids regenerating a
-        // vector *silently* -- this comment and that version bump are what make it not silent.
-        assert_eq!(hash_state(&sample_state()), "1ff6ff01d76463ce");
+        assert_eq!(hash_state(&sample_state()), "3e1036c2ca7d7db8");
     }
 
     #[test]
@@ -1198,7 +1184,7 @@ mod tests {
         let player = sample_player("known-answer-player");
         let mut hasher = CanonicalHasher::new();
         player.write_canonical(&mut hasher);
-        assert_eq!(hasher.finish_hex(), "bb84670a6d8b948d");
+        assert_eq!(hasher.finish_hex(), "d207db0e1fb3e99e");
     }
 
     // -----------------------------------------------------------------------------------

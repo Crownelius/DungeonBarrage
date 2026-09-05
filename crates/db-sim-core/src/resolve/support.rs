@@ -213,7 +213,7 @@ mod tests {
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, PersistentObjectChange, PlayerState,
-        SimulationState, TerrainMask, TerrainOperation,
+        RandomOutcome, SimulationState, TerrainMask, TerrainOperation,
     };
     use std::collections::BTreeMap;
 
@@ -224,10 +224,9 @@ mod tests {
             health,
             max_health,
             position: FixedPoint::ZERO,
-            character_id: "test-character".to_owned(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -270,6 +269,7 @@ mod tests {
         damage: BTreeMap<String, DamageEvent>,
         terrain_ops: Vec<TerrainOperation>,
         object_changes: Vec<PersistentObjectChange>,
+        random_outcomes: Vec<RandomOutcome>,
         status_changes: Vec<StatusChange>,
         terrain_cells_removed: u32,
     }
@@ -282,6 +282,7 @@ mod tests {
                 damage: BTreeMap::new(),
                 terrain_ops: Vec::new(),
                 object_changes: Vec::new(),
+                random_outcomes: Vec::new(),
                 status_changes: Vec::new(),
                 terrain_cells_removed: 0,
             }
@@ -298,6 +299,7 @@ mod tests {
                 damage: &mut self.damage,
                 terrain_ops: &mut self.terrain_ops,
                 object_changes: &mut self.object_changes,
+                random_outcomes: &mut self.random_outcomes,
                 status_changes: &mut self.status_changes,
                 terrain_cells_removed: &mut self.terrain_cells_removed,
             }

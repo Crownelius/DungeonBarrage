@@ -6,7 +6,7 @@ recommendation, say so and pick the other — but do not invent a third silently
 
 **Status legend:** 🔴 blocking · 🟠 important · 🟡 deferred · ✅ resolved
 
-Updated: 2026-08-24 · Companion to [`docs/CLIENT_SPEC.md`](docs/CLIENT_SPEC.md) (current client
+Updated: 2026-08-26 · Companion to [`docs/CLIENT_SPEC.md`](docs/CLIENT_SPEC.md) (current client
 milestones), [`docs/PROGRAM_PLAN.md`](docs/PROGRAM_PLAN.md) (historical plan),
 and [`docs/BUILD_LOG.md`](docs/BUILD_LOG.md) (history).
 
@@ -325,26 +325,28 @@ fills, not the first time the player attacks afterwards.
 
 ---
 
-## 🟠 P13 — The native client path stops at a partial Rust session contract
+## 🟠 P13 — The native client path stops after the real Rust ABI
 
-**The problem.** ADR 0006 settled Godot/C# for presentation, Rust for authoritative rules,
-and a client-only C ABI. The working tree now has validated match creation, atomic snapshots,
-normalized commands, a generation/idempotency-owning `MatchSessionHost`, ordered net-diff
-transitions, exact terrain dirty row-runs, and the first shared machine-readable match fixture.
-It still has no preview contract, authority-timeout transition, complete per-strike/RNG/status
-provenance, real FFI match handle, C# session, or Godot project.
-The game is therefore not playable despite the simulation being substantial.
+**The problem.** ADR 0006 settled Godot/C# for presentation, Rust for authoritative rules, and a
+client-only C ABI. C1 and C2 are now real: the session owns exact strike/random/status/object
+provenance, preview, verified host-plus-ledger checkpoint restore, and the production
+create/apply/snapshot/terrain/preview ABI. The same fixture passes direct Rust and the C ABI with
+byte-exact responses. There is still no headless C# interop/session assembly or Godot project, so the
+game remains unplayable despite the authority boundary being ready.
 
-**Why it matters.** Starting scenes now would force C# to infer missing authoritative events or
-bind to the placeholder FFI. Either creates a second behavior path and makes green UI tests say
-nothing about the real Rust host.
+**Why it matters.** Starting scenes before C3 would put native allocation ownership, DTO drift,
+library resolution, duplicate replay, and cancellation behavior directly into view code. A green UI
+test would still say nothing about whether managed code safely consumed the real release library.
+The C2 fixture now freezes required-nullable planning timestamps on snapshots and `turnOpened`, the
+tagged transition/preview rejection unions, and the create wrapper; C3 must consume those shapes
+exactly rather than simplifying them into strings or optional fields.
 
 **Solutions.**
 
-1. **Continue the ordered C1 → C2 → C3 → C4 gates in `CLIENT_SPEC.md`.** *(Recommended.)*
-   Finish truthful Rust provenance/preview and the remaining direct transition scenarios; then
-   make the same raw fixture pass through the C ABI and headless C# before creating Godot scenes.
-   This is slower to first pixels but every layer proves the one below it.
+1. **Continue with C3, then C4, in `CLIENT_SPEC.md`.** *(Recommended.)* Build the Godot-free .NET
+   interop/session layer with `SafeHandle`, exact DTOs, RID-only native resolution, and xUnit tests;
+   make the existing raw fixture pass C#→FFI before creating Godot scenes. Every layer then proves
+   the one below it.
 2. **Build a Godot vertical prototype against hand-authored C# DTOs now.** Faster visual feedback,
    but it must later be replaced and cannot validate authority, buffer ownership, duplicate replay,
    or hash parity. It repeats the repository's established “correct but unreachable” failure mode
@@ -352,6 +354,32 @@ nothing about the real Rust host.
 
 **Decision:** solution 1 is locked by ADR 0006 and `CLIENT_SPEC.md` §21. Current operational state,
 exact commands, and ownership warnings live in `docs/HANDOFF.md`.
+
+---
+
+## 🟠 P14 — Arzum's documented Chain Strike second hit is not implemented
+
+**The problem.** `ARZUM_CHAIN_STRIKE_TELEPORT` stores the documented 50–200% second-hit range, but
+the live relocation resolver currently records the random target and teleports Arzum only. It does
+not roll or apply the second hit. Existing tests prove the data values, first strike, target draw,
+and teleport; none proves the documented random follow-up damage. The C1 `randomOutcome` is therefore
+truthfully a teleport-target outcome, not evidence that the second damage roll exists.
+
+**Why it matters.** The special is materially weaker than the character document and a result panel
+cannot show a damage roll the authority never made. Treating the target record as the whole mechanic
+would repeat the repository's “correct, tested, unreachable” failure mode.
+
+**Solutions.**
+
+1. **After the owner settles the rated-play range, implement a real effect-delivered second strike
+   plus producer-owned damage-roll provenance.** *(Recommended.)* Version the behavior, add direct
+   transition/mutation tests, and regenerate only affected vectors under the documented procedure.
+2. **Redesign Chain Strike as teleport-only and remove the 50–200% promise from character/content
+   data.** Simpler and competitively less volatile, but it is a character-design change rather than
+   an implementation fix.
+
+**Decision:** blocked on the existing P10 owner decision about Arzum's 50–200% rated-play rule. Do
+not invent the roll in C# or silently imply that C1 implemented it.
 
 ---
 
@@ -373,7 +401,9 @@ exact commands, and ownership warnings live in `docs/HANDOFF.md`.
    context. Scope the replacement to this repository alone rather than all 28.
 2. **Confirm four character rules** (`docs/CHARACTERS.md` §7): Karl's 24%/74% vs the brief's
    33%; Numa's harpoon threshold; Zeke's 22 HP heal reading; Arzum's 50–200% roll in rated play.
-   Karl's crit *chance* is additionally an unsourced 20% placeholder.
+   Karl's crit *chance* is additionally an unsourced 20% placeholder. Also confirm whether Numa's
+   two-turn Pin remains numerically balanced now that turns correctly mean the affected player's
+   turns rather than global submitted actions.
 3. **Level-up reward balance** — the character option dominates the credit option 46×
    (`docs/PROGRESSION.md` §4). Recommended fix is a one-line data change.
 

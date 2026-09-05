@@ -1,8 +1,9 @@
 //! Resolvers for [`EffectKind::Knockback`], [`EffectKind::Push`], [`EffectKind::Pull`],
 //! [`EffectKind::Recoil`], and [`EffectKind::WallImpact`].
 //!
-//! This is the most-used resolver family in the launch roster: Roberto's grenade
-//! (`Knockback`), Natomica's Repulse (`Push` + `WallImpact`), and Numa's harpoon (`Pull`).
+//! The playable cut reaches this family through item effects rather than character kits;
+//! `RAMSHOT_KNOCKBACK` is the only live caller. The Roberto/Natomica/Numa kits this module
+//! was originally written against were removed at `SIMULATION_VERSION` 7.
 //!
 //! # Displacement is swept, never teleported
 //!
@@ -17,16 +18,29 @@
 //!
 //! | Kind | `magnitude` | `magnitude_secondary` |
 //! |---|---|---|
-//! | `Knockback` | displacement, fixed-point | radius (0 = the primary target only) |
-//! | `Push` | displacement, fixed-point | radius |
+//! | `Knockback` | displacement, fixed-point | falloff radius, fixed-point (**see below**) |
+//! | `Push` | displacement, fixed-point | falloff radius, fixed-point (**see below**) |
 //! | `Pull` | displacement, fixed-point | HP threshold in basis points |
 //! | `Recoil` | displacement, fixed-point | unused |
 //! | `WallImpact` | bonus damage, percent of [`BASE_ATTACK`] | unused |
 //!
-//! Verified against `character.rs`: `ROBERTO_KNOCKBACK`, `NATOMICA_PUSH`,
-//! `NATOMICA_WALL_IMPACT`, and `NUMA_PULL` are the live callers. `Recoil` is currently
-//! attached to no character — its convention is established here for whenever one uses it,
-//! and that is flagged rather than presented as roster fact.
+//! ## A `Knockback`/`Push` radius of zero means *unbounded*, not *none*
+//!
+//! This is a trap, and it has already cost one shipped defect, so it is stated plainly
+//! rather than left to be rediscovered. An earlier revision of this table claimed `0` meant
+//! "the primary target only". The code does the opposite: [`targets_in_radius`] takes the
+//! `radius <= 0` branch and collects **every living opponent on the map** at any distance,
+//! and [`falloff`] then returns the **full magnitude** with no distance scaling. A `0` here
+//! is therefore the widest possible effect, not the narrowest.
+//!
+//! Content that fires without naming a primary target — anything aimed, which is every shot
+//! from the Godot drag path — must give a real, positive radius. `RAMSHOT_KNOCKBACK` shipped
+//! with `magnitude_secondary: 0` at `CONTENT_VERSION` 2 and consequently shoved both players
+//! a flat eight cells on every shot regardless of where the shell landed, which ended matches
+//! on turn 1. See `docs/BUILD_LOG.md`.
+//!
+//! `Recoil` is attached to no item — its convention is established here for whenever one uses
+//! it, and that is flagged rather than presented as content fact.
 
 use crate::error::{SimError, SimResult};
 use crate::fixed::{
@@ -415,7 +429,7 @@ mod tests {
     use crate::types::TurnEndReason;
     use crate::types::{
         Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PersistentObjectChange,
-        PlayerState, SimulationState, StatusEffect, TerrainMask, TerrainOperation,
+        PlayerState, RandomOutcome, SimulationState, StatusEffect, TerrainMask, TerrainOperation,
     };
     use std::collections::BTreeMap;
 
@@ -438,10 +452,9 @@ mod tests {
             health,
             max_health: 400,
             position,
-            character_id: "natomica".to_owned(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -454,6 +467,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         object_changes: Vec<PersistentObjectChange>,
+        random_outcomes: Vec<RandomOutcome>,
         status_changes: Vec<StatusChange>,
     }
 
@@ -488,6 +502,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 object_changes: Vec::new(),
+                random_outcomes: Vec::new(),
                 status_changes: Vec::new(),
             }
         }
@@ -504,6 +519,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 object_changes: &mut self.object_changes,
+                random_outcomes: &mut self.random_outcomes,
                 status_changes: &mut self.status_changes,
             }
         }
@@ -797,6 +813,7 @@ mod tests {
             terrain_cells_removed: &mut harness.terrain_cells_removed,
             terrain_ops: &mut harness.terrain_ops,
             object_changes: &mut harness.object_changes,
+            random_outcomes: &mut harness.random_outcomes,
             status_changes: &mut harness.status_changes,
         };
 

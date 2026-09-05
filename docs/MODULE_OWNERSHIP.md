@@ -39,7 +39,7 @@ coordination.
 |---|---|---|
 | `fixed.rs` | Fixed-point math primitives | Integrator (complete) |
 | `canonical.rs` | Byte encoding + FNV-1a hashing | Integrator (complete) |
-| `types.rs` | Shared authoritative data contract | Integrator (stable during parallel work; coordinated provenance extension is open) |
+| `types.rs` | Shared authoritative data contract | Integrator (strike/status/object/random provenance complete; frozen after C1) |
 | `error.rs` | Error types | Integrator (complete) |
 | `lib.rs` | Module wiring, versions | Integrator |
 | `rng.rs` | Versioned seeded PRNG | Implementation task |
@@ -47,15 +47,20 @@ coordination.
 | `character.rs` | Character roster data + validation | Implementation task |
 | `ballistics.rs` | Trajectory integration + collision | Implementation task |
 | `hash.rs` | `Canonical` impls for state types | Implementation task |
-| `command.rs` | Command validation + application | Implementation task |
+| `command.rs` | Command validation + application; ordered action records | Integrator during C1 contract slices |
 | `match_host.rs` | Authoritative orchestration; no transport/session policy | Integrator |
 | `scheduler.rs` | Phase progression, turn reasons, victory handoff | Integrator |
+| `resolve/status.rs` | Status application and affected-player duration transitions | Integrator (current lifecycle slice complete) |
+| `resolve/attack_mods.rs` | Attack modifiers, forced-crit charges, effect strikes | Integrator (current provenance slice complete) |
+| `resolve/objects.rs` | Turret/knife creation, replacement, cap eviction, detonation | Integrator (current lifecycle slice complete) |
+| `resolve/relocation.rs` | Teleport/relocate/obscure; gas-cloud creation and RNG draws | Integrator (producer-owned Arzum/Aleph outcomes complete) |
+| `victory.rs` | Victory evaluation and canonical eliminated-owner object cleanup | Integrator |
 | `match_setup.rs` | Validated transport-free match construction | Integrator (C1 slice complete) |
 | `client_contract.rs` | Engine-neutral read-only snapshot projection | Integrator (C1 slice complete) |
-| `match_session.rs` | Normalized commands, generations, bounded idempotency ledger, transitions | Integrator (C1 foundation complete; provenance/timeout/preview/restore open) |
-| `db-sim-ffi/**` | Sole native ABI and `unsafe` boundary | Integrator (C2; scaffold only) |
-| `tests/fixtures/matches/**` | Shared machine-readable client fixtures | Fixture task (direct Rust replay complete); schema changes require integrator review |
-| `crates/db-sim-core/tests/shared_match_fixtures.rs` | Strict direct-session consumer of shared bytes | Fixture task (C1 direct replay complete) |
+| `match_session.rs` | Normalized commands, generations, bounded idempotency ledger, transitions | Integrator (C1 random outcomes, exact trace/strike replay, preview, checkpoint restore, and direct scenarios complete) |
+| `db-sim-ffi/**` | Sole native ABI and `unsafe` boundary | Integrator (C2 real session ABI, required-nullable clock fields, and pointer/ownership contract complete; C3 consumes it without adding rules) |
+| `tests/fixtures/matches/**` | Shared machine-readable client fixtures | Integrator (direct requests plus byte-exact production C2 responses); schema changes require review |
+| `crates/db-sim-core/tests/shared_match_fixtures.rs` | Strict direct-session consumer of shared bytes | Integrator (C1 replay plus preview and C2 manifest paths complete) |
 | `crates/db-sim-core/tests/golden_vectors.rs` | Versioned whole-match replay hashes | Integrator; regenerate only under the documented compatibility procedure |
 | `docs/HANDOFF.md` | Mutable operational handoff for the next agent | Documentation task |
 | `docs/BUILD_LOG.md` | Append-only historical checkpoints | Integrator appends; existing entries are never rewritten |

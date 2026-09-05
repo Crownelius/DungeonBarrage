@@ -292,6 +292,9 @@ pub fn jump(state: &mut SimulationState, player_id: &str) -> SimResult<i32> {
     if let Some(player) = state.player_mut(player_id) {
         player.position = position;
     }
+    if risen > 0 {
+        state.movement_remaining = state.movement_remaining.saturating_sub(POSITION_SCALE);
+    }
     Ok(risen)
 }
 
@@ -392,10 +395,9 @@ mod tests {
             health: 200,
             max_health: 200,
             position,
-            character_id: "arzum".to_owned(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }

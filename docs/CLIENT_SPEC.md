@@ -2,7 +2,7 @@
 
 **Status:** Version 2 implementation specification
 
-**Updated:** 2026-08-24
+**Updated:** 2026-09-04
 
 **Launch client:** Godot 4.7.1 .NET, C# targeting `net10.0`
 
@@ -12,7 +12,7 @@
 
 **Online boundary:** authoritative server protocol; no client prediction initially
 
-**Related:** [ADR 0006](./adr/0006-client-and-server-language-boundaries.md) · [ADR 0004](./adr/0004-native-desktop-rust-csharp.md) · [ADR 0002](./adr/0002-character-kits.md) · [ADR 0005](./adr/0005-destructible-blocks-with-health.md) · [SECURITY_BASELINE.md](./SECURITY_BASELINE.md) · [CHARACTERS.md](./CHARACTERS.md) · [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PROGRAM_PLAN.md](./PROGRAM_PLAN.md)
+**Related:** [Character implementation plan](./CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md) · [ADR 0006](./adr/0006-client-and-server-language-boundaries.md) · [ADR 0004](./adr/0004-native-desktop-rust-csharp.md) · [ADR 0002](./adr/0002-character-kits.md) · [ADR 0005](./adr/0005-destructible-blocks-with-health.md) · [SECURITY_BASELINE.md](./SECURITY_BASELINE.md) · [CHARACTERS.md](./CHARACTERS.md) · [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PROGRAM_PLAN.md](./PROGRAM_PLAN.md)
 
 This document defines an implementable native client, including the Rust contracts it requires.
 It deliberately separates what exists from what must be built. A milestone is complete only when
@@ -38,9 +38,10 @@ In particular:
 
 - ADR 0006 governs the current language boundaries: Godot/C# presentation, Rust simulation, and a
   future Rust-native server.
-- ADR 0002 replaces the old three-weapon loadout with fixed character kits. Ammunition and the
-  `main | secondary | meleeTool` equipment contract are retired. Client UI uses
-  `basic | basicAlt | special`.
+- ADR 0002 replaces player-authored equipment with fixed character kits. The schema-2 client sends
+  only `characterId` and presents Shot 1, Shot 2/Melee, and SS. Rust temporarily retains
+  `main | secondary | meleeTool | trinket` internal/wire names and unlimited ammo counters as a
+  replay-migration bridge; they are not player choices or HUD resources.
 - ADR 0004's web removal still stands, but its ASP.NET/C# server choice is superseded by ADR 0006.
 - ADR 0005 governs destructible block health and mask derivation.
 - `PLATFORM_STRATEGY.md` remains useful for general authority, networking, privacy, and performance
@@ -118,12 +119,13 @@ that platform, completes the smoke scenario in §20.5.
 
 ## 3. Truthful current state
 
-The committed baseline from which this v2 work began was `fa7f0af`. The first C1 prerequisite slice
-has now landed in the working tree, but a capability remains incomplete until its gate in §20 passes:
+The committed baseline from which this v2 work began was `fa7f0af`. C1 and C2 are implemented on
+`feat/c1-outcome-provenance`; the schema-2 four-character migration is in verification and remains
+incomplete until its automated and renderer gates in §20 pass:
 
 - `db-sim-core` has real match orchestration, maps, movement, ability resolution, terrain blocks,
   passive interruption, status ticking, victory, and frozen versioned golden vectors in the
-  current working tree.
+  committed repository.
 - `MatchHost` currently resolves most of a turn synchronously before `submit_ability` returns.
   Transient phases are therefore not observable client animation states.
 - A validated, transport-free `MatchConfig`/`create_match` path now constructs a real host from the
@@ -134,41 +136,50 @@ has now landed in the working tree, but a capability remains incomplete until it
 - A read-only, engine-neutral core snapshot projection covers every authoritative state field a
   client must render, including deterministic turn order, elimination, terrain generation, sorted
   entities, and the exact host hash.
-- The working tree now contains a transport-free `MatchSessionHost`: one normalized typed
+- The committed feature checkpoint contains a transport-free `MatchSessionHost`: one normalized typed
   `MatchCommand` union, canonical semantic digests, generation ownership, cloned-host application,
   retained accepted/rejected first results, exact duplicate replay, changed-command-ID security
   rejection, exact 16,384-entry/64 MiB canonical-byte resource bounds, and atomic
   `MatchTransition` plus post-snapshot/hash.
   Accepted operations increment generation exactly once only when authoritative state actually
   changes; a legal zero/blocked move remains accepted without inventing a generation.
-- Its first event builder preserves independent projectile traces/impacts; derives deterministic
-  net movement, health, gauge, status, object, passive, elimination, turn, and outcome events; and
-  produces exact changed-cell row-runs for terrain. All current net movement is conservatively
-  labelled authoritative resolution: without the post-walk/pre-settle path, even an unchanged final
-  height cannot prove that no climb-and-settle occurred. `requestedMove` remains reserved for a
-  richer movement outcome. The builder does not fabricate missing combat provenance. Exact
-  per-strike damage timing, public RNG outcomes, non-projectile strike impact points, ephemeral
-  status lifecycles, and some removal causes still require richer authoritative outcomes before the
-  complete §20.1 vocabulary gate can pass.
+- Its event builder preserves independent projectile traces/impacts; emits exact per-strike crit,
+  damage, delivery, public random-outcome, status-lifecycle, and ordered object-lifecycle records;
+  derives deterministic net movement, health, gauge, passive, elimination, turn, and outcome events;
+  and produces exact changed-cell row-runs for terrain. Arzum target selection and Aleph point draws
+  are recorded at their producer, reconciled against draw-time state and the bounded generator, and
+  never inferred from the final snapshot. All current net movement is conservatively labelled
+  authoritative resolution: without the post-walk/pre-settle path, even an unchanged final height
+  cannot prove that no climb-and-settle occurred. `requestedMove` remains reserved for a richer
+  movement outcome. Strike, random, status, and object records fail closed under omitted, duplicate,
+  stale, or tampered provenance.
 - Movement settling now ends an eliminated active player's turn and drives victory/rotation. The
   former path could leave a dead active player stranded in `Movement`. Terminal victory now also
-  commits the final pending turn reason instead of exposing the prior turn's reason; this
-  replay-visible correction is `SIMULATION_VERSION = 5` and regenerated every golden vector under
-  the documented procedure.
-- The session/ABI composite envelope, authority-timeout transition, read-only preview, and
-  production serialization remain incomplete. The first shared raw JSON fixture now passes direct
-  Rust with frozen hashes, nonzero movement, an independent projectile/sample minimum, generation
-  changes, turn handoff, and live-host hash equality. Full byte-for-byte response fixtures belong
-  to C2's production serializer rather than a test-only imitation.
-- `db-sim-ffi` began as a scaffold exposing versions, placeholder create/destroy, and a placeholder
-  state hash; C2 is not complete until it owns a real `MatchHost` and passes every §20.2 gate.
-- The native release profile now uses `panic = "unwind"`, and its FFI guard has a controlled
-  release-profile containment test. Per-handle poisoning and the real gameplay exports remain C2.
+  commits the final pending turn reason instead of exposing the prior turn's reason. Version 6 also
+  makes status duration mean affected-player turns, makes Feeding Frenzy force/consume the next three
+  live Carrion Call crits without RNG draws, and removes a defeated owner's persistent objects for
+  ordinary damage/fall elimination. Every golden vector and shared hash was regenerated under the
+  documented compatibility procedure.
+- Authority-owned timeout is a separate non-client session entry point with the same bounded,
+  idempotent ledger. Read-only ability preview is implemented on disposable clones, including normal
+  stale-generation refusals and exact no-state/no-ledger/no-RNG assertions. Restore accepts only the
+  opaque host-plus-complete-ledger checkpoint, revalidates entry relationships and transitions, and
+  recomputes exact retained bytes before reopening it.
+- `db-sim-ffi` now owns a real `MatchSessionHost` behind a serialized, poisonable handle. ABI version
+  1 exposes exactly the ten version/create/apply/snapshot/terrain/preview/disposal symbols in §8.1.
+  Inputs are closed, bounded DTOs; mutating calls resolve and serialize a clone before commit; output
+  allocations are exact `Box<[u8]>` values reclaimed by Rust.
+- The shared horizontal duel passes both direct Rust and the real C ABI with hashes
+  `f67c5371bcddbdf5 → 378081bb2e830a5d → d8686762470c0c36`. Create, initial snapshot,
+  preview, move, and ability responses are frozen byte-for-byte from the production serializer.
+- The native release profile uses `panic = "unwind"`; the common guard is tested in release, every
+  later call on a poisoned handle fails closed, and the complete ownership cycle passes Valgrind with
+  zero definitely/indirectly lost bytes. CI enforces the release test, exact exports, and leak gate.
 - No `client/` project exists.
 - No match server exists.
 
-Consequently, the next work is to complete the Rust transition contract and then expose it through
-the FFI, not to begin menu or HUD construction.
+Consequently, the next work is C3's headless .NET interop/session layer. Do not begin menu, HUD, or
+Godot scene construction until the same raw fixture passes C# through the real release library.
 
 ---
 
@@ -340,10 +351,13 @@ library's simulation version, determines online compatibility.
 ## 7. Domain contracts
 
 The JSON definitions below are the normative schema for the initial gameplay ABI, not illustrative
-pseudocode. C2 implements matching Rust and C# DTOs plus byte-for-byte fixtures. Wire casing is
-`camelCase`; enums use the exact string values shown; duplicate object keys, unknown fields, unknown
-enum values, non-integer numbers, and trailing data are rejected. Inputs are UTF-8 bytes with an
-explicit length, not NUL-terminated strings.
+pseudocode. C2 implements the Rust wire DTOs plus byte-for-byte fixtures; C3 implements matching C#
+DTOs against those frozen bytes. Wire casing is `camelCase`; enums use the exact string values shown;
+duplicate object keys, unknown fields, unknown enum values, non-integer numbers, and trailing data
+are rejected. Inputs are UTF-8 bytes with an explicit length, not NUL-terminated strings.
+
+Production JSON responses use deterministic struct field order, compact UTF-8, and exactly one
+terminal LF. The shared C2 fixtures compare those bytes directly; no test-only serializer exists.
 
 ### 7.1 `MatchConfig`
 
@@ -351,10 +365,10 @@ explicit length, not NUL-terminated strings.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "matchId": "local-opaque-id",
-  "simulationVersion": 5,
-  "contentVersion": 1,
+  "simulationVersion": 10,
+  "contentVersion": 7,
   "match": {
     "seed": 12345,
     "mapId": "horizontal-test-array",
@@ -363,7 +377,7 @@ explicit length, not NUL-terminated strings.
       {
         "playerId": "local-player-1",
         "team": 0,
-        "characterId": "huck",
+        "characterId": "crow",
         "appearance": {
           "skinId": "default",
           "abilitySkinIds": ["default", "default", "default"],
@@ -373,7 +387,7 @@ explicit length, not NUL-terminated strings.
       {
         "playerId": "local-bot-1",
         "team": 1,
-        "characterId": "zeke",
+        "characterId": "erus",
         "appearance": {
           "skinId": "default",
           "abilitySkinIds": ["default", "default", "default"],
@@ -436,7 +450,7 @@ move:
 ability:
   { schemaVersion, commandId, playerId, expectedTurnNumber,
     expectedSnapshotGeneration, kind: "ability",
-    slot: "basic" | "basicAlt" | "special",
+    slot: "main" | "secondary" | "trinket",
     angleMillidegrees, powerBasisPoints,
     targetPlayerId: string | null,
     secondaryTargetPlayerId: string | null }
@@ -513,7 +527,7 @@ MatchTransition
   schemaVersion
   commandId
   disposition: accepted | rejected | duplicateReplay
-  rejectionReason?
+  rejectionReason: TransitionRejection | null
   preSnapshotGeneration
   postSnapshotGeneration
   presentationTickRate
@@ -522,6 +536,24 @@ MatchTransition
   postSnapshot
   postStateHash
 ```
+
+The rejection union is exact:
+
+```text
+TransitionRejection =
+  { kind: "snapshotGenerationMismatch", expected: u64, actual: u64 }
+  | { kind: "commandIdConflict" }
+  | { kind: "core", reason: CommandRejectionName }
+
+CommandRejectionName =
+  "duplicateCommand" | "playerEliminated" | "notActivePlayer" | "wrongPhase"
+  | "turnVersionMismatch" | "unknownCharacter" | "abilityNotAvailable"
+  | "gaugeNotReady" | "alreadyAttacked" | "inputOutOfRange" | "invalidTarget"
+  | "invalidPassive" | "passiveAlreadyChosen"
+```
+
+`rejectionReason` is a required field even when null. A duplicate replay returns the original
+transition body with `disposition: "duplicateReplay"`; it does not invent a rejection.
 
 Binding invariants:
 
@@ -557,22 +589,22 @@ Initial closed event kinds:
 |---|---|
 | `projectileTrace` | trace ID, owner, ability, sampled fixed-point positions with ticks, terminal impact |
 | `impact` | trace ID, position, cause, material/entity target where known |
-| `strikeResolved` | owner and ability; exact strike point once the authoritative outcome retains it |
+| `strikeResolved` | owner, ability, dense strike index, target, exact point, melee/projectile/effect delivery, cited trace where applicable, `notEligible`/`missed`/`landed`/`forced` crit provenance, applied damage, elimination flag |
 | `terrainChanged` | terrain generation and authoritative dirty rectangles |
 | `blockChanged` | block ID, previous/new health and surviving bounds |
 | `healthChanged` | player ID and itemized direct/splash/Backlash/hazard/wall/heal values |
 | `gaugeChanged` | player ID, previous/new gauge, actual delta |
 | `randomOutcome` | roll purpose, bounded public result, and affected action/entity IDs |
-| `statusChanged` | player ID, status kind, previous/new magnitude and duration |
+| `statusChanged` | player ID, status kind, exact `Applied`, `Refreshed`, `ChargeConsumed`, `Ticked`, `Exhausted`, or `Expired` transition |
 | `entityMoved` | player/object ID, cause, sampled or start/end positions |
 | `objectSpawned` | complete persistent-object snapshot |
-| `objectChanged` | object ID and authoritative new state |
-| `objectRemoved` | object ID and cause |
+| `objectChanged` | complete previous/current object snapshots |
+| `objectRemoved` | complete last object snapshot and exact closed producer cause (`replaced`, `capacityEvicted`, `detonated`, `ownerEliminated`; `expired`/`destroyed` remain reserved until those mechanics exist) |
 | `playerEliminated` | player ID and identifiable cause |
 | `passiveChoiceRequired` | player ID and three allowed passive IDs |
 | `passiveChosen` | player ID and accepted passive ID |
 | `turnEnded` | player ID and attacked/passed/timedOut/eliminated reason |
-| `turnOpened` | active player, turn number, input-open and deadline timestamps |
+| `turnOpened` | `playerId`, `turnNumber`, required-nullable `inputOpensAt: u64 | null`, and required-nullable `deadlineAt: u64 | null` |
 | `matchCompleted` | victory team or draw |
 
 Damage, terrain, and health values are authoritative. Particle count, camera shake, easing, and the
@@ -582,12 +614,11 @@ before the projectile reaches that tick.
 If a mechanic cannot be represented by this vocabulary, extend and version the event contract in
 Rust before implementing bespoke C# inference.
 
-The current C1 implementation is deliberately truthful where authoritative provenance is not yet
-retained: a net health change may carry no itemized breakdown, and object/elimination changes may be
-labelled `authoritativeResolution`; it does not synthesize a target, strike point, RNG roll, or
-per-strike timestamp from the final state. Those labels are implementation-state evidence, not a
-weakening of the required payloads above. C1 remains open until the outcome/resolver records enough
-information for every §20.1 scenario.
+The C1 implementation is deliberately truthful where richer path provenance is not retained: a net
+movement change may still carry only `authoritativeResolution`. Arzum/Aleph draws, strike crits,
+ephemeral status lifecycles, and object spawn/removal causes are producer-owned and fail closed.
+Arzum reconciliation reconstructs the post-primary-strike/pre-settling candidate state explicitly;
+it never selects a target from the final snapshot.
 
 ### 7.6 Presentation manifest and previews
 
@@ -603,33 +634,38 @@ Exact Backlash cost and legal target sets come from a read-only Rust preview que
 - Is available locally for training. The initial remote client does not run the core for prediction;
   a future server endpoint/event supplies any remote guide.
 
-ABI schema version 1 has one closed preview request:
+Client schema version 2 has one closed preview request:
 
 ```text
 AbilityPreviewRequest
-  schemaVersion: 1
+  schemaVersion: 2
   expectedSnapshotGeneration
   playerId
   kind: "ability"
-  slot: "basic" | "basicAlt" | "special"
+  slot: "main" | "secondary" | "trinket"
   angleMillidegrees
   powerBasisPoints
   targetPlayerId: string | null
   secondaryTargetPlayerId: string | null
 
 AbilityPreviewResponse
-  schemaVersion: 1
+  schemaVersion: 2
   snapshotGeneration
   legal
-  rejectionReason: string | null
+  rejectionReason: PreviewRejection | null
   gaugeCost
   legalTargetPlayerIds[]
   projectileTraces[]
+
+PreviewRejection =
+  { kind: "snapshotGenerationMismatch", expected: u64, actual: u64 }
+  | { kind: "core", reason: CommandRejectionName }
 ```
 
 The response uses the same trace/sample DTO as a transition but contains no damage roll, hidden
 random result, terrain mutation, or promised final impact against moving targets. IDs are sorted;
-stale generation is a normal `legal: false` response. Future preview kinds require a schema change.
+stale generation is a normal `legal: false` response. `rejectionReason` is required even when null.
+Future preview kinds require a schema change.
 
 A modified client can calculate its own trajectory from known state. Restricting the official ranked
 guide is a UX/rules promise, not an anti-cheat guarantee. Server authority prevents forged outcomes,
@@ -641,7 +677,8 @@ not external aim assistance.
 
 ### 8.1 Export surface
 
-The initial gameplay ABI is intentionally small. It is ABI version 1 and replaces the unshipped,
+The gameplay ABI is intentionally small. Its current ABI version is 4; the schema-2 migration did
+not change exported function signatures. The original ABI replaced the unshipped,
 non-versioned scaffold: `db_sim_create`, `db_sim_destroy`, `db_sim_state_hash`, and
 `db_sim_string_free` are retired rather than supported in parallel.
 
@@ -699,10 +736,18 @@ Every non-empty buffer is allocated as an exact Rust `Box<[u8]>`. Free reconstru
 from the original pointer and length, drops it, and then writes `{ NULL, 0 }` back to the caller's
 struct. A `Vec` allocation with hidden spare capacity does not cross this two-field ABI.
 
-`db_sim_match_create` returns a real `MatchHost`, not a seed placeholder. On success its response is
-the initial snapshot. A domain-level invalid config is an `OK` ABI call containing
-`created: false` plus a categorized diagnostic and a null handle; malformed bytes or an ABI fault use
-the negative statuses below.
+`db_sim_match_create` owns a real `MatchSessionHost`, not a seed placeholder. Its exact response is:
+
+```text
+MatchCreateResponse =
+  { schemaVersion: 2, created: true, diagnostic: null, snapshot: MatchSnapshot }
+  | { schemaVersion: 2, created: false,
+      diagnostic: { code: "invalidConfig", message: string }, snapshot: null }
+```
+
+All four fields are required in both variants. A domain-level invalid config is an `OK` ABI call with
+a null handle and the failure variant; malformed bytes or an ABI fault use the negative statuses
+below.
 
 ### 8.2 Status codes
 
@@ -714,7 +759,7 @@ ABI status and gameplay disposition are separate:
 | `-1` | required null pointer |
 | `-2` | invalid UTF-8 or malformed envelope |
 | `-3` | unsupported envelope schema/version |
-| `-4` | caught internal panic; abandon the match |
+| `-4` | caught panic or terminal internal/session fault; the handle is poisoned and the match must be abandoned |
 | `-5` | response exceeded the documented cap |
 
 An out-of-range aim, stale turn, or invalid target is a successful ABI call containing a rejected
@@ -734,13 +779,16 @@ discard them and rebuild all chunks.
 - Every fallible export catches unwinding panics. The native FFI release profile must use
   `panic = "unwind"`; an aborting shipped profile does not satisfy this promise.
 - Every exported function validates nulls and lengths before dereference.
-- Arbitrary non-null pointers remain outside the C contract. C# prevents them through `SafeHandle`;
+- Arbitrary non-null pointers remain outside the C contract. Every pointer must be aligned and valid
+  for its documented access for the full call. Output slots are pairwise non-overlapping, do not
+  overlap input/handle storage, and own no live `DbOwnedBuffer` allocation when passed because Rust
+  initializes them by assignment. C# satisfies this with distinct zeroed locals and `SafeHandle`;
   the Rust server never accepts handles from the network.
 - No call mutates a match unless its complete response can be produced within the response cap.
   `apply` resolves against a working clone, serializes the bounded transition, and commits that
   working state only after serialization succeeds.
-- Maximum input envelope: 256 KiB. Maximum transition/snapshot: 8 MiB. Maximum terrain bytes and map
-  dimensions are validated by Rust content rules before match creation.
+- Maximum input envelope: 256 KiB. Maximum create/transition/snapshot/preview response: 8 MiB.
+  Maximum terrain bytes and map dimensions are validated by Rust content rules before match creation.
 - JSON nesting depth is at most 12. `matchId`, `commandId`, and `playerId` are 1–64 ASCII bytes from
   `[A-Za-z0-9._:-]`; display names are separate localized/user-content fields. Definition IDs are
   1–64 lowercase ASCII bytes from `[a-z0-9-]`. Appearance IDs are 1–128 ASCII bytes from
@@ -749,8 +797,10 @@ discard them and rebuild all chunks.
 - Native calls for one handle are serialized. Destroy waits for any in-flight call through
   `SafeHandle` marshalling and the local executor.
 - `SimHandle` contains a poison flag. The panic guard sets it before returning `INTERNAL_PANIC`;
-  every later operation on that handle returns `INTERNAL_PANIC` without entering `MatchHost`, and
-  only destroy remains permitted.
+  once required output slots and the live handle pointer validate, every later operation on that
+  handle returns `INTERNAL_PANIC` without entering `MatchHost`, and only destroy remains permitted.
+  Apply/preview check poison before request-pointer, length, UTF-8/JSON, or version validation so a
+  malformed follow-up cannot mask the terminal session state.
 - `db_sim_match_destroy(NULL)` and freeing an empty buffer are no-ops. Double destroy remains a
   caller bug prevented by `SafeHandle`; a freed `DbOwnedBuffer` is zeroed before wrapper disposal can
   repeat.
@@ -1040,12 +1090,39 @@ socket.
 
 ### 13.4 Projectiles and events
 
-- Create one player per `projectileTrace` ID.
+- Create one view per `projectileTrace` ID.
 - Interpolate by transition presentation tick between that trace's samples.
 - Do not extrapolate beyond its last sample or merge samples from different traces.
 - Play impact, terrain, damage, and elimination events at their ordered event tick.
 - If rendering falls behind, drop cosmetic particles before skipping authoritative event
   presentation. The final snapshot is always installed.
+
+#### 13.4.1 Event-derived combat feedback
+
+The first combat-feedback layer is a pure C# projection named `TransitionCueResolver`. It takes the
+immutable transition event list, elapsed playback milliseconds, the *visual* tick rate, and the
+reduced-motion setting. It does not read or mutate Rust state. Event release time is
+`presentationTick * 1000 / visualTickRate`; this keeps an optional client-side slowdown in sync
+with projectile playback without inventing a second authority timeline.
+
+Current cue mappings are intentionally narrow:
+
+| Authoritative event | Presentation-only cue |
+|---|---|
+| `projectileTrace` | owner fire accent |
+| decreasing `healthChanged` | affected actor hit outline |
+| `impact` | burst at the exact authoritative impact position; transient camera impulse |
+| `playerEliminated` | temporary defeat accent before the terminal/post snapshot is drawn |
+
+At most one highest-priority actor cue is drawn per actor (`defeat` > `hit` > `fire`). Cosmetic
+cue drawing may tint, outline, or add adornment around the projected collision circle, but it must
+not translate, resize, replace, or reinterpret that circle. Reduced motion keeps the fire/hit/
+impact indicators and event ordering, while suppressing the camera impulse and rapid pulse.
+
+`entityMoved` is not currently a movement-animation source. Its available net start/end values are
+ground pivots and can be `authoritativeResolution`; they do not define a walk, hop, fall, or
+collision-center path. Add a Rust versioned trajectory/provenance contract and frozen fixtures
+before interpolating actor motion.
 
 ### 13.5 Persistent objects and effects
 
@@ -1067,7 +1144,7 @@ During an input window the HUD exposes:
 - Current and upcoming turn order.
 - Wind direction and numeric magnitude.
 - Quantized angle and power.
-- Selected Basic/Basic Alt/Special name, icon, availability, and concise rule.
+- Selected Shot 1/Shot 2-or-melee/SS name, icon, availability, and concise rule.
 - Special gauge as numeric percent and progress graphic.
 - Movement allowance remaining.
 - Health/max health and statuses for every player.
@@ -1224,6 +1301,14 @@ changes authoritative simulation or tactical readability.
   object lifecycle, terrain/block change, elimination, pass, timeout, and victory each produce a
   representable ordered transition.
 - Every projectile retains its own samples and impact.
+- Feeding Frenzy followed by Carrion Call produces three `forced` crit records, consumes no crit RNG
+  draws, and records two charge consumptions plus exhaustion; ordinary crits retain independent draws.
+- Status transitions and ordered object lifecycles replay exactly from the pre-snapshot to the
+  post-snapshot. Missing, duplicate, unknown, stale, or mismatched records fault before publication;
+  a spawn-and-remove lifecycle invisible to snapshot diff remains representable.
+- Status durations tick only on the affected player's own completed turns. Count-based
+  `GuaranteeCrit` is consumed by strikes rather than the duration clock.
+- Ordinary health-zero/fall elimination removes all owned objects once with `ownerEliminated`.
 - An actor eliminated during settling cannot enter `PassiveSelection`; pass and timeout cannot bypass
   an owed passive choice.
 - Rejection and duplicate replay have exact non-mutation/idempotency assertions.
@@ -1277,10 +1362,10 @@ The eventual pinned scripts wrap commands equivalent to:
 
 ```text
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test --release -p db-sim-ffi
-cargo build --release -p db-sim-ffi
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo test --release -p db-sim-ffi --locked
+cargo build --release -p db-sim-ffi --locked
 
 dotnet restore client/DungeonBarrage.sln --locked-mode
 dotnet build client/DungeonBarrage.sln -c Release --no-restore
@@ -1308,39 +1393,41 @@ metadata and checksums; signing/notarization is required before public distribut
 ADR 0006, this v2 specification, `global.json`, `rust-toolchain.toml`, governing-plan status
 reconciliation, and `scripts/verify-toolchain.ps1` landed in the initial slice. On 2026-08-25 the
 pinned Godot 4.7.1 .NET editor and matching `4.7.1.stable.mono` export templates were installed and
-verified alongside .NET SDK 10.0.302 and Rust/Cargo 1.94.0. The validator now checks the editor,
-template version file, and Windows x86_64 debug/release template binaries. Remaining: wire this same
-validator into CI and reproduce the gate on a clean development machine.
+verified alongside .NET SDK 10.0.302 and Rust/Cargo 1.94.0. The validator checks the editor, template
+version file, and Windows x86_64 debug/release template binaries. This local C0 gate is complete.
+Per §20.6, the first .NET CI job arrives with real C3 tests and target-specific Godot/export jobs
+arrive when C4 claims those targets; a job that exercises no client is not a C0 acceptance signal.
 
-**Gate:** a clean machine can report the exact Godot/.NET/Rust versions, and no current-status or
-governing document still assigns authoritative gameplay or the future server to C#. Superseded ADRs
-remain unchanged as historical records.
+**Gate:** the pinned verifier reports the exact Godot/.NET/Rust versions on the development machine,
+and no current-status or governing document assigns authoritative gameplay or the future server to
+C#. Superseded ADRs remain unchanged as historical records.
 
-### C1 — Rust transition contract
+### C1 — Rust transition contract — complete 2026-08-26
 
-Delivered so far: transport-free `MatchConfig`, engine-neutral snapshots, multi-projectile traces,
+Delivered: transport-free `MatchConfig`, engine-neutral snapshots, multi-projectile traces,
 post-host turn/hash semantics, correct gauge deltas, the normalized command union, canonical command
 identity, generation-owning/idempotent `MatchSessionHost`, accepted/rejected duplicate replay,
 atomic post-snapshot/hash transitions, deterministic net-diff events, exact terrain dirty row-runs,
-bounded canonical ledger-byte accounting, movement-fall elimination progression, terminal-turn
-reason correctness at `SIMULATION_VERSION = 5`, plus a strict shared raw-request fixture bundle
-whose direct Rust replay freezes meaningful semantic expectations and exact hashes.
-
-Still required before the gate closes: complete per-strike/strike-impact/RNG/status/object
-provenance, authority-timeout transition, read-only preview, the session/ABI composite snapshot
-envelope, and the remaining §20.1 direct transition scenarios including real multi-strike, passive
-choice, object lifecycle, terrain/block change, timeout, and victory transitions. Full serialized
-response bytes remain a C2 production-serializer gate.
+bounded canonical ledger-byte accounting, authority-only timeout, exact strike/crit and status
+provenance, detached ordered trace/strike replay (including miss traces, crit/damage order, and the
+exact eliminating strike), ordered persistent-object lifecycle causes with exact replay reconciliation,
+movement-fall elimination progression, and the version-6 lifecycle corrections, plus a strict
+shared raw-request fixture bundle whose direct Rust replay freezes meaningful semantic expectations
+and exact hashes; producer-owned Arzum/Aleph random outcomes; read-only preview; opaque verified
+host-plus-ledger checkpoint restore; and direct passive, pass, timeout, terrain/block, strike-mutation,
+and elimination/victory scenarios. Persistent-object expiry and destruction still need real
+authoritative mechanics before their reserved causes can be emitted.
 
 **Gate:** §20.1 passes, including a real multi-strike and
 `transition.postStateHash == hash_state(host.state())`.
 
-### C2 — Real coarse FFI
+### C2 — Real coarse FFI — complete 2026-08-26
 
-Replace the placeholder handle with the Rust session host; implement
+The placeholder was replaced with the Rust session host. C2 implements
 create/apply/snapshot/terrain/preview, exact boxed-slice owned buffers, ABI versioning, handle
-poisoning, limits, and negative-path tests. Preserve the verified unwind profile and run its release
-guard test in CI.
+poisoning, strict closed DTOs, depth/count/byte limits, clone-serialize-commit atomicity, and the full
+negative-path suite. Production response bytes are frozen in the shared fixture bundle. CI runs the
+release guard, checks the exact export set, and Valgrind-checks repeated ownership cycles.
 
 **Gate:** the horizontal-test duel executes through the C ABI with the same transitions and final
 hash as the direct Rust fixture; leak and panic gates pass.
@@ -1408,6 +1495,9 @@ These do not block C1–C3 unless stated:
    free-look policy is a UX decision.
 4. **Launch architecture breadth:** Windows x64 is first; the date at which macOS/Linux become
    release-blocking depends on distribution planning, but no untested platform may be advertised.
+5. **Numa Pin balance after corrected duration semantics:** the engine now interprets two turns as
+   two turns of the affected player, independent of player count. Confirm whether the numeric value
+   remains two during balance playtesting; do not restore global-action ticking.
 
 Settled here and no longer open: Godot/C# versus an all-Rust client, bot location (Rust), local versus
 server timer ownership, initial online prediction (none), and future server language (Rust).

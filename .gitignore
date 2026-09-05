@@ -19,10 +19,13 @@ Cargo.lock.bak
 .godot/
 /client/export/
 export_presets.cfg
+!client/src/DungeonBarrage.Client/export_presets.cfg
 
 # Build output
 /dist/
 /out/
+/export/
+/.agents/
 
 # Credentials — NEVER commit. See docs/SECURITY_BASELINE.md section 4.
 .github-token
@@ -42,3 +45,18 @@ Thumbs.db
 
 # Optional WASM output (dormant, see ADR 0004)
 /crates/db-sim-wasm/pkg/
+
+# .NET client build output
+[Bb]in/
+[Oo]bj/
+*.user
+
+# Native simulation libraries staged for local runs.
+#
+# These are `cargo build --release -p db-sim-ffi` output, not source. Committing them would put a
+# 600 KB binary in history on every rebuild and — worse — let the repository disagree with the
+# crate it was built from. `client/native/README.md` documents how to repopulate them.
+/client/native/*/*.dll
+/client/native/*/*.so
+/client/native/*/*.dylib
+/client/native/*/*.pdb

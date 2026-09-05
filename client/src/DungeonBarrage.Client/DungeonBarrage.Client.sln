@@ -1,0 +1,62 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DungeonBarrage.Client", "DungeonBarrage.Client.csproj", "{9BFBB02A-E87C-48E3-9476-9B268A0A438C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DungeonBarrage.Client.Contracts", "..\DungeonBarrage.Client.Contracts\DungeonBarrage.Client.Contracts.csproj", "{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DungeonBarrage.Client.Interop", "..\DungeonBarrage.Client.Interop\DungeonBarrage.Client.Interop.csproj", "{78951F3F-9A1E-48B5-AE02-502011969720}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|Any CPU = Release|Any CPU
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Debug|x64.Build.0 = Debug|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Debug|x86.Build.0 = Debug|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Release|x64.ActiveCfg = Release|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Release|x64.Build.0 = Release|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Release|x86.ActiveCfg = Release|Any CPU
+		{9BFBB02A-E87C-48E3-9476-9B268A0A438C}.Release|x86.Build.0 = Release|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Debug|x64.Build.0 = Debug|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Debug|x86.Build.0 = Debug|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Release|x64.ActiveCfg = Release|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Release|x64.Build.0 = Release|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Release|x86.ActiveCfg = Release|Any CPU
+		{A831CFE5-DB67-4F08-BC49-ADA58AB26B3B}.Release|x86.Build.0 = Release|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Debug|x64.Build.0 = Debug|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Debug|x86.Build.0 = Debug|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Release|Any CPU.Build.0 = Release|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Release|x64.ActiveCfg = Release|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Release|x64.Build.0 = Release|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Release|x86.ActiveCfg = Release|Any CPU
+		{78951F3F-9A1E-48B5-AE02-502011969720}.Release|x86.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

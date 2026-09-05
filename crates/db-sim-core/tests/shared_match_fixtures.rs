@@ -20,12 +20,12 @@ use db_sim_core::client_contract::{
 };
 use db_sim_core::hash::hash_state;
 use db_sim_core::match_session::{
-    MatchCommand, MatchCommandKind, MatchSessionHost, MatchTransition, PresentationEventKind,
-    TransitionDisposition,
+    AbilityPreviewRequest, MatchCommand, MatchCommandKind, MatchSessionHost, MatchTransition,
+    PresentationEventKind, TransitionDisposition,
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig};
 use db_sim_core::types::{AbilitySlot, Appearance};
-use db_sim_core::{CONTENT_VERSION, SIMULATION_VERSION};
+use db_sim_core::{CONTENT_VERSION, FIXED_TICK_RATE, POSITION_SCALE, SIMULATION_VERSION};
 use serde::Deserialize;
 
 const FIXTURE_SCHEMA_VERSION: u32 = 1;
@@ -40,6 +40,9 @@ struct FixtureManifest {
     purpose: String,
     versions: FixtureVersions,
     create_request_file: String,
+    create_response_file: String,
+    initial_snapshot_response_file: String,
+    preview: PreviewExpectation,
     initial: InitialExpectation,
     steps: Vec<FixtureStep>,
     final_: FinalExpectation,
@@ -70,7 +73,18 @@ struct InitialExpectation {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FixtureStep {
     request_file: String,
+    response_file: String,
     expect: StepExpectation,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreviewExpectation {
+    request_file: String,
+    response_file: String,
+    legal: bool,
+    snapshot_generation: u64,
+    minimum_projectile_traces: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +153,52 @@ enum FixtureDisposition {
     Accepted,
     Rejected,
     DuplicateReplay,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AbilityPreviewRequestDto {
+    schema_version: u32,
+    expected_snapshot_generation: u64,
+    player_id: String,
+    kind: PreviewKindDto,
+    slot: AbilitySlotDto,
+    angle_millidegrees: i32,
+    power_basis_points: i32,
+    target_player_id: Option<String>,
+    secondary_target_player_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum PreviewKindDto {
+    #[serde(rename = "ability")]
+    Ability,
+}
+
+impl From<AbilityPreviewRequestDto> for AbilityPreviewRequest {
+    fn from(value: AbilityPreviewRequestDto) -> Self {
+        let AbilityPreviewRequestDto {
+            schema_version,
+            expected_snapshot_generation,
+            player_id,
+            kind: PreviewKindDto::Ability,
+            slot,
+            angle_millidegrees,
+            power_basis_points,
+            target_player_id,
+            secondary_target_player_id,
+        } = value;
+        Self {
+            schema_version,
+            expected_snapshot_generation,
+            player_id,
+            slot: slot.into_core(),
+            angle_millidegrees,
+            power_basis_points,
+            target_player_id,
+            secondary_target_player_id,
+        }
+    }
 }
 
 impl From<FixtureDisposition> for TransitionDisposition {
@@ -271,12 +331,25 @@ enum MatchCommandDto {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 enum AbilitySlotDto {
-    #[serde(rename = "basic")]
-    Basic,
-    #[serde(rename = "basicAlt")]
-    BasicAlt,
-    #[serde(rename = "special")]
-    Special,
+    #[serde(rename = "main")]
+    Main,
+    #[serde(rename = "secondary")]
+    Secondary,
+    #[serde(rename = "meleeTool")]
+    MeleeTool,
+    #[serde(rename = "trinket")]
+    Trinket,
+}
+
+impl AbilitySlotDto {
+    const fn into_core(self) -> AbilitySlot {
+        match self {
+            Self::Main => AbilitySlot::Basic,
+            Self::Secondary => AbilitySlot::BasicAlt,
+            Self::MeleeTool => AbilitySlot::Special,
+            Self::Trinket => AbilitySlot::Trinket,
+        }
+    }
 }
 
 fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -350,11 +423,7 @@ impl From<MatchCommandDto> for MatchCommand {
                 expected_turn_number,
                 expected_snapshot_generation,
                 kind: MatchCommandKind::Ability {
-                    slot: match slot {
-                        AbilitySlotDto::Basic => AbilitySlot::Basic,
-                        AbilitySlotDto::BasicAlt => AbilitySlot::BasicAlt,
-                        AbilitySlotDto::Special => AbilitySlot::Special,
-                    },
+                    slot: slot.into_core(),
                     angle_millidegrees,
                     power_basis_points,
                     target_player_id,
@@ -601,6 +670,8 @@ fn assert_hash_or_collect_pending(
 }
 
 fn assert_initial_snapshot(snapshot: &MatchSnapshot, expected: &InitialExpectation) {
+    assert_eq!(snapshot.position_scale, POSITION_SCALE);
+    assert_eq!(snapshot.fixed_tick_rate, FIXED_TICK_RATE);
     assert_eq!(snapshot.generation, expected.snapshot_generation);
     assert_eq!(snapshot.turn_number, expected.turn_number);
     assert_eq!(snapshot.phase, expected.phase.into());
@@ -619,6 +690,8 @@ fn assert_step(
     transition: &MatchTransition,
     expected: &StepExpectation,
 ) {
+    assert_eq!(transition.post_snapshot.position_scale, POSITION_SCALE);
+    assert_eq!(transition.post_snapshot.fixed_tick_rate, FIXED_TICK_RATE);
     assert_eq!(transition.disposition, expected.disposition.into());
     assert_eq!(transition.pre_snapshot_generation, expected.pre_generation);
     assert_eq!(
@@ -629,7 +702,14 @@ fn assert_step(
         transition.post_snapshot.generation,
         expected.post_generation
     );
-    assert_eq!(session.generation(), expected.post_generation);
+    assert_eq!(
+        session.generation(),
+        expected.post_generation,
+        "session generation after {} (disposition {:?}, transition post {})",
+        actor_id,
+        transition.disposition,
+        transition.post_snapshot_generation
+    );
     assert_eq!(
         transition.post_snapshot.turn_number,
         expected.post_turn_number
@@ -705,6 +785,10 @@ fn horizontal_test_duel_replays_through_the_direct_session_contract() {
     );
 
     let create: MatchCreateRequestDto = read_wire_request(&root, &manifest.create_request_file);
+    let _create_response: serde_json::Value =
+        read_wire_request(&root, &manifest.create_response_file);
+    let _initial_snapshot_response: serde_json::Value =
+        read_wire_request(&root, &manifest.initial_snapshot_response_file);
     assert_eq!(create.schema_version, CLIENT_CONTRACT_VERSION);
     assert_eq!(create.simulation_version, SIMULATION_VERSION);
     assert_eq!(create.content_version, CONTENT_VERSION);
@@ -726,9 +810,29 @@ fn horizontal_test_duel_replays_through_the_direct_session_contract() {
         &mut pending_hashes,
     );
 
+    let preview_request: AbilityPreviewRequestDto =
+        read_wire_request(&root, &manifest.preview.request_file);
+    let _preview_response: serde_json::Value =
+        read_wire_request(&root, &manifest.preview.response_file);
+    let preview = session
+        .preview(&preview_request.into())
+        .expect("the shared preview fixture must not fault");
+    assert_eq!(preview.legal, manifest.preview.legal);
+    assert_eq!(
+        preview.snapshot_generation,
+        manifest.preview.snapshot_generation
+    );
+    assert!(
+        preview.projectile_traces.len() >= manifest.preview.minimum_projectile_traces,
+        "preview produced {} traces; fixture requires at least {}",
+        preview.projectile_traces.len(),
+        manifest.preview.minimum_projectile_traces
+    );
+
     let mut last_transition_hash = initial.authoritative_state_hash.clone();
     for (index, step) in manifest.steps.iter().enumerate() {
         let wire: MatchCommandDto = read_wire_request(&root, &step.request_file);
+        let _response: serde_json::Value = read_wire_request(&root, &step.response_file);
         let command: MatchCommand = wire.into();
         let actor_id = command.player_id.clone();
         let before = session.snapshot();

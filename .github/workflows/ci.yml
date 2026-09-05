@@ -4,9 +4,8 @@
 # that is documented but not gated is an intention, not a control — everything in that
 # section that CAN be automated is automated here.
 #
-# The web/npm job was removed with the TypeScript surface (ADR 0004). C# jobs are added at
-# the milestone that introduces the client and server, not before — a job that tests nothing
-# still reports green, which is worse than an absent job.
+# The web/npm job was removed with the TypeScript surface (ADR 0004). The Godot-free C#
+# contracts/interop solution is gated below against a freshly built native core.
 
 name: CI
 
@@ -35,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+        run: rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
@@ -43,20 +42,100 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+      - name: Test FFI unwind guard in the shipped profile
+        run: cargo test --release -p db-sim-ffi --locked
 
       - name: Build FFI cdylib
-        run: cargo build -p db-sim-ffi --release
+        run: cargo build --release -p db-sim-ffi --locked
+
+      - name: Verify the exact gameplay export surface
+        shell: bash
+        run: |
+          actual=$(nm -D --defined-only target/release/libdb_sim_ffi.so \
+            | awk '{print $3}' \
+            | grep '^db_sim_' \
+            | sort)
+          expected=$(printf '%s\n' \
+            db_sim_abi_version \
+            db_sim_buffer_free \
+            db_sim_content_version \
+            db_sim_match_apply \
+            db_sim_match_bot_decide \
+            db_sim_match_create \
+            db_sim_match_destroy \
+            db_sim_match_preview \
+            db_sim_match_snapshot \
+            db_sim_match_terrain \
+            db_sim_match_timeout \
+            db_sim_roster \
+            db_sim_simulation_version \
+            | sort)
+          if [ "$actual" != "$expected" ]; then
+            printf 'Expected exports:\n%s\nActual exports:\n%s\n' "$expected" "$actual"
+            exit 1
+          fi
+
+      - name: Leak-check the complete FFI ownership cycle
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes valgrind
+          test_binary=$(cargo test --release -p db-sim-ffi --locked --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "db_sim_ffi") | .executable' \
+            | tail -n 1)
+          test -n "$test_binary"
+          valgrind \
+            --leak-check=full \
+            --show-leak-kinds=definite,indirect \
+            --errors-for-leak-kinds=definite,indirect \
+            --error-exitcode=1 \
+            "$test_binary" \
+            --exact tests::repeated_create_apply_preview_snapshot_terrain_and_destroy_cycles_complete_cleanly
+
+  client:
+    name: C# contracts and native interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build native authority
+        run: cargo build --release -p db-sim-ffi --locked
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore locked dependencies
+        run: dotnet restore client/DungeonBarrage.sln --locked-mode
+
+      - name: Build
+        run: dotnet build client/DungeonBarrage.sln -c Release --no-restore
+
+      - name: Verify Linux native test payload
+        run: test -f client/tests/DungeonBarrage.Client.Interop.Tests/bin/Release/net10.0/libdb_sim_ffi.so
+
+      - name: Test
+        run: dotnet test client/DungeonBarrage.sln -c Release --no-build
+
+      - name: Format
+        run: dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore
 
   memory-safety:
     name: Memory safety invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup toolchain install 1.94.0 --profile minimal
       - uses: Swatinem/rust-cache@v2
 
       # ADR 0001 §1. Grepped rather than assumed: a dropped `forbid` line would silently

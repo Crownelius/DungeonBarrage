@@ -426,8 +426,8 @@ mod tests {
     use crate::types::StatusChange;
     use crate::types::TurnEndReason;
     use crate::types::{
-        Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PlayerState, SimulationState,
-        TerrainMask,
+        Appearance, DamageEvent, EffectTrigger, MatchPhase, Material, PlayerState, RandomOutcome,
+        SimulationState, TerrainMask,
     };
 
     // -----------------------------------------------------------------------------------
@@ -451,10 +451,9 @@ mod tests {
             health: 300,
             max_health: 300,
             position,
-            character_id: "test-character".to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
+            loadout: crate::types::Loadout::launch_default(),
+            ammo: crate::types::DEFAULT_AMMO,
+            trinket_charge: 0,
             statuses: Vec::new(),
             appearance: Appearance::default(),
         }
@@ -523,6 +522,7 @@ mod tests {
         terrain_cells_removed: u32,
         terrain_ops: Vec<TerrainOperation>,
         object_changes: Vec<PersistentObjectChange>,
+        random_outcomes: Vec<RandomOutcome>,
         status_changes: Vec<StatusChange>,
     }
 
@@ -535,6 +535,7 @@ mod tests {
                 terrain_cells_removed: 0,
                 terrain_ops: Vec::new(),
                 object_changes: Vec::new(),
+                random_outcomes: Vec::new(),
                 status_changes: Vec::new(),
             }
         }
@@ -556,6 +557,7 @@ mod tests {
                 terrain_cells_removed: &mut self.terrain_cells_removed,
                 terrain_ops: &mut self.terrain_ops,
                 object_changes: &mut self.object_changes,
+                random_outcomes: &mut self.random_outcomes,
                 status_changes: &mut self.status_changes,
             };
             resolve(&mut ctx, effect)
@@ -589,7 +591,14 @@ mod tests {
         );
         assert_eq!(turret.position, impact);
         assert_eq!(turret.owner_id, "emi");
-        assert_eq!(fixture.object_changes.len(), 1);
+        assert_eq!(
+            fixture.object_changes,
+            vec![PersistentObjectChange {
+                object: (*turret).clone(),
+                transition: PersistentObjectTransition::Spawned,
+            }],
+            "the producer records the complete spawned turret",
+        );
     }
 
     #[test]
@@ -599,6 +608,10 @@ mod tests {
 
         let first_impact = FixedPoint::new(1_024, 0);
         assert!(fixture.resolve_effect("emi", first_impact, &effect).is_ok());
+        let Some(first_turret) = fixture.state.objects.first().cloned() else {
+            panic!("the first turret must exist")
+        };
+        fixture.object_changes.clear();
         let second_impact = FixedPoint::new(2_048, 0);
         assert!(
             fixture
@@ -619,6 +632,22 @@ mod tests {
         assert_eq!(
             turret.position, second_impact,
             "the second turret replaces the first"
+        );
+        assert_eq!(
+            fixture.object_changes,
+            vec![
+                PersistentObjectChange {
+                    object: first_turret,
+                    transition: PersistentObjectTransition::Removed {
+                        cause: PersistentObjectRemovalCause::Replaced,
+                    },
+                },
+                PersistentObjectChange {
+                    object: (**turret).clone(),
+                    transition: PersistentObjectTransition::Spawned,
+                },
+            ],
+            "replacement removes the exact old turret before spawning the new one",
         );
     }
 
@@ -699,9 +728,21 @@ mod tests {
             FixedPoint::new(700_000, 0),
             FixedPoint::new(800_000, 0),
         ];
-        for landing in landings {
-            assert!(fixture.resolve_effect("aleph", landing, &effect).is_ok());
+        let Some((ninth_landing, first_eight)) = landings.split_last() else {
+            panic!("the fixture must contain nine landings")
+        };
+        for landing in first_eight {
+            assert!(fixture.resolve_effect("aleph", *landing, &effect).is_ok());
         }
+        let Some(oldest) = fixture.state.objects.first().cloned() else {
+            panic!("eight embedded knives must exist before the ninth")
+        };
+        fixture.object_changes.clear();
+        assert!(
+            fixture
+                .resolve_effect("aleph", *ninth_landing, &effect)
+                .is_ok()
+        );
 
         let knives: Vec<_> = fixture
             .state
@@ -723,6 +764,31 @@ mod tests {
         assert!(
             sequences.contains(&8),
             "the newest (sequence 8, ninth landing) must remain"
+        );
+        let Some(newest) = fixture
+            .state
+            .objects
+            .iter()
+            .find(|object| object.sequence == 8)
+            .cloned()
+        else {
+            panic!("the ninth knife must remain")
+        };
+        assert_eq!(
+            fixture.object_changes,
+            vec![
+                PersistentObjectChange {
+                    object: newest,
+                    transition: PersistentObjectTransition::Spawned,
+                },
+                PersistentObjectChange {
+                    object: oldest,
+                    transition: PersistentObjectTransition::Removed {
+                        cause: PersistentObjectRemovalCause::CapacityEvicted,
+                    },
+                },
+            ],
+            "capacity eviction must retain spawn-then-remove causal order",
         );
     }
 
@@ -845,6 +911,9 @@ mod tests {
                 .is_ok()
         );
 
+        let detonated = fixture.state.objects.clone();
+        fixture.object_changes.clear();
+
         assert!(
             fixture
                 .resolve_effect("aleph", landing_c, &chain_detonate_effect())
@@ -865,6 +934,19 @@ mod tests {
             fixture.terrain_ops.len(),
             3,
             "one terrain operation per detonation"
+        );
+        let expected_changes: Vec<PersistentObjectChange> = detonated
+            .into_iter()
+            .map(|object| PersistentObjectChange {
+                object,
+                transition: PersistentObjectTransition::Removed {
+                    cause: PersistentObjectRemovalCause::Detonated,
+                },
+            })
+            .collect();
+        assert_eq!(
+            fixture.object_changes, expected_changes,
+            "chain removals must retain exact deterministic sequence order",
         );
 
         // Cell coordinates: position / POSITION_SCALE(1024), floored.

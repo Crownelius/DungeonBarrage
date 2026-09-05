@@ -3,8 +3,9 @@
 //! This is the security boundary described by `SECURITY_BASELINE.md` §2, §5, and §6: the
 //! one place untrusted client input meets authoritative state. Every field on every
 //! command is treated as adversarial input until the checks below have passed. Nothing
-//! here trusts a client-declared identity, range, or gauge state — every fact is
-//! re-derived from `SimulationState` and the frozen `character` roster.
+//! here trusts a client-declared identity, range, or ammo state — every fact is
+//! re-derived from `SimulationState` and the fixed character roster. A frozen item-catalog
+//! fallback exists only for versioned replay compatibility.
 //!
 //! # Validation is total before any mutation
 //!
@@ -88,8 +89,7 @@
 //! end-to-end until those land, which is expected, not a defect here
 //! (`docs/MODULE_OWNERSHIP.md` rule 4).
 
-use crate::character;
-use crate::fixed::{self, BODY_WIDTH, FixedPoint};
+use crate::fixed::{self, FixedPoint, PLAYER_COLLISION_RADIUS};
 use crate::hash;
 use crate::resolve;
 use crate::rng::Rng;
@@ -98,7 +98,7 @@ use std::collections::BTreeMap;
 
 /// Gauge gained per point of damage the actor deals to another character this action, in
 /// hundredths (`CHARACTERS.md` §2: "+0.40 per point of damage dealt").
-const GAUGE_PER_DAMAGE_DEALT: u16 = 40;
+const _GAUGE_PER_DAMAGE_DEALT: u16 = 40;
 
 /// Gauge gained per point of backlash damage the actor takes this action, in hundredths
 /// (`CHARACTERS.md` §2: "+0.25 per point of damage taken").
@@ -106,11 +106,11 @@ const GAUGE_PER_DAMAGE_DEALT: u16 = 40;
 /// Scoped to *this action's* backlash, not damage taken on other players' turns — gauge
 /// gained from being attacked is a turn-scheduler concern (it happens on someone else's
 /// command), not something `apply_ability` can observe or award.
-const GAUGE_PER_DAMAGE_TAKEN: u16 = 25;
+const _GAUGE_PER_DAMAGE_TAKEN: u16 = 25;
 
 /// Gauge gained per point healed by the actor this action, in hundredths
 /// (`CHARACTERS.md` §2: "+0.30 per point, ally healed").
-const GAUGE_PER_HEALED: u16 = 30;
+const _GAUGE_PER_HEALED: u16 = 30;
 
 /// Rejection-sampling bound for a crit roll, one basis point per unit
 /// (`fixed::BASIS_POINTS`, restated as a `u32` literal because [`Rng::bounded`] takes
@@ -139,7 +139,13 @@ const DESTRUCTIBLE_TERRAIN: MaterialMask = MaterialMask::SOFT;
 pub fn validate_ability(
     state: &SimulationState,
     command: &AbilityCommand,
-) -> Result<(&'static CharacterDefinition, &'static AbilityDefinition), CommandRejection> {
+) -> Result<
+    (
+        &'static crate::character_roster::CharacterProfile,
+        &'static AbilityDefinition,
+    ),
+    CommandRejection,
+> {
     // 1. Replay protection, unconditionally first (see doc comment above).
     if state.has_processed(&command.command_id) {
         return Err(CommandRejection::DuplicateCommand);
@@ -172,25 +178,25 @@ pub fn validate_ability(
         return Err(CommandRejection::TurnVersionMismatch);
     }
 
-    // 6. Character lookup against the frozen roster. An id with no match is a forged or
-    // corrupted claim — a security event.
-    let Some(character) = character::find(&player.character_id) else {
-        return Err(CommandRejection::UnknownCharacter);
-    };
-
-    // 7. The character must actually have an ability in the claimed slot (e.g. only
-    // Aleph has `BasicAlt`). A security event: a legitimate client never sends this.
-    let Some(ability) = character.ability(command.slot) else {
+    // 6. Fixed-kit lookup, with a narrow legacy replay fallback. A missing or wrong-slot
+    // ability is rejected; clients cannot author an ability identifier.
+    let profile = crate::character_roster::for_player(player)
+        .or_else(|| crate::character_roster::find(crate::types::CROW_ID))
+        .ok_or(CommandRejection::AbilityNotAvailable)?;
+    let Some(ability) = crate::character::equipped_ability(player, command.slot) else {
         return Err(CommandRejection::AbilityNotAvailable);
     };
 
-    // 8. Special requires (and will consume) a full gauge.
-    if command.slot.consumes_gauge() && !player.special_ready() {
+    // 8. SS spends a full gauge; normal character actions are unlimited.
+    if command.slot == AbilitySlot::Trinket
+        && player.trinket_charge < crate::types::TRINKET_CHARGE_FULL
+    {
         return Err(CommandRejection::GaugeNotReady);
     }
 
-    // 9. One attack per turn.
-    if state.has_attacked_this_turn {
+    // 9. One normal attack per turn. A charged SS is a free action and may be
+    // used before the normal attack without consuming it.
+    if command.slot != AbilitySlot::Trinket && state.has_attacked_this_turn {
         return Err(CommandRejection::AlreadyAttacked);
     }
 
@@ -203,12 +209,15 @@ pub fn validate_ability(
     if command.power_basis_points < 0 || command.power_basis_points > 10_000 {
         return Err(CommandRejection::InputOutOfRange);
     }
+    if command.power_basis_points > max_launch_power(state) {
+        return Err(CommandRejection::InputOutOfRange);
+    }
 
     // 11. Any target the command names must exist, be alive, and (for two-target
     // abilities) be distinct from the other target.
     validate_targets(state, command)?;
 
-    Ok((character, ability))
+    Ok((profile, ability))
 }
 
 /// Validates the targets named on an [`AbilityCommand`], if any.
@@ -255,7 +264,7 @@ fn validate_targets(
 /// only overwritten once every fallible step has succeeded — see the module doc comment
 /// for why this is what makes application atomic in effect without per-field rollback.
 pub fn apply_ability(state: &mut SimulationState, command: &AbilityCommand) -> CommandResult {
-    let (_character, ability) = match validate_ability(state, command) {
+    let (_item, ability) = match validate_ability(state, command) {
         Ok(pair) => pair,
         Err(rejection) => return CommandResult::Rejected(rejection),
     };
@@ -288,20 +297,22 @@ fn resolve_ability(
     let mut strike_records: Vec<StrikeResolution> = Vec::new();
     let mut status_changes: Vec<StatusChange> = Vec::new();
 
-    // Consuming the gauge and marking the attack are unconditional consequences of a
+    // Spending ammo and marking the attack are unconditional consequences of a
     // validated command being committed, independent of what the attack goes on to hit.
-    if command.slot.consumes_gauge()
-        && let Some(actor) = state.player_mut(&command.player_id)
-    {
-        actor.special_gauge = 0;
+    if let Some(actor) = state.player_mut(&command.player_id) {
+        if command.slot == AbilitySlot::Trinket {
+            actor.trinket_charge = 0;
+        } else {
+            actor.spend_ammo(command.slot);
+        }
     }
-    state.has_attacked_this_turn = true;
+    if command.slot != AbilitySlot::Trinket {
+        state.has_attacked_this_turn = true;
+    }
 
-    // Measured after any special-gauge consumption and before this action's award. The
-    // outcome reports what this action earned, not the actor's resulting total.
-    let gauge_before_award = state
-        .player(&command.player_id)
-        .map_or(0, |player| player.special_gauge);
+    // Historical gauge field on CommandOutcome still exists; this envelope does not
+    // award special gauge. Report zero earned.
+    let gauge_before_award = 0u16;
 
     let actor_position = state
         .player(&command.player_id)
@@ -317,6 +328,7 @@ fn resolve_ability(
     let mut terrain_cells_removed: u32 = 0;
     let mut damage_by_player: BTreeMap<String, DamageEvent> = BTreeMap::new();
     let mut object_changes: Vec<PersistentObjectChange> = Vec::new();
+    let mut random_outcomes: Vec<RandomOutcome> = Vec::new();
     let mut dealt_to_others: u32 = 0;
     // Where the attack itself landed — the origin `ResolveContext::impact_point` gives
     // every effect below. Defaults to the actor's own position so a targetless area
@@ -329,7 +341,7 @@ fn resolve_ability(
             let strikes = ability.strikes_per_turn.max(1);
             for sequence in 0..u32::from(strikes) {
                 let input = BallisticInput {
-                    origin: actor_position,
+                    origin: fixed::player_collision_center(actor_position),
                     angle_millidegrees: command.angle_millidegrees,
                     power_basis_points: command.power_basis_points,
                     wind_per_tick: state.wind_per_tick,
@@ -350,7 +362,10 @@ fn resolve_ability(
                     .players
                     .iter()
                     .filter(|p| !p.is_eliminated() && p.id != command.player_id)
-                    .map(|p| (p.id.clone(), p.position, BODY_WIDTH))
+                    .map(|p| {
+                        let (center, radius) = fixed::player_collision_circle(p.position);
+                        (p.id.clone(), center, radius)
+                    })
                     .collect();
 
                 let result = crate::ballistics::integrate(
@@ -381,9 +396,12 @@ fn resolve_ability(
                         .players
                         .iter()
                         .filter(|p| p.id != command.player_id && !p.is_eliminated())
-                        .filter(|p| fixed::within_radius(p.position, impact_position, BODY_WIDTH))
-                        .min_by_key(|p| fixed::distance_squared(p.position, impact_position))
-                        .map(|p| p.id.clone());
+                        .map(|player| (player, fixed::player_collision_center(player.position)))
+                        .filter(|(_, center)| {
+                            fixed::within_radius(*center, impact_position, PLAYER_COLLISION_RADIUS)
+                        })
+                        .min_by_key(|(_, center)| fixed::distance_squared(*center, impact_position))
+                        .map(|(player, _)| player.id.clone());
 
                     if let Some(target_id) = direct_target {
                         let crit = resolve_crit_for_target(
@@ -527,6 +545,7 @@ fn resolve_ability(
             damage: &mut damage_by_player,
             terrain_ops: &mut terrain_ops,
             object_changes: &mut object_changes,
+            random_outcomes: &mut random_outcomes,
             terrain_cells_removed: &mut terrain_cells_removed,
             status_changes: &mut status_changes,
         };
@@ -558,7 +577,11 @@ fn resolve_ability(
     award_gauge(
         state,
         &command.player_id,
-        dealt_to_others,
+        if command.slot == AbilitySlot::Trinket {
+            0
+        } else {
+            dealt_to_others
+        },
         backlash_total,
         healed_total,
     );
@@ -596,6 +619,7 @@ fn resolve_ability(
         damage: damage_by_player.into_values().collect(),
         object_changes,
         strikes: strike_records,
+        random_outcomes,
         status_changes,
         gauge_gained: gauge_gained(state, &command.player_id, gauge_before_award),
         terrain_cells_removed,
@@ -607,10 +631,8 @@ fn resolve_ability(
 ///
 /// `before_award` is captured after a committed special consumes its old gauge, so spending
 /// a full gauge cannot turn this action's earned amount into an underflow or a total.
-fn gauge_gained(state: &SimulationState, player_id: &str, before_award: u16) -> u16 {
-    state.player(player_id).map_or(0, |player| {
-        player.special_gauge.saturating_sub(before_award)
-    })
+fn gauge_gained(_state: &SimulationState, _player_id: &str, _before_award: u16) -> u16 {
+    0
 }
 
 /// Resolves one primary strike's critical-hit source without inventing an RNG draw.
@@ -636,21 +658,48 @@ fn resolve_crit_for_target(
     roll_crit(rng, ability.crit_chance_basis_points)
 }
 
+/// Maximum legal launch power this turn after walking. A 20-cell aim line is 100% of this
+/// value. Floored at 10% so a full-move turn can still take a weak shot.
+#[must_use]
+pub fn max_launch_power(state: &SimulationState) -> i32 {
+    let allowance = state
+        .player(&state.active_player_id)
+        .and_then(crate::character_roster::for_player)
+        .map_or_else(
+            || crate::character::fighter().movement.per_turn(),
+            |profile| profile.movement_allowance,
+        );
+    if allowance <= 0 {
+        return 10_000;
+    }
+    let remaining = state.movement_remaining.max(0);
+    let scaled = i64::from(10_000)
+        .saturating_mul(i64::from(remaining))
+        .checked_div(i64::from(allowance))
+        .unwrap_or(10_000);
+    i32::try_from(scaled).unwrap_or(10_000).max(1_000)
+}
+
 /// Awards gauge to the actor for this action, per `CHARACTERS.md` §2's per-point rates
 /// (`GAUGE_PER_DAMAGE_DEALT`, `GAUGE_PER_DAMAGE_TAKEN`, `GAUGE_PER_HEALED`), routed through
 /// [`PlayerState::add_gauge`] so the per-action and full-gauge caps are enforced by the one
 /// reviewed implementation of that cap rather than a second copy of it here.
-fn award_gauge(state: &mut SimulationState, player_id: &str, dealt: u32, taken: u32, healed: u32) {
-    let raw = dealt
-        .saturating_mul(u32::from(GAUGE_PER_DAMAGE_DEALT))
-        .saturating_add(taken.saturating_mul(u32::from(GAUGE_PER_DAMAGE_TAKEN)))
-        .saturating_add(healed.saturating_mul(u32::from(GAUGE_PER_HEALED)));
-    // `add_gauge` itself caps at `GAUGE_MAX_PER_ACTION`, so an oversized `raw` value only
-    // needs to survive the u16 conversion without wrapping — saturating to `u16::MAX` does
-    // that, and the real cap is enforced immediately afterward by `add_gauge`.
-    let amount = u16::try_from(raw).unwrap_or(u16::MAX);
+fn award_gauge(
+    state: &mut SimulationState,
+    player_id: &str,
+    dealt: u32,
+    _taken: u32,
+    _healed: u32,
+) {
+    if dealt == 0 {
+        return;
+    }
     if let Some(actor) = state.player_mut(player_id) {
-        actor.add_gauge(amount);
+        // Two damaging hits fill a crown or anklet.
+        actor.trinket_charge = actor
+            .trinket_charge
+            .saturating_add(5_000)
+            .min(crate::types::TRINKET_CHARGE_FULL);
     }
 }
 
@@ -881,47 +930,11 @@ pub fn apply_passive_choice(
 /// The validation half of [`apply_passive_choice`], split out so it can run against the
 /// pre-mutation state exactly like [`validate_ability`] does.
 fn validate_passive_choice(
-    state: &SimulationState,
-    command: &PassiveChoiceCommand,
+    _state: &SimulationState,
+    _command: &PassiveChoiceCommand,
 ) -> Result<&'static CharacterDefinition, CommandRejection> {
-    if state.has_processed(&command.command_id) {
-        return Err(CommandRejection::DuplicateCommand);
-    }
-
-    let Some(player) = state.player(&command.player_id) else {
-        return Err(CommandRejection::PlayerEliminated);
-    };
-    if player.is_eliminated() {
-        return Err(CommandRejection::PlayerEliminated);
-    }
-
-    if command.player_id != state.active_player_id {
-        return Err(CommandRejection::NotActivePlayer);
-    }
-
-    if state.phase != MatchPhase::PassiveSelection || player.has_chosen_passive {
-        return Err(CommandRejection::PassiveAlreadyChosen);
-    }
-
-    if command.expected_turn_number != state.turn_number {
-        return Err(CommandRejection::TurnVersionMismatch);
-    }
-
-    let Some(character) = character::find(&player.character_id) else {
-        return Err(CommandRejection::UnknownCharacter);
-    };
-
-    if !character
-        .passives
-        .iter()
-        .any(|passive| passive.id == command.passive_id)
-    {
-        // The chosen id does not belong to this character's own pool — a client cannot
-        // legally offer a passive from a different character's kit. Security event.
-        return Err(CommandRejection::InvalidPassive);
-    }
-
-    Ok(character)
+    // This envelope has no mid-match passive choice. Leftover C1 callers fail closed.
+    Err(CommandRejection::PassiveAlreadyChosen)
 }
 
 /// Performs the mutating half of [`apply_passive_choice`] on the caller's working copy.
@@ -932,10 +945,7 @@ fn resolve_passive_choice(
 ) -> CommandOutcome {
     let turn_before = state.turn_number;
 
-    if let Some(actor) = state.player_mut(&command.player_id) {
-        actor.passive_id = Some(command.passive_id.clone());
-        actor.has_chosen_passive = true;
-    }
+    let _ = state.player_mut(&command.player_id);
 
     if let Err(idx) = state
         .processed_command_ids
@@ -960,6 +970,7 @@ fn resolve_passive_choice(
         object_changes: Vec::new(),
         // Choosing a passive resolves no strikes and touches no statuses.
         strikes: Vec::new(),
+        random_outcomes: Vec::new(),
         status_changes: Vec::new(),
         gauge_gained: 0,
         terrain_cells_removed: 0,
@@ -972,7 +983,7 @@ fn resolve_passive_choice(
 // states the expectation far more clearly than threading a Result through every case.
 // The production paths in this module remain panic-free, which is what the lint protects.
 // Matches the precedent set by `terrain::tests` and `character::tests`.
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::terrain;
@@ -991,27 +1002,17 @@ mod tests {
         }
     }
 
-    fn player(id: &str, character_id: &str, position: FixedPoint) -> PlayerState {
-        PlayerState {
-            id: id.to_string(),
-            team: 0,
-            health: 999,
-            max_health: 999,
-            position,
-            character_id: character_id.to_string(),
-            passive_id: None,
-            special_gauge: 0,
-            has_chosen_passive: false,
-            statuses: Vec::new(),
-            appearance: Appearance::default(),
-        }
+    fn player(id: &str, _character_id: &str, position: FixedPoint) -> PlayerState {
+        let mut fighter = PlayerState::crow(id, 0, position);
+        fighter.health = 999;
+        fighter.max_health = 999;
+        fighter
     }
 
-    /// A two-player match with `attacker` (huck) active, in `AimingAndSelection`, turn 1,
-    /// with real launch-roster character ids so `character::find` resolves.
+    /// A two-player crow duel with `attacker` active in `AimingAndSelection`.
     fn base_state() -> SimulationState {
-        let attacker = player("attacker", "huck", FixedPoint::new(0, 0));
-        let defender = player("defender", "huck", FixedPoint::new(1024, 0));
+        let attacker = player("attacker", "crow", FixedPoint::new(0, 0));
+        let defender = player("defender", "crow", FixedPoint::new(1024, 0));
         SimulationState {
             pending_turn_end_reason: TurnEndReason::Passed,
             last_turn_end_reason: TurnEndReason::Passed,
@@ -1023,7 +1024,7 @@ mod tests {
             phase: MatchPhase::AimingAndSelection,
             active_player_id: "attacker".to_string(),
             wind_per_tick: 0,
-            movement_remaining: 0,
+            movement_remaining: crate::character::fighter().movement.per_turn(),
             has_attacked_this_turn: false,
             terrain: empty_terrain(),
             players: vec![attacker, defender],
@@ -1052,7 +1053,7 @@ mod tests {
             phase: MatchPhase::AimingAndSelection,
             active_player_id: active_player_id.to_string(),
             wind_per_tick: 0,
-            movement_remaining: 0,
+            movement_remaining: crate::character::fighter().movement.per_turn(),
             has_attacked_this_turn: false,
             terrain: empty_terrain(),
             players,
@@ -1122,7 +1123,8 @@ mod tests {
     #[test]
     fn a_melee_strike_records_melee_delivery_and_no_crit_draw() {
         let mut state = base_state();
-        let command = ability_command("cmd-melee", Some("defender"));
+        let mut command = ability_command("cmd-melee", Some("defender"));
+        command.slot = AbilitySlot::Special;
         let outcome = accepted_outcome(&mut state, &command);
         let strike = only_strike(&outcome);
 
@@ -1283,24 +1285,26 @@ mod tests {
     }
 
     #[test]
-    fn unknown_character_id_is_rejected() {
+    fn unknown_item_id_is_rejected() {
         let mut state = base_state();
         if let Some(attacker) = state.player_mut("attacker") {
-            attacker.character_id = "not-a-real-character".to_string();
+            attacker.loadout.main = "missing-item".to_string();
         }
         let command = ability_command("cmd-1", Some("defender"));
 
         assert_eq!(
             validate_ability(&state, &command),
-            Err(CommandRejection::UnknownCharacter)
+            Err(CommandRejection::AbilityNotAvailable)
         );
-        assert!(CommandRejection::UnknownCharacter.is_security_event());
+        assert!(CommandRejection::AbilityNotAvailable.is_security_event());
     }
 
     #[test]
     fn ability_not_available_in_slot_is_rejected() {
-        // Huck has no `BasicAlt` — only Aleph does.
-        let state = base_state();
+        let mut state = base_state();
+        if let Some(attacker) = state.player_mut("attacker") {
+            attacker.loadout.secondary.clear();
+        }
         let mut command = ability_command("cmd-1", Some("defender"));
         command.slot = AbilitySlot::BasicAlt;
 
@@ -1312,30 +1316,19 @@ mod tests {
     }
 
     #[test]
-    fn special_with_empty_gauge_is_rejected() {
-        let state = base_state();
-        let mut command = ability_command("cmd-1", Some("defender"));
-        command.slot = AbilitySlot::Special;
-
-        assert_eq!(
-            validate_ability(&state, &command),
-            Err(CommandRejection::GaugeNotReady)
-        );
-    }
-
-    #[test]
-    fn special_with_partial_gauge_is_rejected() {
+    fn melee_tool_remains_available_without_finite_ammo() {
         let mut state = base_state();
-        if let Some(attacker) = state.player_mut("attacker") {
-            attacker.special_gauge = GAUGE_FULL.saturating_sub(1);
+        if let Some(attacker) = state.player_mut("attacker")
+            && let Some(ammo) = attacker.ammo.get_mut(AbilitySlot::Special.index())
+        {
+            ammo.remaining = 0;
+            ammo.maximum = 0;
+            ammo.policy = AmmoPolicy::Unlimited;
         }
         let mut command = ability_command("cmd-1", Some("defender"));
         command.slot = AbilitySlot::Special;
 
-        assert_eq!(
-            validate_ability(&state, &command),
-            Err(CommandRejection::GaugeNotReady)
-        );
+        assert!(validate_ability(&state, &command).is_ok());
     }
 
     #[test]
@@ -1348,6 +1341,51 @@ mod tests {
             validate_ability(&state, &command),
             Err(CommandRejection::AlreadyAttacked)
         );
+    }
+
+    #[test]
+    fn charged_trinket_is_allowed_without_consuming_the_normal_attack() {
+        let mut state = base_state();
+        state.has_attacked_this_turn = true;
+        if let Some(attacker) = state.player_mut("attacker") {
+            attacker.trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+        }
+        let mut command = ability_command("trinket-bonus", Some("defender"));
+        command.slot = AbilitySlot::Trinket;
+
+        assert!(validate_ability(&state, &command).is_ok());
+
+        state.has_attacked_this_turn = false;
+        let CommandResult::Accepted(_) = apply_ability(&mut state, &command) else {
+            panic!("a fully charged trinket must resolve");
+        };
+        assert!(!state.has_attacked_this_turn);
+        assert_eq!(
+            state.player("attacker").map(|player| player.trinket_charge),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn unlimited_secondary_does_not_decrement_and_still_spends_the_attack() {
+        let mut state = base_state();
+        let before = state
+            .player("attacker")
+            .map(|player| player.ammo_for(AbilitySlot::BasicAlt));
+        let mut command = ability_command("secondary-fallback", None);
+        command.slot = AbilitySlot::BasicAlt;
+
+        let CommandResult::Accepted(_) = apply_ability(&mut state, &command) else {
+            panic!("the unlimited secondary must resolve");
+        };
+
+        assert_eq!(
+            state
+                .player("attacker")
+                .map(|player| player.ammo_for(AbilitySlot::BasicAlt)),
+            before
+        );
+        assert!(state.has_attacked_this_turn);
     }
 
     #[test]
@@ -1389,7 +1427,8 @@ mod tests {
 
     #[test]
     fn power_boundary_values_are_accepted() {
-        let state = base_state();
+        let mut state = base_state();
+        state.movement_remaining = crate::types::MovementClass::Fast.per_turn();
         let mut low = ability_command("cmd-lo", Some("defender"));
         low.power_basis_points = 0;
         let mut high = ability_command("cmd-hi", Some("defender"));
@@ -1397,6 +1436,21 @@ mod tests {
 
         assert!(validate_ability(&state, &low).is_ok());
         assert!(validate_ability(&state, &high).is_ok());
+    }
+
+    #[test]
+    fn walking_lowers_the_maximum_legal_shot_power() {
+        let mut state = base_state();
+        state.movement_remaining = 0;
+        let mut full = ability_command("cmd-full", Some("defender"));
+        full.power_basis_points = 10_000;
+        assert_eq!(
+            validate_ability(&state, &full),
+            Err(CommandRejection::InputOutOfRange)
+        );
+        let mut weak = ability_command("cmd-weak", Some("defender"));
+        weak.power_basis_points = 1_000;
+        assert!(validate_ability(&state, &weak).is_ok());
     }
 
     #[test]
@@ -1444,17 +1498,18 @@ mod tests {
         let Ok((character, ability)) = validate_ability(&state, &command) else {
             panic!("expected a valid command to resolve");
         };
-        assert_eq!(character.id, "huck");
-        assert_eq!(ability.id, "huck-haymaker");
+        assert_eq!(character.id.wire_name(), "crow");
+        assert_eq!(ability.id, "crow-precision-57");
     }
 
     #[test]
     fn multi_projectile_command_preserves_each_trace_and_impact() {
-        let attacker = player("attacker", "karl", FixedPoint::new(0, 0));
-        let defender = player("defender", "huck", FixedPoint::new(1024, 0));
+        let mut attacker = player("attacker", "crow", FixedPoint::new(0, 0));
+        attacker.loadout.main = "line-repeater".to_owned();
+        let defender = player("defender", "crow", FixedPoint::new(1024, 0));
         let mut state = state_with_players("attacker", vec![attacker, defender]);
         let command = AbilityCommand {
-            command_id: "karl-three-shot".to_owned(),
+            command_id: "repeater-four-shot".to_owned(),
             player_id: "attacker".to_owned(),
             expected_turn_number: 1,
             slot: AbilitySlot::Basic,
@@ -1465,17 +1520,17 @@ mod tests {
         };
 
         let CommandResult::Accepted(outcome) = apply_ability(&mut state, &command) else {
-            panic!("Karl's valid basic must resolve");
+            panic!("Line Repeater basic must resolve");
         };
 
-        assert_eq!(outcome.projectile_traces.len(), 3);
+        assert_eq!(outcome.projectile_traces.len(), 4);
         assert_eq!(
             outcome
                 .projectile_traces
                 .iter()
                 .map(|trace| trace.sequence)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2]
+            vec![0, 1, 2, 3]
         );
         assert!(
             outcome
@@ -1486,24 +1541,24 @@ mod tests {
     }
 
     #[test]
-    fn gauge_gained_is_the_capped_action_delta_not_the_resulting_total() {
+    fn firing_spends_finite_ammo() {
         let mut state = base_state();
-        let Some(actor) = state.player_mut("attacker") else {
-            panic!("fixture actor must exist");
-        };
-        actor.special_gauge = 1_000;
-        let before = actor.special_gauge;
-        let command = ability_command("gauge-delta", Some("defender"));
+        let before = state
+            .player("attacker")
+            .map(|player| player.ammo_for(AbilitySlot::Basic).remaining)
+            .unwrap_or(0);
+        let command = ability_command("ammo-spend", Some("defender"));
 
         let CommandResult::Accepted(outcome) = apply_ability(&mut state, &command) else {
             panic!("valid command must resolve");
         };
-        let Some(after) = state.player("attacker").map(|player| player.special_gauge) else {
-            panic!("fixture actor must remain present");
-        };
+        let after = state
+            .player("attacker")
+            .map(|player| player.ammo_for(AbilitySlot::Basic).remaining)
+            .unwrap_or(0);
 
-        assert_eq!(outcome.gauge_gained, after.saturating_sub(before));
-        assert_ne!(outcome.gauge_gained, after);
+        assert_eq!(after, before.saturating_sub(1));
+        assert_eq!(outcome.gauge_gained, 0);
     }
 
     // -----------------------------------------------------------------------------------
@@ -1547,7 +1602,7 @@ mod tests {
 
         assert_eq!(
             result,
-            CommandResult::Rejected(CommandRejection::InvalidPassive)
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
         );
         assert_eq!(state, before);
     }
@@ -1577,9 +1632,8 @@ mod tests {
 
         assert_eq!(
             apply_passive_choice(&mut state, &command),
-            CommandResult::Rejected(CommandRejection::InvalidPassive)
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
         );
-        assert!(CommandRejection::InvalidPassive.is_security_event());
     }
 
     #[test]
@@ -1597,9 +1651,7 @@ mod tests {
     fn passive_choice_a_second_time_is_rejected() {
         let mut state = base_state();
         state.phase = MatchPhase::PassiveSelection;
-        if let Some(attacker) = state.player_mut("attacker") {
-            attacker.has_chosen_passive = true;
-        }
+        if let Some(_attacker) = state.player_mut("attacker") {}
         let command = passive_command("huck-immovable");
 
         assert_eq!(
@@ -1615,17 +1667,10 @@ mod tests {
         let command = passive_command("huck-immovable");
 
         let result = apply_passive_choice(&mut state, &command);
-
-        let CommandResult::Accepted(outcome) = result else {
-            panic!("expected the valid passive choice to be accepted");
-        };
-        assert_eq!(outcome.command_id, "passive-1");
-        let Some(attacker) = state.player("attacker") else {
-            panic!("attacker must still exist");
-        };
-        assert_eq!(attacker.passive_id.as_deref(), Some("huck-immovable"));
-        assert!(attacker.has_chosen_passive);
-        assert!(state.has_processed("passive-1"));
+        assert!(matches!(
+            result,
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
+        ));
     }
 
     #[test]
@@ -1635,14 +1680,17 @@ mod tests {
         let command = passive_command("huck-immovable");
 
         let first = apply_passive_choice(&mut state, &command);
-        assert!(matches!(first, CommandResult::Accepted(_)));
+        assert_eq!(
+            first,
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
+        );
 
         let after_first = state.clone();
         let second = apply_passive_choice(&mut state, &command);
 
         assert_eq!(
             second,
-            CommandResult::Rejected(CommandRejection::DuplicateCommand)
+            CommandResult::Rejected(CommandRejection::PassiveAlreadyChosen)
         );
         assert_eq!(state, after_first);
     }
@@ -1784,28 +1832,14 @@ mod tests {
     }
 
     #[test]
-    fn heal_effect_still_heals_after_moving_into_the_resolver_layer() {
-        // Zeke's Mending Bolt (Basic) carries `ZEKE_HEAL`: a real roster ability, so this
-        // proves the behaviour survives the move all the way through the public
-        // `apply_ability` entry point. `EffectKind::Heal` targets whoever the *command*
-        // names, independent of where the bolt itself lands (`command.rs`'s own direct-hit
-        // selection for a projectile never consults `command.target_player_id`), so the
-        // target is placed far beyond any tier's maximum reach — well outside the terrain
-        // bounds entirely — to rule out the bolt also landing a direct hit on it and
-        // muddying the expected health delta.
-        let mut target = player(
-            "target",
-            "huck",
-            FixedPoint::new(500 * fixed::POSITION_SCALE, 0),
-        );
-        target.health = 100;
-        target.max_health = 220;
-        let mut state = state_with_players(
-            "actor",
-            vec![player("actor", "zeke", FixedPoint::new(0, 0)), target],
-        );
+    fn push_effect_actually_displaces_the_target_through_apply_ability() {
+        let mut actor = player("actor", "crow", FixedPoint::new(0, 0));
+        actor.loadout.main = "tide-sprayer".to_owned();
+        let target = player("target", "crow", FixedPoint::new(512, 0));
+        let mut state = state_with_players("actor", vec![actor, target]);
+        let before = state.player("target").map(|p| p.position);
         let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
+            command_id: "cmd-tide".to_string(),
             player_id: "actor".to_string(),
             expected_turn_number: 1,
             slot: AbilitySlot::Basic,
@@ -1818,197 +1852,7 @@ mod tests {
         let result = apply_ability(&mut state, &command);
 
         let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Zeke's Mending Bolt to be accepted: {result:?}");
-        };
-        let Some(target) = state.player("target") else {
-            panic!("target must exist");
-        };
-        assert_eq!(
-            target.health, 122,
-            "Mending Bolt's Heal effect must actually restore its 22 HP, regardless of \
-             whether the bolt itself connects"
-        );
-    }
-
-    #[test]
-    fn health_transfer_never_reduces_actor_below_one_hp() {
-        // Zeke's Lifeshare (Special): a real roster ability, exercised end to end through
-        // `apply_ability` — the same regression `resolve::support::tests` covers in
-        // isolation for the resolver itself.
-        let mut actor = player("actor", "zeke", FixedPoint::new(0, 0));
-        actor.health = 10;
-        actor.special_gauge = GAUGE_FULL;
-        // The target must actually be missing health, or the conserving transfer has
-        // nothing to move and the actor-floor cap is never exercised.
-        let mut target = player(
-            "target",
-            "huck",
-            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
-        );
-        target.health = 100;
-        let mut state = state_with_players("actor", vec![actor, target]);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("target".to_string()),
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Zeke's Lifeshare to be accepted: {result:?}");
-        };
-        let Some(actor) = state.player("actor") else {
-            panic!("actor must exist");
-        };
-        assert_eq!(
-            actor.health, 1,
-            "transfer must be capped so the actor keeps at least 1 HP"
-        );
-        let Some(target) = state.player("target") else {
-            panic!("target must exist");
-        };
-        assert_eq!(
-            target.health, 109,
-            "exactly what left the actor must arrive"
-        );
-    }
-
-    #[test]
-    fn health_transfer_to_a_full_health_ally_moves_nothing() {
-        // Regression: the transfer used to debit the actor before checking what the
-        // target could receive, so aiming Lifeshare at a healthy ally destroyed the
-        // actor's hit points and healed nobody. Health must be conserved — what leaves
-        // the actor is exactly what arrives. Exercised end to end through `apply_ability`
-        // with Zeke's real Lifeshare, so the fix is proven to have survived the move into
-        // the resolver layer, not merely to hold in isolation.
-        let mut actor = player("actor", "zeke", FixedPoint::new(0, 0));
-        actor.health = 200;
-        let target = player(
-            "target",
-            "huck",
-            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
-        );
-        let mut state = state_with_players("actor", vec![actor, target]);
-        if let Some(actor) = state.player_mut("actor") {
-            actor.special_gauge = GAUGE_FULL;
-        }
-        let before_actor = state.player("actor").map(|player| player.health);
-        let before_target = state.player("target").map(|player| player.health);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("target".to_string()),
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Zeke's Lifeshare to be accepted: {result:?}");
-        };
-        assert_eq!(
-            state.player("actor").map(|player| player.health),
-            before_actor,
-            "the actor must not lose health that nobody received",
-        );
-        assert_eq!(
-            state.player("target").map(|player| player.health),
-            before_target,
-            "a full-health ally can receive nothing",
-        );
-    }
-
-    // -----------------------------------------------------------------------------------
-    // P1: `resolve_effect` is now reachable from a real command, for every effect kind —
-    // not just the three `command.rs` used to resolve inline.
-    // -----------------------------------------------------------------------------------
-
-    #[test]
-    fn teleport_effect_actually_relocates_arzum_through_apply_ability() {
-        // The flagship example the wiring gap was named for (`todolist.md` P1): "In a real
-        // match Arzum still does not teleport." This proves she now does, submitted as a
-        // real command through the public entry point — not by calling
-        // `relocation::resolve` directly, the way `relocation.rs`'s own tests do.
-        let mut actor = player("actor", "arzum", FixedPoint::new(0, 0));
-        actor.special_gauge = GAUGE_FULL;
-        let target_position = FixedPoint::new(5 * fixed::POSITION_SCALE, 0);
-        let target = player("target", "huck", target_position);
-        let mut state = state_with_players("actor", vec![actor, target]);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: Some("target".to_string()),
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Arzum's Chain Strike to be accepted: {result:?}");
-        };
-        let Some(actor) = state.player("actor") else {
-            panic!("actor must still exist");
-        };
-        // The only living opponent is `target` itself, so Chain Strike's "random nearby
-        // enemy within 12 BW of the first target" draw has exactly one candidate — the
-        // first target, trivially 0 BW from itself — making the destination deterministic
-        // regardless of the RNG seed.
-        assert_eq!(
-            actor.position, target_position,
-            "Chain Strike's Teleport effect must actually relocate the actor, not just \
-             validate the command"
-        );
-    }
-
-    #[test]
-    fn push_effect_actually_displaces_the_target_through_apply_ability() {
-        // No launch character attaches `EffectKind::Knockback` itself (`character.rs`
-        // grepped: zero hits — `displacement.rs`'s own module doc comment naming
-        // `ROBERTO_KNOCKBACK` as a live caller is stale). Natomica's Repulse attaches
-        // `Push`, which shares the exact same resolver
-        // (`resolve::displacement::resolve_radial_displacement`) as `Knockback` — both are
-        // dispatched to it by `resolve_effect`'s own match arm. This proves that resolver
-        // family is now reachable from a real command, submitted through the public
-        // `apply_ability` entry point rather than by calling `displacement::resolve`
-        // directly.
-        let mut actor = player("actor", "natomica", FixedPoint::new(0, 0));
-        actor.special_gauge = GAUGE_FULL;
-        let target = player(
-            "target",
-            "natomica",
-            FixedPoint::new(2 * fixed::POSITION_SCALE, 0),
-        );
-        let mut state = state_with_players("actor", vec![actor, target]);
-        let before = state.player("target").map(|p| p.position);
-        let command = AbilityCommand {
-            command_id: "cmd-1".to_string(),
-            player_id: "actor".to_string(),
-            expected_turn_number: 1,
-            slot: AbilitySlot::Special,
-            angle_millidegrees: 0,
-            power_basis_points: 5_000,
-            target_player_id: None,
-            secondary_target_player_id: None,
-        };
-
-        let result = apply_ability(&mut state, &command);
-
-        let CommandResult::Accepted(_outcome) = result else {
-            panic!("expected Natomica's Repulse to be accepted: {result:?}");
+            panic!("expected Tide Sprayer to be accepted: {result:?}");
         };
         let after = state.player("target").map(|p| p.position);
         assert_ne!(
@@ -2019,10 +1863,8 @@ mod tests {
 
     #[test]
     fn terrain_destroying_ability_reports_nonzero_terrain_cells_removed() {
-        // Huck's Haymaker (`ability_command`'s own default) carves a crater on impact.
-        // `base_state`'s terrain starts fully `Empty`, which would make this vacuous, so
-        // solid ground is seeded around the defender first.
         let mut state = base_state();
+        state.player_mut("attacker").expect("attacker").loadout.main = "ramshot-cannon".to_owned();
         for y in 0..5i32 {
             for x in 0..5i32 {
                 let _ = terrain::set_material(&mut state.terrain, x, y, Material::Soil);
@@ -2037,63 +1879,27 @@ mod tests {
         };
         assert!(
             outcome.terrain_cells_removed > 0,
-            "a terrain-destroying ability must report the cells it actually destroyed, not \
-             the always-zero value from before P2"
-        );
-    }
-
-    #[test]
-    fn effect_resolution_failure_leaves_state_untouched() {
-        // Huck's Body Throw (Special) needs both a primary and a secondary target for its
-        // `Relocate` effect. Submitting it with only a primary is a legal *command* —
-        // neither target field is individually required by `validate_ability`, and the
-        // primary alone is enough to pass the reach check — but an *unresolvable* action:
-        // the effects loop fails partway through, after this same command's own direct
-        // damage (40% to the primary) has already landed in the cloned working copy
-        // `resolve_ability` operates on. Proves `apply_ability`'s clone-and-discard
-        // atomicity still holds even when the failure originates deep in the new effects
-        // loop, not just at validation, and does so through the public entry point with a
-        // real roster ability rather than a synthetic one.
-        let mut state = base_state();
-        if let Some(attacker) = state.player_mut("attacker") {
-            attacker.special_gauge = GAUGE_FULL;
-        }
-        let before = state.clone();
-        let mut command = ability_command("cmd-1", Some("defender"));
-        command.slot = AbilitySlot::Special;
-        // Deliberately no `secondary_target_player_id`: `Relocate` needs one.
-
-        let result = apply_ability(&mut state, &command);
-
-        assert_eq!(
-            result,
-            CommandResult::Rejected(CommandRejection::InvalidTarget)
-        );
-        assert_eq!(
-            state, before,
-            "a failure inside the effects loop, after damage already landed in the working \
-             clone, must still leave the real state byte-identical"
+            "a terrain-destroying ability must report the cells it actually destroyed"
         );
     }
 
     #[test]
     fn processed_command_ids_stay_sorted_after_many_insertions() {
         let mut state = base_state();
-        state.phase = MatchPhase::PassiveSelection;
-        // Insert out-of-lexicographic-order ids across several accepted commands and
-        // confirm the ledger is sorted after each one, not just at the end.
         let ids = ["zzz-9", "aaa-1", "mmm-5", "bbb-2", "yyy-8"];
         for id in ids {
-            if let Some(attacker) = state.player_mut("attacker") {
-                attacker.has_chosen_passive = false;
+            state.has_attacked_this_turn = false;
+            if let Some(defender) = state.player_mut("defender") {
+                defender.health = 999;
             }
-            let command = PassiveChoiceCommand {
-                command_id: id.to_string(),
-                player_id: "attacker".to_string(),
-                expected_turn_number: state.turn_number,
-                passive_id: "huck-immovable".to_string(),
-            };
-            let result = apply_passive_choice(&mut state, &command);
+            if let Some(attacker) = state.player_mut("attacker")
+                && let Some(ammo) = attacker.ammo.get_mut(AbilitySlot::Basic.index())
+            {
+                ammo.remaining = 3;
+            }
+            let mut command = ability_command(id, Some("defender"));
+            command.slot = AbilitySlot::Basic;
+            let result = apply_ability(&mut state, &command);
             assert!(
                 matches!(result, CommandResult::Accepted(_)),
                 "command {id} must be accepted"

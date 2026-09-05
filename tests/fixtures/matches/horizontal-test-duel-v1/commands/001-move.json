@@ -1,1 +1,1 @@
-{"schemaVersion":1,"commandId":"fixture-move-001","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"move","dx":1024}
+{"schemaVersion":2,"commandId":"fixture-move-001","playerId":"a-local-player","expectedTurnNumber":1,"expectedSnapshotGeneration":0,"kind":"move","dx":1024}

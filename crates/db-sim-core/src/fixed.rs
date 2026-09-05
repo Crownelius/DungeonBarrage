@@ -23,6 +23,14 @@ pub const POSITION_SCALE: i32 = 1_024;
 /// One character body width (BW), the map-independent range unit used by `ARSENAL.md`.
 pub const BODY_WIDTH: i32 = 4 * POSITION_SCALE;
 
+/// Radius of the one authoritative player collision circle.
+///
+/// [`BODY_WIDTH`] is a diameter. Treating it as a radius created a two-body-width
+/// invisible target around the much smaller rendered fighter.
+pub const PLAYER_COLLISION_RADIUS: i32 = BODY_WIDTH / 2;
+
+const _: () = assert!(BODY_WIDTH % 2 == 0);
+
 /// Canonical 1.25 BW launch-roster melee reach.
 pub const BASE_MELEE_RANGE: i32 = 5 * POSITION_SCALE;
 
@@ -96,6 +104,28 @@ impl FixedPoint {
             y: self.y.saturating_sub(other.y),
         }
     }
+}
+
+/// Centre of the authoritative player collision circle for a standing ground pivot.
+///
+/// Player positions are ground pivots and positive Y points down, so the circle centre is
+/// one radius above the stored position. Saturation keeps malformed extreme coordinates
+/// deterministic instead of wrapping the hitbox to the opposite side of the map.
+#[must_use]
+pub const fn player_collision_center(stand_pivot: FixedPoint) -> FixedPoint {
+    FixedPoint::new(
+        stand_pivot.x,
+        stand_pivot.y.saturating_sub(PLAYER_COLLISION_RADIUS),
+    )
+}
+
+/// Authoritative player collision circle as `(centre, radius)`.
+#[must_use]
+pub const fn player_collision_circle(stand_pivot: FixedPoint) -> (FixedPoint, i32) {
+    (
+        player_collision_center(stand_pivot),
+        PLAYER_COLLISION_RADIUS,
+    )
 }
 
 /// Divides and rounds half away from zero.
@@ -260,6 +290,25 @@ mod tests {
         let origin = FixedPoint::ZERO;
         assert!(within_radius(origin, FixedPoint::new(3, 4), 5));
         assert!(!within_radius(origin, FixedPoint::new(3, 4), 4));
+    }
+
+    #[test]
+    fn player_collision_circle_is_one_body_width_wide_and_anchored_to_the_ground() {
+        let pivot = FixedPoint::new(8 * POSITION_SCALE, 7 * POSITION_SCALE);
+        let (center, radius) = player_collision_circle(pivot);
+
+        assert_eq!(radius, BODY_WIDTH / 2);
+        assert_eq!(center, FixedPoint::new(pivot.x, pivot.y - radius));
+        assert!(within_radius(
+            center,
+            FixedPoint::new(center.x + radius, center.y),
+            radius
+        ));
+        assert!(!within_radius(
+            center,
+            FixedPoint::new(center.x + radius + 1, center.y),
+            radius
+        ));
     }
 
     #[test]

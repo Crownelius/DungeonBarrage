@@ -1,0 +1,4102 @@
+using System.Diagnostics.CodeAnalysis;
+using System.IO;
+using DungeonBarrage.Client.Contracts;
+using DungeonBarrage.Client.Interop;
+using DungeonBarrage.Client.Match;
+using Godot;
+
+namespace DungeonBarrage.Client.App;
+
+/// <summary>
+/// The scene root: menu, single-screen character select, authoritative human/bot match,
+/// results, and rematch.
+/// </summary>
+public partial class Main : Node2D
+{
+    private static readonly Color BackgroundColor = new(0.08f, 0.09f, 0.12f);
+    private static readonly Color MenuTextColor = Colors.White;
+    private static readonly Color TerrainSoilColor = new(0.45f, 0.32f, 0.18f);
+    private static readonly Color TerrainWoodColor = new(0.55f, 0.42f, 0.20f);
+    private static readonly Color TerrainStoneColor = new(0.55f, 0.55f, 0.58f);
+    private static readonly Color BlockMortarColor = new(0.22f, 0.16f, 0.10f, 0.55f);
+    private static readonly Color EnvironmentOneShotColor = new(0.86f, 0.16f, 0.12f);
+    private const float EnvironmentMaxTransparency = 0.45f;
+    private static readonly Color ArenaFillColor = new(0.10f, 0.12f, 0.16f);
+    private static readonly Color ArenaEdgeColor = new(0.85f, 0.78f, 0.35f);
+    private static readonly Color PlayerAColor = new(0.25f, 0.55f, 0.95f);
+    private static readonly Color PlayerBColor = new(0.90f, 0.35f, 0.30f);
+    private static readonly Color AimHitColor = new(1f, 0.88f, 0.30f, 0.95f);
+    private static readonly Color AimMissColor = new(0.96f, 0.20f, 0.16f, 0.95f);
+    private static readonly Color ProjectileColor = new(1f, 0.78f, 0.15f);
+    private static readonly Color LockedHintColor = new(0.6f, 0.6f, 0.65f);
+
+    private BuildDiagnostics? _diagnostics;
+    private MatchBootstrapResult? _match;
+    [SuppressMessage(
+        "Design",
+        "CA2213:Disposable fields should be disposed",
+        Justification =
+            "This is a Godot Node2D, not a .NET IDisposable type: its teardown lifecycle is "
+            + "_ExitTree, which does dispose this field, not a Dispose method the analyzer recognizes.")]
+    private LiveMatch? _live;
+    private string? _menuError;
+    private string? _liveError;
+    private bool _started;
+    private ClientUserSettingsContainer _settings = ClientUserSettingsContainer.Default;
+
+    private bool _inLocalSetup;
+    private IReadOnlyList<ClientCharacterDefinition>? _roster;
+    private int _selectedMapIndex;
+    private static readonly string[] PlayableMaps =
+    [
+        "crow-perch",
+        "broken-battlements",
+        "twin-spires",
+    ];
+    private int _selectedItemIndex;
+    private int _botMainItemIndex;
+    private bool _inLoadoutSelect;
+    private ItemTileAnimation[]? _tileAnimations;
+    private int _hoveredItemIndex = -1;
+
+    private const float TileSize = 108f;
+    private const float TileGap = 16f;
+    private const int TileColumns = 4;
+    private const float TileFloatHeight = 14f;
+    private const float TileFloatUpSeconds = 0.16f;
+    private const float TileFloatDownSeconds = 0.24f;
+    private static readonly Vector2 TileGridOrigin = new(40, 176);
+    private static readonly Vector2 ContinueButtonSize = new(300, 56);
+
+    /// <summary>
+    /// One item tile's float animation: a small non-interruptible state machine, not a
+    /// Godot <c>Tween</c>. <see cref="Main"/> has no scene-graph nodes to attach one to — every
+    /// screen so far is hand-drawn from a single <see cref="_Draw"/> — so the float/land motion
+    /// is advanced manually each frame in <see cref="UpdateItemTileAnimations"/> instead.
+    /// </summary>
+    private sealed class ItemTileAnimation
+    {
+        /// <summary>Current vertical offset in pixels; negative is floated upward.</summary>
+        internal float YOffset;
+
+        /// <summary>Whether a float-up or land motion is currently playing.</summary>
+        internal bool IsAnimating;
+
+        /// <summary>
+        /// Whether the motion in progress moves toward the floated position (<see langword="true"/>)
+        /// or back to rest (<see langword="false"/>). Only consulted once the motion finishes —
+        /// this is what makes it non-interruptible: a hover change mid-flight changes what happens
+        /// <em>next</em>, never the motion already playing.
+        /// </summary>
+        internal bool AnimatingTowardFloated;
+
+        internal float ElapsedSeconds;
+    }
+
+    private ClientAbilitySlot _selectedAbilitySlot = ClientAbilitySlot.Main;
+    private int _selectedPassiveIndex;
+
+    private bool _isAiming;
+    private Vector2 _aimOrigin;
+    private Vector2 _aimCursor;
+    private IReadOnlyList<ClientProjectileTrace> _previewTraces = [];
+    private int _previewEpoch;
+    private int _lastPreviewAngle = int.MinValue;
+    private int _lastPreviewPower = int.MinValue;
+    private ShotPlayback? _playback;
+    private readonly CameraDirector _camera = new();
+    private readonly CombatEffectSystem _effects = new();
+    private readonly CharacterSpriteRegistry _spriteRegistry = new();
+    private float _cellSize = 12f;
+    private Vector2 _worldOrigin = Vector2.Zero;
+
+    /// <summary>
+    /// Frozen pre-shot world plus the authority's traces, shown until input unlocks.
+    /// <see cref="LiveMatch.CurrentSnapshot"/> is already the post-shot state the moment
+    /// apply returns; drawing that during the lock is why a shot used to appear as a line
+    /// to the target with the damage already applied.
+    /// </summary>
+    private sealed class ShotPlayback
+    {
+        internal required ClientMatchSnapshot PreSnapshot { get; init; }
+
+        internal required TerrainRead PreTerrain { get; init; }
+
+        internal required IReadOnlyList<ClientPresentationEvent> Events { get; init; }
+
+        internal required ulong StartMsec { get; init; }
+
+        internal required uint TickRate { get; init; }
+
+        internal required uint LockTicks { get; init; }
+
+        internal required int PositionScale { get; init; }
+
+        internal required List<ClientProjectileTrace> Traces { get; init; }
+    }
+
+    private ulong _inputLockedUntilMsec;
+    private bool _isProcessingBotTurn;
+    private bool _isProcessingTimeout;
+    private ulong _lastBotDecisionSeed = 1000uL;
+    private uint _matchSeed = 12345;
+
+    /// <inheritdoc />
+#pragma warning disable CA1849
+    public override async void _Ready()
+#pragma warning restore CA1849
+    {
+        try
+        {
+            _diagnostics = BuildDiagnostics.Capture();
+            _settings = UserSettingsStore.Load(Path.Combine(OS.GetUserDataDir(), "settings.json"));
+            _spriteRegistry.PreloadAll();
+        }
+        catch (Exception exception)
+        {
+            LogClientFault("ready-initialization", exception);
+            GD.PushError($"Dungeon Barrage startup failed: {exception}");
+            throw;
+        }
+
+        var c7SmokeOptions = C7SmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c7SmokeOptions is not null)
+        {
+            await RunC7SmokeAndQuitAsync(c7SmokeOptions).ConfigureAwait(true);
+            return;
+        }
+
+        var c6SmokeOptions = C6SmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c6SmokeOptions is not null)
+        {
+            await RunC6SmokeAndQuitAsync(c6SmokeOptions).ConfigureAwait(true);
+            return;
+        }
+
+        var c6TimeoutSmokeOptions = C6TimeoutSmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c6TimeoutSmokeOptions is not null)
+        {
+            await RunC6TimeoutSmokeAndQuitAsync(c6TimeoutSmokeOptions).ConfigureAwait(true);
+            return;
+        }
+
+        var smokeOptions = C4SmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (smokeOptions is not null)
+        {
+            await RunSmokeAndQuitAsync(smokeOptions).ConfigureAwait(true);
+            return;
+        }
+
+        var c5SmokeOptions = C5SmokeOptions.Parse(OS.GetCmdlineUserArgs());
+        if (c5SmokeOptions is not null)
+        {
+            await RunC5SmokeAndQuitAsync(c5SmokeOptions).ConfigureAwait(true);
+            return;
+        }
+
+        QueueRedraw();
+    }
+
+    /// <inheritdoc />
+    public override void _Process(double delta)
+    {
+        _effects.Update((float)delta);
+        if (_effects.ActiveParticles.Count > 0 || _effects.ActiveShockwaves.Count > 0 || _effects.ActiveTargetMarkers.Count > 0 || _effects.ActiveDamageTexts.Count > 0)
+        {
+            QueueRedraw();
+        }
+
+        if (_live is not null && IsInputLocked() != _wasLockedLastFrame)
+        {
+            _wasLockedLastFrame = IsInputLocked();
+            QueueRedraw();
+        }
+
+        if (_isAiming)
+        {
+            RequestAimPreview();
+            QueueRedraw();
+        }
+
+        if (IsInputLocked() && _playback is not null)
+        {
+            QueueRedraw();
+        }
+        else if (!IsInputLocked())
+        {
+            _playback = null;
+        }
+
+        if (_inLoadoutSelect)
+        {
+            UpdateItemTileAnimations((float)delta);
+        }
+
+        // A visible countdown needs a redraw roughly every frame while it's ticking, not just on
+        // discrete state-change events like the lock-state check above.
+        if (_live is not null && !IsInputLocked() && _live.PlanningDeadlineUtc is not null)
+        {
+            QueueRedraw();
+        }
+
+        if (_live is not null && !IsInputLocked())
+        {
+            var active = ActivePlayer(_live.CurrentSnapshot);
+            if (active is not null && !GetSlotAmmo(active, _selectedAbilitySlot).canUse)
+            {
+                AutoSelectAvailableWeapon(active);
+            }
+        }
+
+        // Automatic bot turn processing when active player is bot-controlled, or an automatic
+        // local timeout once the active player's own planning deadline has passed. Outcome is
+        // never actually null — it is always populated, with ClientInProgressOutcome as its
+        // "nothing decided yet" value — so this must pattern-match the type, not check for null.
+        if (_live is not null && !IsInputLocked() && !_isProcessingBotTurn && !_isProcessingTimeout &&
+            _live.CurrentSnapshot.Outcome is ClientInProgressOutcome)
+        {
+            var activeId = _live.CurrentSnapshot.ActivePlayerId;
+            if (activeId is "b-local-bot" || IsBotPlayer(activeId))
+            {
+                _ = ProcessBotTurnAsync();
+            }
+            else if (_live.PlanningDeadlineUtc is { } deadline && DateTimeOffset.UtcNow >= deadline)
+            {
+                _ = ProcessTimeoutAsync();
+            }
+        }
+    }
+
+    private bool IsBotPlayer(string? playerId) =>
+        _live?.CurrentSnapshot.Players.FirstOrDefault(p => p.PlayerId == playerId)?.Team == 1;
+
+    private async Task ProcessBotTurnAsync()
+    {
+        if (_live is null || _isProcessingBotTurn)
+        {
+            return;
+        }
+
+        _isProcessingBotTurn = true;
+        try
+        {
+            _lastBotDecisionSeed++;
+            var transition = await SubmitAndRedrawAsync(
+                () => _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, _lastBotDecisionSeed))
+                .ConfigureAwait(true);
+
+            if (transition is not null)
+            {
+                await WaitTicksAsync(transition.InputLockTicks, transition.PresentationTickRate).ConfigureAwait(true);
+            }
+        }
+        catch (Exception exception) when (exception is MatchCommandRejectedException or NativeSimulationException)
+        {
+            _liveError = DescribeLiveFault(exception);
+        }
+        finally
+        {
+            _isProcessingBotTurn = false;
+            QueueRedraw();
+        }
+    }
+
+    private async Task ProcessTimeoutAsync()
+    {
+        if (_live is null || _isProcessingTimeout)
+        {
+            return;
+        }
+
+        _isProcessingTimeout = true;
+        try
+        {
+            var transition = await SubmitAndRedrawAsync(() => _live.SubmitTimeoutAsync()).ConfigureAwait(true);
+
+            if (transition is not null)
+            {
+                await WaitTicksAsync(transition.InputLockTicks, transition.PresentationTickRate).ConfigureAwait(true);
+            }
+        }
+        catch (Exception exception) when (exception is MatchCommandRejectedException or NativeSimulationException)
+        {
+            _liveError = DescribeLiveFault(exception);
+        }
+        finally
+        {
+            _isProcessingTimeout = false;
+            QueueRedraw();
+        }
+    }
+
+    private bool _wasLockedLastFrame;
+
+    /// <inheritdoc />
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        ArgumentNullException.ThrowIfNull(@event);
+
+        try
+        {
+            HandleUnhandledInput(@event);
+        }
+        catch (Exception exception)
+        {
+            _menuError = exception.Message;
+            _liveError = exception.Message;
+            LogClientFault("unhandled-input", exception);
+            QueueRedraw();
+        }
+    }
+
+    private void HandleUnhandledInput(InputEvent @event)
+    {
+        if (_live is not null)
+        {
+            HandleLiveInput(@event);
+            return;
+        }
+
+        if (_inLoadoutSelect)
+        {
+            HandleLoadoutSelectInput(@event);
+            return;
+        }
+
+        if (_inLocalSetup)
+        {
+            HandleLocalSetupInput(@event);
+            return;
+        }
+
+        var isActivation = @event.IsActionPressed("ui_accept") ||
+            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
+        if (!isActivation)
+        {
+            return;
+        }
+
+        GetViewport().SetInputAsHandled();
+        EnterLocalSetup();
+    }
+
+    private static void LogClientFault(string where, Exception exception)
+    {
+        try
+        {
+            var path = Path.Combine(Path.GetTempPath(), "dungeon-barrage-client.log");
+            File.AppendAllText(
+                path,
+                $"{DateTimeOffset.Now:o} {where}: {exception}{System.Environment.NewLine}");
+        }
+        catch (IOException)
+        {
+        }
+    }
+
+    /// <inheritdoc />
+    public override void _Draw()
+    {
+        DrawRect(new Rect2(Vector2.Zero, GetViewportRect().Size), BackgroundColor);
+
+        if (_live is not null)
+        {
+            DrawLiveMatch(_live);
+        }
+        else if (_match is not null)
+        {
+            DrawMatch(_match.Frame.Snapshot, _match.Frame.Terrain);
+        }
+        else if (_inLoadoutSelect)
+        {
+            DrawLoadoutSelect();
+        }
+        else if (_inLocalSetup)
+        {
+            DrawLocalSetup();
+        }
+        else
+        {
+            DrawMenu();
+        }
+    }
+
+    /// <inheritdoc />
+    public override void _ExitTree()
+    {
+        _match?.Session.Dispose();
+        _live?.Dispose();
+        base._ExitTree();
+    }
+
+    /// <summary>
+    /// Enters the map/mode/slots screen between the main menu and loadout select
+    /// (CLIENT_SPEC §11's own flow: Boot → MainMenu → LocalSetup → LoadoutSelect → Match).
+    /// </summary>
+    /// <remarks>
+    /// Only one map and one mode exist today, so this deliberately shows them as read-only
+    /// information rather than building a selection widget for options that do not exist yet —
+    /// the structural value here is the screen itself, and back-navigation, not a chooser with
+    /// one disabled option in it.
+    /// </remarks>
+    private void EnterLocalSetup()
+    {
+        _inLocalSetup = true;
+        _menuError = null;
+        QueueRedraw();
+    }
+
+    private void HandleLocalSetupInput(InputEvent @event)
+    {
+        if (@event.IsActionPressed("ui_cancel"))
+        {
+            GetViewport().SetInputAsHandled();
+            _inLocalSetup = false;
+            _started = false;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_left"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedMapIndex = (_selectedMapIndex - 1 + PlayableMaps.Length) % PlayableMaps.Length;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_right"))
+        {
+            GetViewport().SetInputAsHandled();
+            _selectedMapIndex = (_selectedMapIndex + 1) % PlayableMaps.Length;
+            QueueRedraw();
+            return;
+        }
+
+        var isConfirm = @event.IsActionPressed("ui_accept") ||
+            (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
+        if (isConfirm)
+        {
+            GetViewport().SetInputAsHandled();
+            _inLocalSetup = false;
+            EnterLoadoutSelect();
+        }
+    }
+
+    private void DrawLocalSetup()
+    {
+        var font = ThemeDB.FallbackFont;
+
+        DrawRect(new Rect2(0, 0, GetViewportRect().Size.X, 64), new Color(0.55f, 0.10f, 0.12f));
+        DrawString(font, new Vector2(24, 40), "LOCAL MATCH SETUP", fontSize: 24, modulate: Colors.White);
+
+        var pos = new Vector2(24, 110);
+        DrawString(font, pos, "Map  (left/right to change)", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 22;
+        DrawString(font, pos, PlayableMaps[_selectedMapIndex], fontSize: 18, modulate: MenuTextColor);
+        pos.Y += 40;
+
+        DrawString(font, pos, "Mode", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 22;
+        DrawString(font, pos, "Turn-Based Duel", fontSize: 18, modulate: MenuTextColor);
+        pos.Y += 40;
+
+        DrawString(font, pos, "Slots", fontSize: 14, modulate: Colors.Gold);
+        pos.Y += 22;
+        DrawString(font, pos, "Player 1: Human   ·   Player 2: CPU (Bot)", fontSize: 18, modulate: MenuTextColor);
+        pos.Y += 40;
+
+        DrawString(
+            font,
+            pos,
+            "Left/right cycles crow-perch, broken-battlements, and twin-spires. Mode is",
+            fontSize: 13,
+            modulate: LockedHintColor);
+        pos.Y += 18;
+        DrawString(
+            font,
+            pos,
+            "fixed to a turn-based duel. ENTER continues to character select.",
+            fontSize: 13,
+            modulate: LockedHintColor);
+
+        if (_menuError is not null)
+        {
+            pos.Y += 28;
+            DrawString(font, pos, _menuError, fontSize: 14, modulate: Colors.OrangeRed);
+        }
+
+        var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
+        DrawString(font, footerPos, "ENTER / Click to choose a character · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
+    }
+
+    private void EnterLoadoutSelect()
+    {
+        try
+        {
+            var catalog = RosterCatalog.Get();
+            _roster = catalog.Characters;
+            _selectedItemIndex = 0;
+            _botMainItemIndex = BotMainItemIndex(catalog.Characters);
+            _inLoadoutSelect = true;
+            _menuError = null;
+            _hoveredItemIndex = -1;
+            _tileAnimations = new ItemTileAnimation[_roster.Count];
+            for (var i = 0; i < _tileAnimations.Length; i++)
+            {
+                _tileAnimations[i] = new ItemTileAnimation();
+            }
+        }
+        catch (Exception exception)
+        {
+            _menuError = exception.Message;
+            _inLoadoutSelect = false;
+            _inLocalSetup = true;
+            LogClientFault("enter-loadout", exception);
+        }
+
+        QueueRedraw();
+    }
+
+    /// <summary>A tile's resting position — never affected by its own float animation.</summary>
+    /// <remarks>
+    /// Hit-testing (mouse hover/click) always uses this rest rectangle, not the animated draw
+    /// position: if hovering were computed against a tile that is itself moving because of
+    /// hover, a tile could float just far enough to leave the cursor, be judged un-hovered, and
+    /// begin landing back under the cursor — an oscillation with no stable resting state.
+    /// </remarks>
+    private static Rect2 ItemTileRestRect(int index)
+    {
+        var column = index % TileColumns;
+        var row = index / TileColumns;
+        var position = TileGridOrigin + new Vector2(column * (TileSize + TileGap), row * (TileSize + TileGap));
+        return new Rect2(position, new Vector2(TileSize, TileSize));
+    }
+
+    private int? HitTestItemTile(Vector2 point)
+    {
+        if (_roster is null)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            if (ItemTileRestRect(i).HasPoint(point))
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Advances every tile's float/land motion by one frame.
+    /// </summary>
+    /// <remarks>
+    /// A tile floats while hovered by the mouse or currently the keyboard-selected human pick,
+    /// and lands otherwise. The rule that makes this feel deliberate rather than jittery: a
+    /// hover change is only ever read once the motion currently playing reaches its end — never
+    /// mid-flight. A tile whose hover state flickers on and off rapidly finishes whatever
+    /// direction it already committed to before the next one begins, so it always completes at
+    /// least one full float or one full land before reversing, matching the fixture's own
+    /// vocabulary: "it won't immediately restart the animation... it cannot be interrupted."
+    /// </remarks>
+    private void UpdateItemTileAnimations(float delta)
+    {
+        if (_tileAnimations is null)
+        {
+            return;
+        }
+
+        var anyAnimating = false;
+        for (var i = 0; i < _tileAnimations.Length; i++)
+        {
+            var tile = _tileAnimations[i];
+            var hoverDesired = i == _hoveredItemIndex || i == _selectedItemIndex;
+
+            if (tile.IsAnimating)
+            {
+                tile.ElapsedSeconds += delta;
+                var duration = tile.AnimatingTowardFloated ? TileFloatUpSeconds : TileFloatDownSeconds;
+                var t = duration <= 0f ? 1f : Mathf.Clamp(tile.ElapsedSeconds / duration, 0f, 1f);
+                var eased = 1f - Mathf.Pow(1f - t, 3f);
+                tile.YOffset = tile.AnimatingTowardFloated
+                    ? Mathf.Lerp(0f, -TileFloatHeight, eased)
+                    : Mathf.Lerp(-TileFloatHeight, 0f, eased);
+
+                if (t >= 1f)
+                {
+                    tile.IsAnimating = false;
+                    tile.YOffset = tile.AnimatingTowardFloated ? -TileFloatHeight : 0f;
+
+                    // Only now — motion finished, tile at a stable rest — is it safe to read
+                    // the latest desired state and, if it changed while this was playing,
+                    // queue the next motion.
+                    if (hoverDesired != tile.AnimatingTowardFloated)
+                    {
+                        tile.IsAnimating = true;
+                        tile.AnimatingTowardFloated = hoverDesired;
+                        tile.ElapsedSeconds = 0f;
+                    }
+                }
+
+                anyAnimating = true;
+            }
+            else
+            {
+                var isFloated = tile.YOffset < -0.01f;
+                if (hoverDesired != isFloated)
+                {
+                    tile.IsAnimating = true;
+                    tile.AnimatingTowardFloated = hoverDesired;
+                    tile.ElapsedSeconds = 0f;
+                    anyAnimating = true;
+                }
+            }
+        }
+
+        if (anyAnimating)
+        {
+            QueueRedraw();
+        }
+    }
+
+    private void HandleLoadoutSelectInput(InputEvent @event)
+    {
+        if (_roster is null or { Count: 0 })
+        {
+            return;
+        }
+
+        if (@event is InputEventMouseMotion motion)
+        {
+            _hoveredItemIndex = HitTestItemTile(motion.Position) ?? -1;
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_cancel"))
+        {
+            GetViewport().SetInputAsHandled();
+            _inLoadoutSelect = false;
+            _inLocalSetup = true;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_up") || @event.IsActionPressed("ui_left"))
+        {
+            GetViewport().SetInputAsHandled();
+            CycleVisible(-1);
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_down") || @event.IsActionPressed("ui_right"))
+        {
+            GetViewport().SetInputAsHandled();
+            CycleVisible(1);
+            QueueRedraw();
+            return;
+        }
+
+        // A tile click selects one whole character. The button (or ENTER) starts immediately.
+        if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left } mouseButton)
+        {
+            GetViewport().SetInputAsHandled();
+            if (ContinueButtonRect().HasPoint(mouseButton.Position))
+            {
+                AdvanceLoadoutOrStart();
+                return;
+            }
+
+            if (HitTestItemTile(mouseButton.Position) is int clickedIndex)
+            {
+                EquipTile(clickedIndex);
+                QueueRedraw();
+            }
+
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_accept"))
+        {
+            GetViewport().SetInputAsHandled();
+            AdvanceLoadoutOrStart();
+        }
+    }
+
+    private void AdvanceLoadoutOrStart()
+    {
+        ConfirmLoadoutAndStartDuel();
+    }
+
+    private Rect2 ContinueButtonRect()
+    {
+        var viewport = GetViewportRect().Size;
+        var position = new Vector2(
+            viewport.X - ContinueButtonSize.X - 28,
+            viewport.Y - ContinueButtonSize.Y - 28);
+        return new Rect2(position, ContinueButtonSize);
+    }
+
+    private void CycleVisible(int delta)
+    {
+        if (_roster is null || _roster.Count == 0)
+        {
+            return;
+        }
+
+        var next = (_selectedItemIndex + delta + _roster.Count) % _roster.Count;
+        EquipTile(next);
+    }
+
+    private void EquipTile(int index)
+    {
+        if (_roster is not null && index >= 0 && index < _roster.Count)
+        {
+            _selectedItemIndex = index;
+        }
+    }
+
+    /// <summary>
+    /// Catalog index of the opponent's main item, for the CPU card.
+    /// </summary>
+    /// <remarks>
+    /// The opponent fields <see cref="LocalMatchEnvelope.LaunchDefaultBotCharacterId"/>, independent of
+    /// the human's pick. This used to track the human's own secondary index, so the CPU card
+    /// showed neither side's real loadout.
+    /// </remarks>
+    private static int BotMainItemIndex(IReadOnlyList<ClientCharacterDefinition> characters)
+    {
+        for (var i = 0; i < characters.Count; i++)
+        {
+            if (characters[i].Id == LocalMatchEnvelope.LaunchDefaultBotCharacterId)
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    private void ConfirmLoadoutAndStartDuel()
+    {
+        if (_roster is null || _roster.Count == 0 || _selectedItemIndex >= _roster.Count)
+        {
+            return;
+        }
+
+        var request = LocalMatchEnvelope.HumanVsBot(
+            simulationVersion: LocalMatchSession.SimulationVersion,
+            contentVersion: LocalMatchSession.ContentVersion,
+            seed: _matchSeed,
+            matchId: $"local-duel-{_matchSeed}",
+            mapId: PlayableMaps[_selectedMapIndex],
+            humanCharacterId: _roster[_selectedItemIndex].Id,
+            botCharacterId: _roster[_botMainItemIndex].Id);
+
+        try
+        {
+            _live = CreateLiveMatch(FixtureMatchBootstrapper.StartLive(request));
+            _menuError = null;
+            _camera.Reset();
+            _effects.Clear();
+        }
+        catch (Exception exception)
+        {
+            _menuError = exception.Message;
+            _inLoadoutSelect = true;
+            LogClientFault("confirm-loadout", exception);
+        }
+
+        _inLoadoutSelect = _live is null;
+        _started = _live is not null || _menuError is not null;
+        QueueRedraw();
+    }
+
+    private void Rematch()
+    {
+        if (_live is null)
+        {
+            return;
+        }
+
+        _live.Dispose();
+        _live = null;
+        _matchSeed++;
+        ConfirmLoadoutAndStartDuel();
+    }
+
+    private static LiveMatch CreateLiveMatch(MatchBootstrapResult bootstrap) =>
+        LiveMatch.Create(
+            bootstrap.Session,
+            bootstrap.Frame.Snapshot,
+            bootstrap.Frame.Terrain,
+            bootstrap.Frame.Snapshot.MatchId);
+
+    private bool IsInputLocked() => Time.GetTicksMsec() < _inputLockedUntilMsec;
+
+    private void HandleLiveInput(InputEvent @event)
+    {
+        if (_live is null)
+        {
+            return;
+        }
+
+        // Handles Results screen rematch trigger when match is complete. Outcome is never null
+        // (ClientInProgressOutcome is its populated "still playing" value), so this must
+        // pattern-match away that specific type rather than check for null.
+        if (_live.CurrentSnapshot.Outcome is not ClientInProgressOutcome)
+        {
+            if (@event.IsActionPressed("ui_accept") ||
+                (@event is InputEventKey { Pressed: true, Keycode: Key.R }))
+            {
+                GetViewport().SetInputAsHandled();
+                Rematch();
+                return;
+            }
+        }
+
+        // Handles Passive Selection prompt when phase is PassiveSelection
+        if (_live.CurrentSnapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
+        {
+            HandlePassiveSelectionInput(@event);
+            return;
+        }
+
+        if (IsInputLocked())
+        {
+            return;
+        }
+
+        // Ability slot switching (1, 2, 3)
+        if (@event is InputEventKey { Pressed: true } keyEvent)
+        {
+            switch (keyEvent.Keycode)
+            {
+                case Key.Key1:
+                    _selectedAbilitySlot = ClientAbilitySlot.Main;
+                    _lastPreviewAngle = int.MinValue;
+                    QueueRedraw();
+                    return;
+                case Key.Key2:
+                    _selectedAbilitySlot = ClientAbilitySlot.Secondary;
+                    _lastPreviewAngle = int.MinValue;
+                    QueueRedraw();
+                    return;
+                case Key.Key3:
+                    _selectedAbilitySlot = ClientAbilitySlot.Trinket;
+                    _lastPreviewAngle = int.MinValue;
+                    QueueRedraw();
+                    return;
+                case Key.A:
+                    GetViewport().SetInputAsHandled();
+                    _ = SubmitAndRedrawAsync(() => _live.SubmitMoveAsync(-_live.CurrentSnapshot.PositionScale));
+                    return;
+                case Key.D:
+                    GetViewport().SetInputAsHandled();
+                    _ = SubmitAndRedrawAsync(() => _live.SubmitMoveAsync(_live.CurrentSnapshot.PositionScale));
+                    return;
+                case Key.W:
+                case Key.Space:
+                    GetViewport().SetInputAsHandled();
+                    _ = SubmitAndRedrawAsync(() => _live.SubmitJumpAsync());
+                    return;
+                case Key.Left:
+                    _camera.Pan(_cellSize * 2f, 0);
+                    QueueRedraw();
+                    return;
+                case Key.Right:
+                    _camera.Pan(-_cellSize * 2f, 0);
+                    QueueRedraw();
+                    return;
+                case Key.Up:
+                    _camera.Pan(0, _cellSize * 2f);
+                    QueueRedraw();
+                    return;
+                case Key.Down:
+                    _camera.Pan(0, -_cellSize * 2f);
+                    QueueRedraw();
+                    return;
+                case Key.F:
+                case Key.Home:
+                    _camera.Reset();
+                    QueueRedraw();
+                    return;
+                case Key.P:
+                    _ = SubmitAndRedrawAsync(() => _live.SubmitPassAsync());
+                    return;
+            }
+        }
+
+        if (_live.CurrentSnapshot.HasAttackedThisTurn && _selectedAbilitySlot != ClientAbilitySlot.Trinket)
+        {
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_cancel") && _isAiming)
+        {
+            GetViewport().SetInputAsHandled();
+            CancelAim();
+            return;
+        }
+
+        if (@event is InputEventMouseButton mouseButton)
+        {
+            GetViewport().SetInputAsHandled();
+            if (mouseButton.ButtonIndex == MouseButton.Right && mouseButton.Pressed)
+            {
+                CancelAim();
+                return;
+            }
+
+            if (mouseButton.ButtonIndex != MouseButton.Left)
+            {
+                return;
+            }
+
+            if (mouseButton.Pressed)
+            {
+                var viewportSize = GetViewportRect().Size;
+                for (var s = 0; s < WeaponSlotOrder.Length; s++)
+                {
+                    if (WeaponSlotRect(s, viewportSize).HasPoint(mouseButton.Position))
+                    {
+                        _selectedAbilitySlot = WeaponSlotOrder[s];
+                        _lastPreviewAngle = int.MinValue;
+                        CancelAim();
+                        QueueRedraw();
+                        return;
+                    }
+                }
+
+                _isAiming = true;
+                _aimOrigin = mouseButton.Position;
+                _aimCursor = mouseButton.Position;
+                _lastPreviewAngle = int.MinValue;
+                RequestAimPreview();
+                QueueRedraw();
+            }
+            else if (_isAiming)
+            {
+                _aimCursor = mouseButton.Position;
+                var aim = CurrentAim();
+                CancelAim();
+                if (aim.CanFire)
+                {
+                    _ = FireAimedShotAsync(aim);
+                }
+            }
+
+            return;
+        }
+
+        if (@event is InputEventMouseMotion motion && _isAiming)
+        {
+            _aimCursor = motion.Position;
+            QueueRedraw();
+        }
+    }
+
+    private static void HandlePassiveSelectionInput(InputEvent @event)
+    {
+        _ = @event;
+    }
+
+    private AimSolution CurrentAim()
+    {
+        if (_live is null)
+        {
+            return default;
+        }
+
+        var player = ActivePlayer(_live.CurrentSnapshot);
+        if (player is null)
+        {
+            return default;
+        }
+
+        var opponent = FirstLivingOpponent(_live.CurrentSnapshot, player.PlayerId);
+        var facesRight = AimSolver.FacesRight(player.Position.X, opponent?.Position.X);
+        var allowance = CharacterMovementAllowance(
+            player.CharacterId,
+            _live.CurrentSnapshot.MovementRemaining);
+        var cap = AimSolver.MaxPowerAfterMovement(_live.CurrentSnapshot.MovementRemaining, allowance);
+        var solution = AimSolver.FromDrag(
+            _aimOrigin.X,
+            _aimOrigin.Y,
+            _aimCursor.X,
+            _aimCursor.Y,
+            facesRight,
+            cap,
+            _cellSize);
+
+        var ammoInfo = GetSlotAmmo(player, _selectedAbilitySlot);
+        if (!ammoInfo.canUse)
+        {
+            return solution with { CanFire = false };
+        }
+
+        return solution;
+    }
+
+    private static ClientPlayerSnapshot? ActivePlayer(ClientMatchSnapshot snapshot)
+    {
+        var id = snapshot.ActivePlayerId;
+        if (id is null)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == id)
+            {
+                return snapshot.Players[i];
+            }
+        }
+
+        return null;
+    }
+
+    private int CharacterMovementAllowance(string characterId, int fallback)
+    {
+        if (_roster is not null)
+        {
+            for (var index = 0; index < _roster.Count; index++)
+            {
+                if (_roster[index].Id == characterId)
+                {
+                    return _roster[index].MovementAllowance;
+                }
+            }
+        }
+
+        return Math.Max(1, fallback);
+    }
+
+    private static ClientPlayerSnapshot? FirstLivingOpponent(ClientMatchSnapshot snapshot, string actorId)
+    {
+        var actorX = 0;
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == actorId)
+            {
+                actorX = snapshot.Players[i].Position.X;
+                break;
+            }
+        }
+
+        ClientPlayerSnapshot? found = null;
+        var bestDx = int.MaxValue;
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            var candidate = snapshot.Players[i];
+            if (candidate.PlayerId == actorId || candidate.IsEliminated)
+            {
+                continue;
+            }
+
+            var dx = Math.Abs(candidate.Position.X - actorX);
+            if (dx < bestDx)
+            {
+                bestDx = dx;
+                found = candidate;
+            }
+        }
+
+        return found;
+    }
+
+    private void CancelAim()
+    {
+        _isAiming = false;
+        _previewTraces = [];
+        _lastPreviewAngle = int.MinValue;
+        _lastPreviewPower = int.MinValue;
+        QueueRedraw();
+    }
+
+    private void RequestAimPreview()
+    {
+        if (_live is null || !_isAiming)
+        {
+            return;
+        }
+
+        var aim = CurrentAim();
+        if (!aim.CanFire)
+        {
+            _previewTraces = [];
+            return;
+        }
+
+        if (aim.AngleMillidegrees == _lastPreviewAngle && aim.PowerBasisPoints == _lastPreviewPower)
+        {
+            return;
+        }
+
+        _lastPreviewAngle = aim.AngleMillidegrees;
+        _lastPreviewPower = aim.PowerBasisPoints;
+        var epoch = ++_previewEpoch;
+        _ = FetchPreviewAsync(epoch, aim);
+    }
+
+    private async Task FetchPreviewAsync(int epoch, AimSolution aim)
+    {
+        if (_live is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var preview = await _live.PreviewAbilityAsync(
+                _selectedAbilitySlot,
+                aim.AngleMillidegrees,
+                aim.PowerBasisPoints).ConfigureAwait(true);
+            if (epoch != _previewEpoch || !_isAiming)
+            {
+                return;
+            }
+
+            _previewTraces = preview is { Legal: true } ? preview.ProjectileTraces : [];
+            QueueRedraw();
+        }
+        catch (Exception exception) when (exception is NativeSimulationException or InvalidDataException)
+        {
+            if (epoch == _previewEpoch)
+            {
+                _previewTraces = [];
+            }
+        }
+    }
+
+    private async Task FireAimedShotAsync(AimSolution aim)
+    {
+        if (_live is null || !aim.CanFire)
+        {
+            return;
+        }
+
+        _ = await SubmitAndRedrawAsync(() => _live.SubmitAbilityAsync(
+            _selectedAbilitySlot,
+            aim.AngleMillidegrees,
+            aim.PowerBasisPoints,
+            targetPlayerId: null)).ConfigureAwait(true);
+    }
+
+    private async Task<ClientMatchTransition?> SubmitAndRedrawAsync(Func<Task<ClientMatchTransition>> submit)
+    {
+        if (_live is null)
+        {
+            return null;
+        }
+
+        var preSnapshot = _live.CurrentSnapshot;
+        var preTerrain = _live.CurrentTerrain;
+        _inputLockedUntilMsec = Time.GetTicksMsec() + LockDurationMsecFor(_live);
+        _liveError = null;
+        ClientMatchTransition? transition = null;
+        try
+        {
+            transition = await submit().ConfigureAwait(true);
+            return transition;
+        }
+        catch (Exception exception) when (exception is MatchCommandRejectedException or NativeSimulationException)
+        {
+            _liveError = DescribeLiveFault(exception);
+            _inputLockedUntilMsec = Time.GetTicksMsec();
+            return null;
+        }
+        finally
+        {
+            if (transition is not null)
+            {
+                SpawnTransitionEffects(transition);
+                AutoSelectAvailableWeapon(ActivePlayer(_live.CurrentSnapshot));
+                if (!BeginShotPlayback(preSnapshot, preTerrain, transition))
+                {
+                    _inputLockedUntilMsec = Time.GetTicksMsec() + LockDurationMsecFor(_live);
+                }
+            }
+
+            QueueRedraw();
+        }
+    }
+
+    private bool BeginShotPlayback(
+        ClientMatchSnapshot preSnapshot,
+        TerrainRead preTerrain,
+        ClientMatchTransition transition)
+    {
+        var traces = new List<ClientProjectileTrace>();
+        for (var i = 0; i < transition.Events.Count; i++)
+        {
+            if (transition.Events[i] is ClientProjectileTraceEvent traceEvent)
+            {
+                traces.Add(traceEvent.Trace);
+            }
+        }
+
+        var hasMovement = false;
+        for (var i = 0; i < transition.Events.Count; i++)
+        {
+            if (transition.Events[i] is ClientEntityMovedEvent)
+            {
+                hasMovement = true;
+                break;
+            }
+        }
+
+        if (traces.Count == 0 && !hasMovement)
+        {
+            _playback = null;
+            return false;
+        }
+
+        var thrower = ActivePlayer(preSnapshot)?.CollisionCenter;
+        for (var i = 0; i < traces.Count; i++)
+        {
+            if (thrower is { } catcher && ProjectilePlayback.IsReturningWeapon(traces[i].AbilityId))
+            {
+                traces[i] = ProjectilePlayback.WithReturnTo(
+                    traces[i],
+                    catcher,
+                    ProjectilePlayback.ReturnLegTicks);
+            }
+        }
+
+        var lastTick = 0u;
+        for (var i = 0; i < traces.Count; i++)
+        {
+            var tick = ProjectilePlayback.LastSampleTick(traces[i]);
+            if (tick > lastTick)
+            {
+                lastTick = tick;
+            }
+        }
+
+        if (lastTick < transition.InputLockTicks)
+        {
+            lastTick = transition.InputLockTicks;
+        }
+
+        uint visualRate;
+        ulong duration;
+        if (traces.Count > 0)
+        {
+            visualRate = ProjectilePlayback.VisualTickRate(lastTick, transition.PresentationTickRate);
+            duration = ProjectilePlayback.PlaybackMsec(lastTick, visualRate);
+        }
+        else
+        {
+            visualRate = transition.PresentationTickRate == 0 ? 30u : transition.PresentationTickRate;
+            if (lastTick == 0)
+            {
+                lastTick = 6u;
+            }
+
+            var moveMsec = (ulong)(lastTick * 1000.0 / visualRate);
+            duration = Math.Max(180UL, moveMsec);
+        }
+
+        _playback = new ShotPlayback
+        {
+            PreSnapshot = preSnapshot,
+            PreTerrain = preTerrain,
+            Events = transition.Events,
+            StartMsec = Time.GetTicksMsec(),
+            TickRate = visualRate,
+            LockTicks = lastTick,
+            PositionScale = preSnapshot.PositionScale,
+            Traces = traces,
+        };
+        _inputLockedUntilMsec = Time.GetTicksMsec() + duration;
+        return true;
+    }
+
+    private TransitionPresentationFrame CurrentPresentationFrame()
+    {
+        if (_playback is null)
+        {
+            return TransitionPresentationFrame.Empty;
+        }
+
+        return TransitionCueResolver.Resolve(
+            _playback.Events,
+            Time.GetTicksMsec() - _playback.StartMsec,
+            _playback.TickRate,
+            _settings.Accessibility.ReduceMotion);
+    }
+
+    private static ulong LockDurationMsecFor(LiveMatch live) =>
+        live.PresentationTickRate == 0
+            ? 0
+            : (ulong)(live.LastInputLockTicks * 1000.0 / live.PresentationTickRate);
+
+    private void DrawMenu()
+    {
+        var font = ThemeDB.FallbackFont;
+        const int fontSize = 20;
+        var position = new Vector2(24, 40);
+
+        DrawString(font, position, "DUNGEON BARRAGE", fontSize: fontSize, modulate: MenuTextColor);
+        position.Y += 32;
+        DrawString(
+            font,
+            position,
+            _diagnostics?.DisplayText ?? "diagnostics unavailable",
+            fontSize: 16,
+            modulate: MenuTextColor);
+        position.Y += 48;
+        DrawString(
+            font,
+            position,
+            "Press Enter or Click to Enter Local Match Setup.",
+            fontSize: 16,
+            modulate: MenuTextColor);
+        position.Y += 24;
+        DrawString(
+            font,
+            position,
+            "Choose Leslie, Crow, Erus, or Kreena — each brings two normal actions and a charged SS.",
+            fontSize: 14,
+            modulate: LockedHintColor);
+
+        if (_menuError is not null)
+        {
+            position.Y += 32;
+            DrawString(font, position, $"Bootstrap failed: {_menuError}", fontSize: 16, modulate: Colors.OrangeRed);
+        }
+    }
+
+    private static Color ItemTileColor(int index, int count) =>
+        Color.FromHsv(count <= 0 ? 0f : (float)index / count, 0.55f, 0.5f);
+
+    private void DrawLoadoutSelect()
+    {
+        var font = ThemeDB.FallbackFont;
+        var viewport = GetViewportRect().Size;
+
+        DrawRect(new Rect2(0, 0, viewport.X, 56), new Color(0.55f, 0.10f, 0.12f));
+        const string title = "CHARACTER SELECT";
+        DrawString(font, new Vector2(24, 38), title, fontSize: 24, modulate: Colors.White);
+
+        if (_roster is null or { Count: 0 })
+        {
+            DrawString(font, new Vector2(24, 100), "Loading roster…", fontSize: 16, modulate: MenuTextColor);
+            return;
+        }
+
+        DrawEquippedStrip(font);
+
+        var visible = Enumerable.Range(0, _roster.Count).ToArray();
+        for (var visibleIndex = 0; visibleIndex < visible.Length; visibleIndex++)
+        {
+            var catalogIndex = visible[visibleIndex];
+            var item = _roster[catalogIndex];
+            var restRect = ItemTileRestRect(visibleIndex);
+            var yOffset = _tileAnimations?[catalogIndex].YOffset ?? 0f;
+            var tileRect = new Rect2(restRect.Position + new Vector2(0, yOffset), restRect.Size);
+            var isEquipped = catalogIndex == _selectedItemIndex;
+
+            DrawRect(tileRect, ItemTileColor(catalogIndex, _roster.Count));
+            if (isEquipped)
+            {
+                DrawRect(tileRect, new Color(1f, 0.82f, 0.12f, 0.72f));
+            }
+
+            var borderColor = isEquipped ? Colors.Yellow : new Color(1, 1, 1, 0.28f);
+            DrawRect(tileRect, borderColor, filled: false, width: isEquipped ? 6f : 1.5f);
+
+            var letter = char.ToUpperInvariant(item.DisplayName.Length > 0 ? item.DisplayName[0] : '?').ToString();
+            var letterSize = font.GetStringSize(letter, fontSize: 36);
+            var letterPos = tileRect.Position +
+                new Vector2((tileRect.Size.X - letterSize.X) / 2f, (tileRect.Size.Y + letterSize.Y * 0.35f) / 2f);
+            DrawString(font, letterPos, letter, fontSize: 36, modulate: Colors.White);
+
+            var nameSize = font.GetStringSize(item.DisplayName, fontSize: 13);
+            DrawString(
+                font,
+                tileRect.Position + new Vector2((tileRect.Size.X - nameSize.X) / 2f, tileRect.Size.Y - 18),
+                item.DisplayName,
+                fontSize: 13,
+                modulate: Colors.White);
+
+            if (isEquipped)
+            {
+                const string badge = "SELECTED";
+                var badgeSize = font.GetStringSize(badge, fontSize: 12);
+                var badgeRect = new Rect2(
+                    tileRect.Position + new Vector2((tileRect.Size.X - badgeSize.X) / 2f - 8, 8),
+                    badgeSize + new Vector2(16, 16));
+                DrawRect(badgeRect, new Color(0.12f, 0.08f, 0.02f, 0.85f));
+                DrawString(
+                    font,
+                    badgeRect.Position + new Vector2(8, 14),
+                    badge,
+                    fontSize: 12,
+                    modulate: Colors.Yellow);
+            }
+        }
+
+        var detailIndex = _hoveredItemIndex >= 0 ? _hoveredItemIndex : _selectedItemIndex;
+        if (detailIndex >= 0 && detailIndex < _roster.Count)
+        {
+            var detail = _roster[detailIndex];
+            var detailPos = new Vector2(24, TileGridOrigin.Y + (2 * (TileSize + TileGap)) + 20);
+            DrawString(font, detailPos, $"{detail.DisplayName}  ({detail.Id})", fontSize: 18, modulate: Colors.Gold);
+            detailPos.Y += 24;
+            DrawString(
+                font,
+                detailPos,
+                DetailLine(detail),
+                fontSize: 14,
+                modulate: MenuTextColor);
+        }
+
+        var continueRect = ContinueButtonRect();
+        DrawRect(continueRect, new Color(0.12f, 0.52f, 0.28f));
+        DrawRect(continueRect, Colors.White, filled: false, width: 2f);
+        const string continueLabel = "START DUEL";
+        var continueSize = font.GetStringSize(continueLabel, fontSize: 22);
+        DrawString(
+            font,
+            continueRect.Position + new Vector2(
+                (continueRect.Size.X - continueSize.X) / 2f,
+                (continueRect.Size.Y + continueSize.Y * 0.55f) / 2f),
+            continueLabel,
+            fontSize: 22,
+            modulate: Colors.White);
+
+        DrawString(
+            font,
+            new Vector2(24, viewport.Y - 24),
+            "Choose one complete hero kit · arrows or click select · ENTER starts · ESC goes back",
+            fontSize: 13,
+            modulate: Colors.Cyan);
+    }
+
+    private void DrawEquippedStrip(Font font)
+    {
+        if (_roster is null || _selectedItemIndex < 0 || _selectedItemIndex >= _roster.Count)
+        {
+            return;
+        }
+
+        var character = _roster[_selectedItemIndex];
+        var chips = new (string Label, ClientAbilityDefinition Ability)[]
+        {
+            ("[1] SHOT 1", character.Shot1),
+            ("[2] SHOT 2 / MELEE", character.Shot2OrMelee),
+            ("[3] SPECIAL (SS)", character.Special),
+        };
+        var x = 24f;
+        const float chipWidth = 340f;
+        const float chipHeight = 52f;
+        for (var i = 0; i < chips.Length; i++)
+        {
+            var chip = chips[i];
+            var rect = new Rect2(x, 68, chipWidth, chipHeight);
+            DrawRect(rect, new Color(0.16f, 0.17f, 0.22f));
+            DrawRect(rect, new Color(1, 1, 1, 0.25f), filled: false, width: 1f);
+            DrawString(font, rect.Position + new Vector2(10, 18), chip.Label, fontSize: 12, modulate: Colors.White);
+            DrawString(
+                font,
+                rect.Position + new Vector2(10, 40),
+                chip.Ability.DisplayName,
+                fontSize: 16,
+                modulate: Colors.Gold);
+            x += chipWidth + 10f;
+        }
+    }
+
+    private string ItemDisplayName(string id)
+    {
+        if (_roster is null)
+        {
+            return id;
+        }
+
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            var character = _roster[i];
+            if (character.Shot1.Id == id)
+            {
+                return character.Shot1.DisplayName;
+            }
+
+            if (character.Shot2OrMelee.Id == id)
+            {
+                return character.Shot2OrMelee.DisplayName;
+            }
+
+            if (character.Special.Id == id)
+            {
+                return character.Special.DisplayName;
+            }
+        }
+
+        return id;
+    }
+
+    private static string DetailLine(ClientCharacterDefinition detail)
+    {
+        return $"{detail.Role} · HP {detail.MaxHealth} · Move {detail.MovementClass}";
+    }
+
+    private void DrawSelectionCard(Rect2 rect, string label, int itemIndex, Color background)
+    {
+        if (_roster is null || itemIndex >= _roster.Count)
+        {
+            return;
+        }
+
+        var font = ThemeDB.FallbackFont;
+        var item = _roster[itemIndex];
+
+        DrawRect(rect, background);
+        DrawRect(rect, new Color(1, 1, 1, 0.6f), filled: false, width: 2f);
+
+        var swatchRect = new Rect2(rect.Position + new Vector2(18, 18), new Vector2(TileSize, TileSize));
+        DrawRect(swatchRect, ItemTileColor(itemIndex, _roster.Count));
+        DrawRect(swatchRect, Colors.White, filled: false, width: 2f);
+
+        var textPos = rect.Position + new Vector2(18 + TileSize + 18, 40);
+        DrawString(font, textPos, label, fontSize: 15, modulate: new Color(1, 1, 1, 0.85f));
+        textPos.Y += 30;
+        DrawString(font, textPos, item.DisplayName, fontSize: 22, modulate: Colors.White);
+        textPos.Y += 26;
+        DrawString(font, textPos, $"HP {item.MaxHealth} · {item.MovementClass}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
+    }
+
+    private void DrawLiveMatch(LiveMatch live)
+    {
+        var snapshot = live.CurrentSnapshot;
+        if (IsInputLocked() && _playback is not null)
+        {
+            var presentation = CurrentPresentationFrame();
+            try
+            {
+                DrawMatch(_playback.PreSnapshot, _playback.PreTerrain, presentation);
+                DrawPlaybackProjectiles(presentation);
+            }
+            finally
+            {
+                _camera.SetImpulse(PresentationCameraImpulse.None, _cellSize);
+            }
+        }
+        else
+        {
+            DrawMatch(snapshot, live.CurrentTerrain);
+            if (_isAiming)
+            {
+                DrawAim(live);
+            }
+        }
+
+        var font = ThemeDB.FallbackFont;
+        var hudY = 8f;
+        DrawString(
+            font,
+            new Vector2(8, hudY),
+            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   action [{ActionKey(_selectedAbilitySlot)}]   {TrinketHud(snapshot)}",
+            fontSize: 14,
+            modulate: MenuTextColor);
+
+        var anemometerX = (GetViewportRect().Size.X - 210f) * 0.5f;
+        DrawWindAnemometer(snapshot, new Vector2(anemometerX, 6f));
+
+        var active = ActivePlayer(snapshot);
+        if (_isAiming)
+        {
+            hudY += 18;
+            var slotInfo = GetSlotAmmo(active, _selectedAbilitySlot);
+            if (!slotInfo.canUse)
+            {
+                var emptyWarning = $"{slotInfo.itemName} needs a full SS gauge — press [1] or [2] to keep fighting.";
+                DrawString(font, new Vector2(8, hudY), emptyWarning, fontSize: 14, modulate: Colors.OrangeRed);
+            }
+            else
+            {
+                var aim = CurrentAim();
+                var dragSide = aim.FacesRight ? "LEFT" : "RIGHT";
+                var maxPct = aim.MaxPowerBasisPoints / 100;
+                var aimText = aim.CanFire
+                    ? $"pull {dragSide}  {aim.AngleDegrees}°  power {aim.PowerPercent}% of {maxPct}% max  — dotted gold hits; red misses"
+                    : $"click anywhere, drag {dragSide} — longer line is more power, max this turn {maxPct}%";
+                DrawString(font, new Vector2(8, hudY), aimText, fontSize: 14, modulate: Colors.Gold);
+            }
+        }
+
+        if (live.PlanningDeadlineUtc is { } planningDeadline)
+        {
+            hudY += 18;
+            var remainingSeconds = Math.Max(0.0, (planningDeadline - DateTimeOffset.UtcNow).TotalSeconds);
+            var timeColor = remainingSeconds <= 10.0 ? Colors.OrangeRed : MenuTextColor;
+            DrawString(font, new Vector2(8, hudY), $"time to act: {remainingSeconds:F0}s", fontSize: 12, modulate: timeColor);
+        }
+
+        if (IsInputLocked())
+        {
+            hudY += 18;
+            DrawString(font, new Vector2(8, hudY), "input locked — playing transition", fontSize: 12, modulate: LockedHintColor);
+        }
+
+        if (_liveError is not null)
+        {
+            hudY += 18;
+            DrawString(font, new Vector2(8, hudY), $"rejected: {_liveError}", fontSize: 12, modulate: Colors.OrangeRed);
+        }
+
+        DrawWeaponActionBar(active);
+        if (snapshot.TurnNumber <= 1 && !IsInputLocked())
+        {
+            var actionBarTop = WeaponSlotRect(0, GetViewportRect().Size).Position.Y;
+            DrawString(
+                font,
+                new Vector2(Math.Max(12f, (GetViewportRect().Size.X * 0.5f) - 290f), actionBarTop - 10f),
+                "Choose Shot 1 or Shot 2/Melee freely. A full SS is a bonus action, so you can still take a normal shot.",
+                fontSize: 13,
+                modulate: Colors.LightYellow);
+        }
+
+        if (snapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
+        {
+            DrawPassiveSelectModal();
+        }
+
+        // Outcome is never null (ClientInProgressOutcome is its populated "still playing"
+        // value): the results screen must only appear once the match has actually left that
+        // state, not on every frame of ordinary play.
+        if (snapshot.Outcome is not ClientInProgressOutcome)
+        {
+            DrawResultsScreen(snapshot);
+        }
+    }
+
+    private static void DrawPassiveSelectModal()
+    {
+    }
+
+    private void DrawResultsScreen(ClientMatchSnapshot snapshot)
+    {
+        var rect = new Rect2(new Vector2(180, 120), new Vector2(440, 260));
+        DrawRect(rect, new Color(0.05f, 0.08f, 0.15f, 0.95f));
+        DrawRect(rect, Colors.Gold, filled: false, width: 3);
+
+        var font = ThemeDB.FallbackFont;
+        var pos = rect.Position + new Vector2(30, 40);
+
+        DrawString(font, pos, "MATCH COMPLETE", fontSize: 22, modulate: Colors.Gold);
+        pos.Y += 36;
+
+        if (snapshot.Outcome is ClientVictoryOutcome victory)
+        {
+            DrawString(font, pos, $"VICTORY: Team {victory.Team} Wins!", fontSize: 18, modulate: Colors.LightGreen);
+        }
+        else
+        {
+            DrawString(font, pos, "DRAW: Match Ended in Draw!", fontSize: 18, modulate: Colors.LightBlue);
+        }
+
+        pos.Y += 30;
+        DrawString(font, pos, $"Turns Elapsed: {snapshot.TurnNumber} | State Hash: {snapshot.StateHash}", fontSize: 14, modulate: MenuTextColor);
+        pos.Y += 24;
+        DrawString(font, pos, $"Snapshot Gen: {snapshot.SnapshotGeneration}", fontSize: 14, modulate: MenuTextColor);
+
+        pos.Y += 40;
+        DrawString(font, pos, "Press [R] or [ENTER] to REMATCH", fontSize: 16, modulate: Colors.Cyan);
+    }
+
+    private void DrawMatch(
+        ClientMatchSnapshot snapshot,
+        TerrainRead terrain,
+        TransitionPresentationFrame? presentation = null)
+    {
+        FitWorld(snapshot.TerrainWidth, snapshot.TerrainHeight);
+        _camera.SetImpulse(presentation?.CameraImpulse ?? PresentationCameraImpulse.None, _cellSize);
+        DrawArena(snapshot.TerrainWidth, snapshot.TerrainHeight);
+
+        var presentationTick = 0u;
+        IReadOnlyList<ClientPresentationEvent>? playbackEvents = null;
+        if (IsInputLocked() && _playback is not null)
+        {
+            presentationTick = ProjectilePlayback.TickAt(
+                Time.GetTicksMsec() - _playback.StartMsec,
+                _playback.TickRate,
+                _playback.LockTicks);
+            playbackEvents = _playback.Events;
+        }
+
+        DrawTerrain(snapshot, terrain, playbackEvents, presentationTick);
+        foreach (var block in snapshot.Blocks)
+        {
+            var fallOffset = ComputeBlockFallOffset(block.Id, playbackEvents, presentationTick, _cellSize, _settings.Accessibility.ReduceMotion);
+            DrawBlock(block, terrain, snapshot.TerrainWidth, snapshot.TerrainHeight, fallOffset);
+        }
+
+        for (var index = 0; index < snapshot.Players.Count; index++)
+        {
+            var player = snapshot.Players[index];
+            var isMoving = false;
+            var isAirborne = false;
+            if (IsInputLocked() && _playback is not null &&
+                MovementPlayback.FindMovementEvent(_playback.Events, player.PlayerId) is { } moved)
+            {
+                isMoving = presentationTick >= moved.PresentationTick && presentationTick < _playback.LockTicks;
+                isAirborne = isMoving && (moved.End.Y != moved.Start.Y);
+                player = MovementPlayback.InterpolatePlayer(
+                    player,
+                    moved,
+                    presentationTick,
+                    _playback.LockTicks,
+                    _settings.Accessibility.ReduceMotion);
+            }
+
+            int? opponentX = null;
+            for (var other = 0; other < snapshot.Players.Count; other++)
+            {
+                if (other != index && !snapshot.Players[other].IsEliminated)
+                {
+                    var otherPlayer = snapshot.Players[other];
+                    if (IsInputLocked() && _playback is not null &&
+                        MovementPlayback.FindMovementEvent(_playback.Events, otherPlayer.PlayerId) is { } otherMoved)
+                    {
+                        otherPlayer = MovementPlayback.InterpolatePlayer(
+                            otherPlayer,
+                            otherMoved,
+                            presentationTick,
+                            _playback.LockTicks,
+                            _settings.Accessibility.ReduceMotion);
+                    }
+
+                    opponentX = otherPlayer.Position.X;
+                    break;
+                }
+            }
+
+            var activePlayer = ActivePlayer(snapshot);
+            var isActive = activePlayer is not null && string.Equals(player.PlayerId, activePlayer.PlayerId, StringComparison.Ordinal);
+            var slot = isActive ? _selectedAbilitySlot : ClientAbilitySlot.Main;
+            float? aimAngle = null;
+            if (isActive && _isAiming)
+            {
+                var aim = CurrentAim();
+                if (aim.CanFire)
+                {
+                    aimAngle = (aim.AngleMillidegrees / 1000f) * (MathF.PI / 180f);
+                }
+            }
+
+            DrawPlayer(
+                player,
+                index == 0 ? PlayerAColor : PlayerBColor,
+                index,
+                snapshot.PositionScale,
+                presentation?.CueFor(player.PlayerId),
+                opponentX,
+                slot,
+                aimAngle,
+                isAirborne,
+                isMoving);
+        }
+
+        DrawCombatEffects();
+
+        var font = ThemeDB.FallbackFont;
+        DrawString(
+            font,
+            new Vector2(8, GetViewportRect().Size.Y - 12),
+            $"turn {snapshot.TurnNumber}  move {snapshot.MovementRemaining}  hash {snapshot.StateHash}  [A/D walk  Space hop  arrows camera  1/2 actions  3 SS  P pass]",
+            fontSize: 14,
+            modulate: MenuTextColor);
+    }
+
+    private void FitWorld(uint widthCells, uint heightCells)
+    {
+        var viewport = GetViewportRect().Size;
+        const float padLeft = 16f;
+        const float padRight = 252f;
+        const float padTop = 72f;
+        const float padBottom = 36f;
+        var availW = Math.Max(80f, viewport.X - padLeft - padRight);
+        var availH = Math.Max(80f, viewport.Y - padTop - padBottom);
+        var width = Math.Max(1, (int)widthCells);
+        var height = Math.Max(1, (int)heightCells);
+        _cellSize = Math.Clamp(Math.Min(availW / width, availH / height), 16f, 48f);
+        var mapW = width * _cellSize;
+        var mapH = height * _cellSize;
+        _worldOrigin = new Vector2(
+            padLeft + ((availW - mapW) * 0.5f),
+            padTop + ((availH - mapH) * 0.5f));
+        _camera.UpdateArenaLimits(mapW, mapH, viewport.X, viewport.Y);
+    }
+
+    private Vector2 EffectiveCameraOffset =>
+        new(_camera.EffectiveOffset.X, _camera.EffectiveOffset.Y);
+
+    private Rect2 ArenaRect(uint widthCells, uint heightCells) =>
+        new(
+            _worldOrigin + EffectiveCameraOffset,
+            new Vector2(widthCells * _cellSize, heightCells * _cellSize));
+
+    private Rect2 CellRect(int x, int y) =>
+        new(
+            _worldOrigin.X + EffectiveCameraOffset.X + (x * _cellSize),
+            _worldOrigin.Y + EffectiveCameraOffset.Y + (y * _cellSize),
+            _cellSize,
+            _cellSize);
+
+    private void DrawArena(uint widthCells, uint heightCells)
+    {
+        var arena = ArenaRect(widthCells, heightCells);
+        DrawRect(arena, ArenaFillColor);
+        DrawRect(arena, ArenaEdgeColor, filled: false, width: 2f);
+        var font = ThemeDB.FallbackFont;
+        DrawString(
+            font,
+            arena.Position + new Vector2(6, -6),
+            "ARENA EDGE — shots that leave this box miss",
+            fontSize: 12,
+            modulate: ArenaEdgeColor);
+    }
+
+    private void DrawTerrain(
+        ClientMatchSnapshot snapshot,
+        TerrainRead terrain,
+        IReadOnlyList<ClientPresentationEvent>? events = null,
+        uint currentTick = 0)
+    {
+        var cells = terrain.Cells.Span;
+        var width = (int)snapshot.TerrainWidth;
+        var height = (int)snapshot.TerrainHeight;
+        if (cells.Length != width * height)
+        {
+            return;
+        }
+
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var material = cells[(y * width) + x];
+                if (material == 0)
+                {
+                    continue;
+                }
+
+                var owner = BlockOwningCell(snapshot, x, y);
+                var fallOffset = owner is not null
+                    ? ComputeBlockFallOffset(owner.Id, events, currentTick, _cellSize, _settings.Accessibility.ReduceMotion)
+                    : 0f;
+                var fill = EnvironmentCellColor(material, owner, x, y);
+                var rect = CellRect(x, y);
+                if (fallOffset != 0f)
+                {
+                    rect = new Rect2(rect.Position.X, rect.Position.Y + fallOffset, rect.Size.X, rect.Size.Y);
+                }
+
+                DrawRect(rect, fill);
+                var aboveEmpty = y == 0 || cells[((y - 1) * width) + x] == 0;
+                if (aboveEmpty)
+                {
+                    var top = new Rect2(rect.Position, new Vector2(rect.Size.X, Math.Max(2f, _cellSize * 0.18f)));
+                    DrawRect(top, fill.Lightened(0.22f));
+                }
+            }
+        }
+    }
+
+    private void DrawBlock(
+        ClientBlockSnapshot block,
+        TerrainRead terrain,
+        uint terrainWidth,
+        uint terrainHeight,
+        float pixelYOffset = 0f)
+    {
+        if (block.Health == 0)
+        {
+            return;
+        }
+
+        var width = (int)terrainWidth;
+        var height = (int)terrainHeight;
+        var cells = terrain.Cells.Span;
+        if (cells.Length != width * height)
+        {
+            return;
+        }
+
+        var fill = EnvironmentCellColor(
+            MaterialByte(block.Material),
+            block,
+            block.OriginCellX,
+            block.OriginCellY);
+        var mortar = new Color(BlockMortarColor.R, BlockMortarColor.G, BlockMortarColor.B, fill.A);
+        var lastX = block.OriginCellX + block.WidthCells - 1;
+        var lastY = block.OriginCellY + block.HeightCells - 1;
+        for (var y = block.OriginCellY; y <= lastY; y++)
+        {
+            for (var x = block.OriginCellX; x <= lastX; x++)
+            {
+                if (x < 0 || y < 0 || x >= width || y >= height)
+                {
+                    continue;
+                }
+
+                if (cells[(y * width) + x] == 0)
+                {
+                    continue;
+                }
+
+                var rect = CellRect(x, y);
+                if (pixelYOffset != 0f)
+                {
+                    rect = new Rect2(rect.Position.X, rect.Position.Y + pixelYOffset, rect.Size.X, rect.Size.Y);
+                }
+
+                DrawRect(rect, mortar, filled: false, width: 1f);
+            }
+        }
+    }
+
+    private static byte MaterialByte(ClientMaterial material) =>
+        material switch
+        {
+            ClientMaterial.Wood => 2,
+            ClientMaterial.ReinforcedStone => 3,
+            ClientMaterial.Soil => 1,
+            _ => 1,
+        };
+
+    private static ClientBlockSnapshot? BlockOwningCell(ClientMatchSnapshot snapshot, int x, int y)
+    {
+        ClientBlockSnapshot? found = null;
+        var foundArea = int.MaxValue;
+        for (var i = 0; i < snapshot.Blocks.Count; i++)
+        {
+            var block = snapshot.Blocks[i];
+            if (block.Health == 0)
+            {
+                continue;
+            }
+
+            if (x < block.OriginCellX || y < block.OriginCellY)
+            {
+                continue;
+            }
+
+            if (x >= block.OriginCellX + block.WidthCells || y >= block.OriginCellY + block.HeightCells)
+            {
+                continue;
+            }
+
+            var area = block.WidthCells * block.HeightCells;
+            if (area < foundArea)
+            {
+                found = block;
+                foundArea = area;
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Remaining solid columns from health, matching the authority's ceil(width * hp / max).
+    /// </summary>
+    private static int SolidColumns(ClientBlockSnapshot block)
+    {
+        if (block.WidthCells == 0 || block.Health == 0 || block.MaxHealth == 0)
+        {
+            return 0;
+        }
+
+        var product = (int)block.WidthCells * block.Health;
+        var columns = (product + block.MaxHealth - 1) / block.MaxHealth;
+        return Math.Min(columns, block.WidthCells);
+    }
+
+    private static Color EnvironmentCellColor(byte material, ClientBlockSnapshot? block, int x, int y)
+    {
+        var baseColor = material switch
+        {
+            2 => TerrainWoodColor,
+            3 => TerrainStoneColor,
+            _ => TerrainSoilColor,
+        };
+        var shade = ((x + y) & 1) == 0 ? 1f : 0.88f;
+        baseColor *= shade;
+
+        if (block is null || block.MaxHealth == 0)
+        {
+            return baseColor;
+        }
+
+        var healthFrac = Math.Clamp(block.Health / (float)block.MaxHealth, 0f, 1f);
+        var transparency = (1f - healthFrac) * EnvironmentMaxTransparency;
+        var alpha = 1f - transparency;
+        if (SolidColumns(block) <= 1)
+        {
+            return new Color(
+                EnvironmentOneShotColor.R,
+                EnvironmentOneShotColor.G,
+                EnvironmentOneShotColor.B,
+                1f - EnvironmentMaxTransparency);
+        }
+
+        baseColor.A = alpha;
+        return baseColor;
+    }
+
+    private void DrawPlayer(
+        ClientPlayerSnapshot player,
+        Color color,
+        int index,
+        int positionScale,
+        ActorPresentationCue? cue,
+        int? opponentX,
+        ClientAbilitySlot activeSlot = ClientAbilitySlot.Main,
+        float? aimAngleRadians = null,
+        bool isAirborne = false,
+        bool isMoving = false)
+    {
+        var model = CharacterPresentationModel.Create(
+            player,
+            opponentX,
+            positionScale,
+            _cellSize,
+            new PresentationPoint(_worldOrigin.X, _worldOrigin.Y),
+            new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y),
+            activeSlot,
+            aimAngleRadians);
+        var bobY = model.BobOffsetY(Time.GetTicksMsec(), _settings.Accessibility.ReduceMotion);
+
+        var flinchX = 0f;
+        var flashIntensity = 0f;
+        if (cue is { Kind: ActorPresentationCueKind.Hit } hitCue)
+        {
+            var hitAge = hitCue.Age01;
+            var flinchDecay = Math.Clamp(1f - hitAge, 0f, 1f);
+            if (!_settings.Accessibility.ReduceMotion)
+            {
+                flinchX = -model.FacingSign * MathF.Sin(hitAge * MathF.PI * 4f) * flinchDecay * 5.5f;
+            }
+
+            if (hitAge < 0.35f)
+            {
+                flashIntensity = Math.Clamp(1f - (hitAge / 0.35f), 0f, 1f);
+            }
+        }
+
+        var center = new Vector2(model.Body.Center.X + flinchX, model.Body.Center.Y + bobY);
+        var radius = model.Body.Radius;
+        var defeated = player.IsEliminated || cue is { Kind: ActorPresentationCueKind.Defeat };
+        var bodyColor = defeated
+            ? Colors.Gray
+            : (flashIntensity > 0f ? color.Lerp(Colors.White, flashIntensity * 0.75f) : color);
+
+        // Ground shadow (anchored to floor)
+        DrawCircle(new Vector2(model.ShadowPivot.X, model.ShadowPivot.Y), radius * 0.45f, new Color(0, 0, 0, 0.35f));
+
+        var drawnSprite = _spriteRegistry.TryDrawCharacter(
+            this,
+            model,
+            defeated,
+            cue,
+            color,
+            Time.GetTicksMsec(),
+            aimAngleRadians.HasValue,
+            isAirborne,
+            isMoving,
+            aimAngleRadians,
+            flinchX,
+            bobY,
+            flashIntensity);
+
+        if (drawnSprite)
+        {
+            // Illustrated sheets already contain the character silhouette. Drawing the
+            // procedural crown here covered the crow's eyes and changed the intended art.
+            if (cue is not { Kind: ActorPresentationCueKind.Defeat })
+            {
+                DrawActorCue(center, radius, cue, model.FacingSign);
+            }
+        }
+        else
+        {
+            // Authoritative body (fallback procedural circles)
+            DrawCircle(center, radius, bodyColor);
+            DrawCircle(center + new Vector2(0, -radius * 0.15f), radius * 0.62f, bodyColor.Lightened(0.12f));
+
+            // Equipped Trinket (Crown / Gem) socket adornment
+            if (!defeated && model.TrinketAccent is { } trinket)
+            {
+                var crownPos = new Vector2(model.CrownSocket.X + flinchX, model.CrownSocket.Y + bobY);
+                var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
+                if (trinket.Kind == CosmeticAccentKind.Crown)
+                {
+                    var cw = radius * 0.5f;
+                    var ch = radius * 0.35f;
+                    var crownPoints = new Vector2[]
+                    {
+                        crownPos + new Vector2(-cw, ch * 0.5f),
+                        crownPos + new Vector2(-cw, -ch),
+                        crownPos + new Vector2(-cw * 0.5f, -ch * 0.4f),
+                        crownPos + new Vector2(0, -ch * 1.2f),
+                        crownPos + new Vector2(cw * 0.5f, -ch * 0.4f),
+                        crownPos + new Vector2(cw, -ch),
+                        crownPos + new Vector2(cw, ch * 0.5f),
+                    };
+                    DrawColoredPolygon(crownPoints, accentColor);
+                }
+                else if (trinket.Kind == CosmeticAccentKind.Gem)
+                {
+                    var gw = radius * 0.25f;
+                    var gh = radius * 0.35f;
+                    var gemPoints = new Vector2[]
+                    {
+                        crownPos + new Vector2(0, -gh),
+                        crownPos + new Vector2(gw, 0),
+                        crownPos + new Vector2(0, gh * 0.6f),
+                        crownPos + new Vector2(-gw, 0),
+                    };
+                    DrawColoredPolygon(gemPoints, accentColor);
+                }
+            }
+
+            // Equipped Weapon / Tool socket adornment
+            if (!defeated && model.WeaponAccent is { } weapon)
+            {
+                var weaponPos = new Vector2(model.WeaponSocket.X + flinchX, model.WeaponSocket.Y + bobY);
+                var weaponColor = Color.FromHtml(weapon.PrimaryColorHex);
+                var dir = model.FacingSign;
+
+                Vector2 barrelDir;
+                if (model.AimVector is { } aimVec)
+                {
+                    barrelDir = new Vector2(aimVec.X, aimVec.Y);
+                }
+                else
+                {
+                    barrelDir = new Vector2(dir, -0.2f).Normalized();
+                }
+
+                if (weapon.Kind == CosmeticAccentKind.Cannon)
+                {
+                    var barrelEnd = weaponPos + (barrelDir * radius * 0.55f);
+                    DrawLine(weaponPos, barrelEnd, weaponColor, width: 4.5f);
+                    DrawCircle(barrelEnd, 2.5f, weaponColor.Lightened(0.2f));
+                }
+                else if (weapon.Kind == CosmeticAccentKind.Blade)
+                {
+                    var bladeDir = model.AimVector is not null ? barrelDir : new Vector2(dir * 0.7f, 0.7f).Normalized();
+                    var bladeTip = weaponPos + (bladeDir * radius * 0.5f);
+                    DrawLine(weaponPos, bladeTip, weaponColor, width: 3.5f);
+                    DrawLine(bladeTip, bladeTip + new Vector2(dir * 2.5f, -2.5f), weaponColor.Lightened(0.3f), width: 2f);
+                }
+                else if (weapon.Kind == CosmeticAccentKind.Bow)
+                {
+                    var bowCenter = weaponPos + (barrelDir * radius * 0.3f);
+                    var perp = new Vector2(-barrelDir.Y, barrelDir.X) * radius * 0.35f;
+                    var tip1 = bowCenter + perp;
+                    var tip2 = bowCenter - perp;
+                    DrawLine(tip1, tip2, weaponColor, width: 3f);
+                    var bowstringColor = new Color(0.98f, 0.98f, 0.82f);
+                    DrawLine(tip1, weaponPos, bowstringColor, width: 1.5f);
+                    DrawLine(tip2, weaponPos, bowstringColor, width: 1.5f);
+                }
+                else if (weapon.Kind == CosmeticAccentKind.Ordnance)
+                {
+                    var ordPos = weaponPos + (barrelDir * radius * 0.25f);
+                    DrawCircle(ordPos, radius * 0.22f, weaponColor);
+                    DrawCircle(ordPos + new Vector2(0, -radius * 0.1f), radius * 0.10f, weaponColor.Lightened(0.3f));
+                }
+            }
+
+            DrawActorCue(center, radius, cue, model.FacingSign);
+
+            // Dynamic beak polygon
+            var beak = new Vector2[model.BeakPolygon.Count];
+            for (var i = 0; i < model.BeakPolygon.Count; i++)
+            {
+                beak[i] = new Vector2(model.BeakPolygon[i].X + flinchX, model.BeakPolygon[i].Y + bobY);
+            }
+            DrawColoredPolygon(beak, Colors.Gold);
+
+            // Eye socket
+            var eyePos = new Vector2(model.EyeSocket.X + flinchX, model.EyeSocket.Y + bobY);
+            if (cue is { Kind: ActorPresentationCueKind.Hit })
+            {
+                var slitDir = new Vector2(model.FacingSign * radius * 0.12f, 0);
+                DrawLine(eyePos - slitDir, eyePos + slitDir, Colors.Black, width: 2.5f);
+            }
+            else
+            {
+                DrawCircle(eyePos, radius * 0.14f, Colors.White);
+                DrawCircle(eyePos, radius * 0.06f, Colors.Black);
+            }
+        }
+
+        // Floating character status plate
+        var plate = PlayerStatusPlateModel.Create(player, cue);
+
+        var barW = radius * 2.6f;
+        var barH = 5f;
+        var headClearance = drawnSprite ? (radius * 1.8f) + 18f : radius + 14f;
+        var barPos = center + new Vector2(-barW * 0.5f, -headClearance);
+
+        // Background
+        DrawRect(new Rect2(barPos, new Vector2(barW, barH)), new Color(0.08f, 0.10f, 0.14f, 0.90f));
+
+        // Health fill
+        var fillW = Math.Max(0f, barW * plate.HealthFraction);
+        var hpColor = plate.IsLowHealth
+            ? Colors.Crimson
+            : (plate.HealthFraction > 0.5f ? Colors.ForestGreen : Colors.Goldenrod);
+        if (fillW > 0f)
+        {
+            DrawRect(new Rect2(barPos, new Vector2(fillW, barH)), hpColor);
+        }
+        DrawRect(new Rect2(barPos, new Vector2(barW, barH)), Colors.Black, filled: false, width: 1f);
+
+        // Trinket charge pips below health bar
+        var pipY = barPos.Y + barH + 3.5f;
+        for (var p = 0; p < plate.TrinketMaxCharge; p++)
+        {
+            var pipX = barPos.X + (p * 8f) + 4f;
+            var pipColor = (p < plate.TrinketCharge) ? Colors.Gold : new Color(0.3f, 0.3f, 0.35f, 0.8f);
+            DrawCircle(new Vector2(pipX, pipY), 2.5f, pipColor);
+        }
+
+        // Action name and combat state already have dedicated action-bar presentation.
+        // Repeating them above every fighter obscures the arena.
+    }
+
+    private void DrawWindAnemometer(ClientMatchSnapshot snapshot, Vector2 pos)
+    {
+        var activePlayer = ActivePlayer(snapshot);
+        var activeWeapon = activePlayer?.Loadout.Main;
+        var wind = WindDisplayModel.Create(snapshot.WindPerTick, activeWeapon);
+
+        var width = 210f;
+        var height = 26f;
+        var rect = new Rect2(pos, new Vector2(width, height));
+        DrawRect(rect, new Color(0.04f, 0.06f, 0.10f, 0.88f));
+        DrawRect(rect, new Color(0.3f, 0.4f, 0.55f, 0.6f), filled: false, width: 1.5f);
+
+        var font = ThemeDB.FallbackFont;
+
+        // Draw wind vane icon/arrow
+        var iconCenter = pos + new Vector2(18f, height * 0.5f);
+        if (wind.Direction == WindDirection.Calm)
+        {
+            DrawCircle(iconCenter, 3.5f, Colors.LightGray);
+        }
+        else
+        {
+            var arrowDir = wind.Direction == WindDirection.BlowingLeft ? -1f : 1f;
+            var arrowColor = wind.NormalizedIntensity > 0.6f ? Colors.Orange : Colors.Cyan;
+            var arrowStart = iconCenter - new Vector2(arrowDir * 8f, 0);
+            var arrowEnd = iconCenter + new Vector2(arrowDir * 8f, 0);
+            DrawLine(arrowStart, arrowEnd, arrowColor, width: 2.5f);
+            DrawLine(arrowEnd, arrowEnd + new Vector2(-arrowDir * 4f, -3.5f), arrowColor, width: 2f);
+            DrawLine(arrowEnd, arrowEnd + new Vector2(-arrowDir * 4f, 3.5f), arrowColor, width: 2f);
+        }
+
+        // Speed text
+        DrawString(
+            font,
+            pos + new Vector2(34f, 17f),
+            wind.FormattedText,
+            fontSize: 12,
+            modulate: Colors.White);
+
+        // Sensitivity badge on the right
+        var badgeColor = wind.Sensitivity switch
+        {
+            WindSensitivityTier.Immune => Colors.LightGreen,
+            WindSensitivityTier.Resistant => Colors.DeepSkyBlue,
+            WindSensitivityTier.Standard => Colors.Khaki,
+            WindSensitivityTier.High => Colors.LightCoral,
+            _ => Colors.White,
+        };
+        DrawString(
+            font,
+            pos + new Vector2(width - 52f, 17f),
+            $"[{wind.SensitivityBadge}]",
+            fontSize: 11,
+            modulate: badgeColor);
+    }
+
+    private void DrawActorCue(Vector2 center, float radius, ActorPresentationCue? cue, float facing)
+    {
+        if (cue is not { } activeCue)
+        {
+            return;
+        }
+
+        var intensity = Math.Clamp(1f - activeCue.Age01, 0f, 1f);
+        switch (activeCue.Kind)
+        {
+            case ActorPresentationCueKind.Fire:
+                var origin = center - new Vector2(facing * radius * 1.1f, radius * 0.06f);
+                if (activeCue.Age01 < 0.06f)
+                {
+                    _effects.SpawnMuzzleFire(
+                        new PresentationPoint(origin.X, origin.Y),
+                        facing,
+                        _cellSize,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
+                var plume = origin - new Vector2(facing * radius * (0.75f + (0.35f * intensity)), 0);
+                DrawLine(origin, plume, new Color(1f, 0.78f, 0.15f, 0.85f * intensity), width: 3f);
+                DrawCircle(origin, radius * (0.20f + (0.10f * intensity)), new Color(1f, 0.86f, 0.35f, 0.7f * intensity));
+                break;
+            case ActorPresentationCueKind.Hit:
+                if (activeCue.Age01 < 0.08f)
+                {
+                    _effects.SpawnHitSparks(
+                        new PresentationPoint(center.X, center.Y),
+                        _cellSize,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+
+                    if (activeCue.Value is { } dmg && dmg > 0)
+                    {
+                        _effects.SpawnDamageNumber(
+                            new PresentationPoint(center.X, center.Y - (radius * 0.9f)),
+                            dmg);
+                    }
+                }
+                DrawArc(
+                    center,
+                    radius * (1.08f + (0.14f * intensity)),
+                    0,
+                    MathF.Tau,
+                    24,
+                    new Color(1f, 0.28f, 0.18f, 0.9f * intensity),
+                    width: 3f);
+                DrawCircle(center, radius * 0.56f, new Color(1f, 0.32f, 0.20f, 0.22f * intensity));
+                break;
+            case ActorPresentationCueKind.Defeat:
+                DrawLine(
+                    center + new Vector2(-radius * 0.62f, -radius * 0.62f),
+                    center + new Vector2(radius * 0.62f, radius * 0.62f),
+                    new Color(0.12f, 0.12f, 0.14f, 0.9f),
+                    width: 3f);
+                DrawLine(
+                    center + new Vector2(radius * 0.62f, -radius * 0.62f),
+                    center + new Vector2(-radius * 0.62f, radius * 0.62f),
+                    new Color(0.12f, 0.12f, 0.14f, 0.9f),
+                    width: 3f);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(cue), activeCue.Kind, "Unknown actor presentation cue.");
+        }
+    }
+
+    private Vector2 ToPixels(ClientPosition position, int positionScale)
+    {
+        var projected = WorldProjection.ToPresentation(
+            position,
+            positionScale,
+            _cellSize,
+            new PresentationPoint(_worldOrigin.X, _worldOrigin.Y),
+            new PresentationPoint(EffectiveCameraOffset.X, EffectiveCameraOffset.Y));
+        return new Vector2(projected.X, projected.Y);
+    }
+
+    private void DrawAim(LiveMatch live)
+    {
+        var player = ActivePlayer(live.CurrentSnapshot);
+        if (player is null)
+        {
+            return;
+        }
+
+        var aim = CurrentAim();
+        if (aim.CanFire && AimPreviewPresentationResolver.Resolve(_previewTraces) is { } guide)
+        {
+            var color = guide.HitsTarget ? AimHitColor : AimMissColor;
+            DrawDottedTracePath(guide.Trace, live.CurrentSnapshot.PositionScale, color, 2.2f);
+        }
+
+        if (!aim.CanFire)
+        {
+            DrawString(
+                ThemeDB.FallbackFont,
+                _aimCursor + new Vector2(14, -10),
+                "SS NOT CHARGED",
+                fontSize: 13,
+                modulate: Colors.OrangeRed);
+        }
+    }
+
+    private void DrawDottedTracePath(
+        ClientProjectileTrace trace,
+        int positionScale,
+        Color color,
+        float dotRadius)
+    {
+        const float spacing = 9f;
+        Vector2? previous = null;
+        for (var index = 0; index < trace.Samples.Count; index++)
+        {
+            var point = ToPixels(trace.Samples[index].Position, positionScale);
+            if (previous is not { } from)
+            {
+                DrawCircle(point, dotRadius, color);
+                previous = point;
+                continue;
+            }
+
+            var delta = point - from;
+            var length = delta.Length();
+            var dots = Math.Max(1, (int)MathF.Ceiling(length / spacing));
+            for (var dot = 1; dot <= dots; dot++)
+            {
+                DrawCircle(from.Lerp(point, dot / (float)dots), dotRadius, color);
+            }
+
+            previous = point;
+        }
+    }
+
+    private void DrawPlaybackProjectiles(TransitionPresentationFrame presentation)
+    {
+        if (_playback is null)
+        {
+            return;
+        }
+
+        var elapsed = Time.GetTicksMsec() - _playback.StartMsec;
+        var tick = ProjectilePlayback.TickAt(elapsed, _playback.TickRate, _playback.LockTicks);
+        var radius = Math.Max(8f, _cellSize * 0.42f);
+        var scale = _playback.PositionScale;
+        for (var i = 0; i < _playback.Traces.Count; i++)
+        {
+            var trace = _playback.Traces[i];
+            var returning = ProjectilePlayback.IsReturningWeapon(trace.AbilityId);
+            DrawTracePath(trace, tick, scale, new Color(1f, 0.85f, 0.3f, 0.85f), Math.Max(3f, _cellSize * 0.12f));
+            if (ProjectilePlayback.PositionAt(trace, tick) is { } position)
+            {
+                var screen = ToPixels(position, scale);
+                var direction = ProjectileDirection(trace, tick, scale);
+                if (_spriteRegistry.TryDrawProjectile(
+                    this,
+                    trace.AbilityId,
+                    screen,
+                    direction,
+                    radius,
+                    tick))
+                {
+                    // Authentic ammunition cell drawn at the authoritative trace position.
+                }
+                else if (returning)
+                {
+                    DrawReturningProjectile(screen, radius, tick);
+                }
+                else
+                {
+                    DrawCircle(screen, radius, ProjectileColor);
+                    DrawCircle(screen, radius * 0.45f, Colors.White);
+                }
+            }
+
+        }
+
+        for (var index = 0; index < presentation.ImpactCues.Count; index++)
+        {
+            var cue = presentation.ImpactCues[index];
+            if (cue.Age01 < 0.08f)
+            {
+                var hitPos = ToPixels(cue.Position, scale);
+                _effects.SpawnImpact(
+                    new PresentationPoint(hitPos.X, hitPos.Y),
+                    _cellSize,
+                    _settings.Performance.Tier,
+                    _settings.Accessibility.ReduceMotion);
+                if (cue.Cause == ClientImpactCause.Terrain)
+                {
+                    _effects.SpawnTerrainDebris(
+                        new PresentationPoint(hitPos.X, hitPos.Y),
+                        _cellSize,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
+            }
+
+            DrawImpactCue(cue, scale);
+        }
+    }
+
+    private void DrawCombatEffects()
+    {
+        // 1. Target Markers (crater reticles and hit crosses, guaranteed tactical visibility)
+        foreach (var marker in _effects.ActiveTargetMarkers)
+        {
+            var pos = new Vector2(marker.Position.X, marker.Position.Y);
+            var color = Color.FromHtml(marker.ColorHex);
+            var colWithAlpha = new Color(color.R, color.G, color.B, marker.Alpha * 0.85f);
+            DrawArc(pos, marker.Radius, 0, MathF.Tau, 16, colWithAlpha, width: 2f);
+            DrawLine(pos - new Vector2(marker.Radius * 0.6f, 0), pos + new Vector2(marker.Radius * 0.6f, 0), colWithAlpha, width: 1.5f);
+            DrawLine(pos - new Vector2(0, marker.Radius * 0.6f), pos + new Vector2(0, marker.Radius * 0.6f), colWithAlpha, width: 1.5f);
+        }
+
+        // 2. Shockwaves
+        foreach (var shock in _effects.ActiveShockwaves)
+        {
+            var center = new Vector2(shock.Center.X, shock.Center.Y);
+            var color = Color.FromHtml(shock.ColorHex);
+            DrawArc(
+                center,
+                shock.CurrentRadius,
+                0,
+                MathF.Tau,
+                24,
+                new Color(color.R, color.G, color.B, shock.Alpha * 0.9f),
+                width: 2.5f);
+        }
+
+        // 3. Particles (sparks, embers, debris)
+        foreach (var p in _effects.ActiveParticles)
+        {
+            var pos = new Vector2(p.Position.X, p.Position.Y);
+            var color = Color.FromHtml(p.ColorHex);
+            DrawCircle(pos, p.Size, new Color(color.R, color.G, color.B, p.Alpha));
+        }
+
+        // 4. Floating Damage Text
+        foreach (var text in _effects.ActiveDamageTexts)
+        {
+            var pos = new Vector2(text.Position.X, text.Position.Y);
+            var color = Color.FromHtml(text.ColorHex);
+            var alphaColor = new Color(color.R, color.G, color.B, text.Alpha);
+            var fontSize = text.IsCrit ? 18 : 14;
+            DrawString(
+                ThemeDB.FallbackFont,
+                pos + new Vector2(1, 1),
+                text.Text,
+                fontSize: fontSize,
+                modulate: new Color(0, 0, 0, text.Alpha * 0.85f));
+            DrawString(
+                ThemeDB.FallbackFont,
+                pos,
+                text.Text,
+                fontSize: fontSize,
+                modulate: alphaColor);
+        }
+    }
+
+    private void DrawImpactCue(ImpactPresentationCue cue, int positionScale)
+    {
+        var hit = ToPixels(cue.Position, positionScale);
+        var intensity = Math.Clamp(1f - cue.Age01, 0f, 1f);
+        var baseRadius = Math.Max(8f, _cellSize * 0.42f);
+        var pulse = _settings.Accessibility.ReduceMotion
+            ? 1f
+            : 1f + (0.20f * MathF.Sin(Time.GetTicksMsec() * 0.02f));
+        var color = cue.Cause switch
+        {
+            ClientImpactCause.Character => Colors.OrangeRed,
+            ClientImpactCause.Terrain => new Color(0.82f, 0.62f, 0.34f),
+            ClientImpactCause.OutOfBounds => Colors.LightSkyBlue,
+            ClientImpactCause.Expired => Colors.MediumPurple,
+            _ => throw new ArgumentOutOfRangeException(nameof(cue), cue.Cause, "Unknown impact cause."),
+        };
+        DrawArc(
+            hit,
+            baseRadius * (1.4f + (0.55f * intensity)) * pulse,
+            0,
+            MathF.Tau,
+            24,
+            new Color(color.R, color.G, color.B, 0.95f * intensity),
+            width: 3f);
+        DrawCircle(hit, baseRadius * (0.38f + (0.20f * intensity)), new Color(color.R, color.G, color.B, 0.8f * intensity));
+        DrawString(
+            ThemeDB.FallbackFont,
+            hit + new Vector2(baseRadius, -baseRadius),
+            cue.Cause == ClientImpactCause.Character ? "DIRECT HIT" : "IMPACT",
+            fontSize: 14,
+            modulate: color.Lerp(Colors.White, 0.25f));
+    }
+
+    private void DrawReturningProjectile(Vector2 screen, float radius, uint tick)
+    {
+        var spin = tick * 0.45f;
+        var axis = new Vector2(MathF.Cos(spin), MathF.Sin(spin)) * radius * 1.35f;
+        var cross = new Vector2(-axis.Y, axis.X) * 0.35f;
+        DrawColoredPolygon(
+            [
+                screen + axis,
+                screen + cross,
+                screen - axis,
+                screen - cross,
+            ],
+            ProjectileColor);
+        DrawCircle(screen, radius * 0.28f, Colors.White);
+    }
+
+    private void DrawTracePath(ClientProjectileTrace trace, uint throughTick, int positionScale, Color color, float width)
+    {
+        Vector2? previous = null;
+        for (var i = 0; i < trace.Samples.Count; i++)
+        {
+            var sample = trace.Samples[i];
+            if (sample.Tick > throughTick)
+            {
+                break;
+            }
+
+            var point = ToPixels(sample.Position, positionScale);
+            if (previous is { } from)
+            {
+                DrawLine(from, point, color, width);
+            }
+
+            previous = point;
+        }
+    }
+
+    private Vector2 ProjectileDirection(ClientProjectileTrace trace, uint tick, int positionScale)
+    {
+        if (tick > 0 &&
+            ProjectilePlayback.PositionAt(trace, tick - 1) is { } previous &&
+            ProjectilePlayback.PositionAt(trace, tick) is { } current)
+        {
+            var delta = ToPixels(current, positionScale) - ToPixels(previous, positionScale);
+            if (delta.LengthSquared() > 0.001f)
+            {
+                return delta.Normalized();
+            }
+        }
+
+        if (trace.Samples.Count >= 2)
+        {
+            var first = ToPixels(trace.Samples[0].Position, positionScale);
+            var second = ToPixels(trace.Samples[1].Position, positionScale);
+            var delta = second - first;
+            if (delta.LengthSquared() > 0.001f)
+            {
+                return delta.Normalized();
+            }
+        }
+
+        return Vector2.Right;
+    }
+
+    private async Task RunSmokeAndQuitAsync(C4SmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunSmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C4SmokeReport> RunSmokeAsync(C4SmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+        var candidates = NativeLibraryResolver.CandidatePaths();
+
+        try
+        {
+            var result = FixtureMatchBootstrapper.Start();
+            var snapshot = result.Frame.Snapshot;
+            var terrain = result.Frame.Terrain;
+
+            var solidCells = 0;
+            foreach (var cell in terrain.Cells.Span)
+            {
+                if (cell != 0)
+                {
+                    solidCells++;
+                }
+            }
+
+            _match = result;
+            QueueRedraw();
+
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            var sessionDisposed = false;
+            var disposedSessionRejectedReuse = false;
+            try
+            {
+                await result.Session.DisposeAsync().ConfigureAwait(true);
+                sessionDisposed = true;
+                try
+                {
+                    _ = await result.Session.SnapshotAsync().ConfigureAwait(true);
+                }
+                catch (ObjectDisposedException)
+                {
+                    disposedSessionRejectedReuse = true;
+                }
+            }
+            finally
+            {
+                _match = null;
+            }
+
+            return new C4SmokeReport(
+                Success: true,
+                Error: null,
+                WorkingDirectory: Directory.GetCurrentDirectory(),
+                ExecutablePath: OS.GetExecutablePath(),
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                AbiVersion: diagnostics.AbiVersion,
+                SimulationVersion: diagnostics.SimulationVersion,
+                ContentVersion: diagnostics.ContentVersion,
+                MatchId: snapshot.MatchId,
+                StateHash: snapshot.StateHash,
+                SnapshotGeneration: (uint)snapshot.SnapshotGeneration,
+                TerrainWidth: snapshot.TerrainWidth,
+                TerrainHeight: snapshot.TerrainHeight,
+                TerrainByteCount: terrain.Cells.Length,
+                SolidTerrainCellCount: solidCells,
+                BlockCount: snapshot.Blocks.Count,
+                PlayerCount: snapshot.Players.Count,
+                PositionScale: (uint)snapshot.PositionScale,
+                FixedTickRate: snapshot.FixedTickRate,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight,
+                SessionDisposed: sessionDisposed,
+                DisposedSessionRejectedReuse: disposedSessionRejectedReuse,
+                NativeLibraryCandidates: candidates);
+        }
+        catch (Exception exception)
+        {
+            return new C4SmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                WorkingDirectory: Directory.GetCurrentDirectory(),
+                ExecutablePath: OS.GetExecutablePath(),
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                AbiVersion: diagnostics.AbiVersion,
+                SimulationVersion: diagnostics.SimulationVersion,
+                ContentVersion: diagnostics.ContentVersion,
+                MatchId: string.Empty,
+                StateHash: string.Empty,
+                SnapshotGeneration: 0,
+                TerrainWidth: 0,
+                TerrainHeight: 0,
+                TerrainByteCount: 0,
+                SolidTerrainCellCount: 0,
+                BlockCount: 0,
+                PlayerCount: 0,
+                PositionScale: 0,
+                FixedTickRate: 0,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0,
+                SessionDisposed: false,
+                DisposedSessionRejectedReuse: false,
+                NativeLibraryCandidates: candidates);
+        }
+    }
+
+    private async Task RunC5SmokeAndQuitAsync(C5SmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC5SmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C5SmokeReport> RunC5SmokeAsync(C5SmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+
+        LiveMatch? live = null;
+        try
+        {
+            _isProcessingBotTurn = true;
+            EnterLocalSetup();
+            _selectedMapIndex = 0;
+            EnterLoadoutSelect();
+            if (_roster is null or { Count: 0 })
+            {
+                throw new InvalidOperationException($"C5 character picker failed to load: {_menuError}");
+            }
+
+            ClickPickerItem("crow");
+
+            ConfirmLoadoutAndStartDuel();
+            live = _live ?? throw new InvalidOperationException($"C5 confirm failed to start a match: {_menuError}");
+
+            if (live.CurrentSnapshot.MapId != PlayableMaps[0])
+            {
+                throw new InvalidOperationException(
+                    $"C5 must start on stacked map {PlayableMaps[0]}; started {live.CurrentSnapshot.MapId}.");
+            }
+
+            var beforeActivePlayer = live.CurrentSnapshot.ActivePlayerId;
+            var defenderId = string.Empty;
+            for (var i = 0; i < live.CurrentSnapshot.Players.Count; i++)
+            {
+                if (live.CurrentSnapshot.Players[i].PlayerId != beforeActivePlayer)
+                {
+                    defenderId = live.CurrentSnapshot.Players[i].PlayerId;
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(defenderId))
+            {
+                throw new InvalidOperationException("C5 could not identify the defending player.");
+            }
+
+            var defenderHealthBefore = HealthOf(live.CurrentSnapshot, defenderId);
+            var moveStepDx = live.CurrentSnapshot.PositionScale;
+
+            var moveTransition = await SubmitAndRedrawAsync(() => live.SubmitMoveAsync(moveStepDx))
+                .ConfigureAwait(true)
+                ?? throw new InvalidOperationException("The picker-started move was rejected.");
+            await WaitTicksAsync(moveTransition.InputLockTicks, moveTransition.PresentationTickRate).ConfigureAwait(true);
+            await WaitUntilInputUnlockedAsync().ConfigureAwait(true);
+
+            const int smokeAngleMillidegrees = 0;
+            const int smokePowerBasisPoints = 2_500;
+            _selectedAbilitySlot = ClientAbilitySlot.Main;
+            var aimPlayer = ActivePlayer(live.CurrentSnapshot)
+                ?? throw new InvalidOperationException("C5 could not find the active player for aim evidence.");
+            var movementAllowance = CharacterMovementAllowance(
+                aimPlayer.CharacterId,
+                live.CurrentSnapshot.MovementRemaining);
+            var maxPower = AimSolver.MaxPowerAfterMovement(
+                live.CurrentSnapshot.MovementRemaining,
+                movementAllowance);
+            var pullLength = smokePowerBasisPoints / (float)maxPower * 20f * _cellSize;
+            var angleRadians = smokeAngleMillidegrees / 1000f * (MathF.PI / 180f);
+            var fireVector = new Vector2(
+                MathF.Cos(angleRadians) * pullLength,
+                -MathF.Sin(angleRadians) * pullLength);
+            _aimOrigin = ToPixels(aimPlayer.Position, live.CurrentSnapshot.PositionScale);
+            _aimCursor = _aimOrigin - fireVector;
+            _isAiming = true;
+            var aimPreview = await live.PreviewAbilityAsync(
+                ClientAbilitySlot.Main,
+                smokeAngleMillidegrees,
+                smokePowerBasisPoints).ConfigureAwait(true);
+            _previewTraces = aimPreview is { Legal: true } ? aimPreview.ProjectileTraces : [];
+            var aimGuide = AimPreviewPresentationResolver.Resolve(_previewTraces);
+            if (aimGuide is null)
+            {
+                throw new InvalidOperationException("C5 authoritative preview produced no dotted aim guide.");
+            }
+            if (!aimGuide.HitsTarget)
+            {
+                throw new InvalidOperationException(
+                    "C5 authoritative preview must identify the direct target hit used for the gold aim guide.");
+            }
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (aimScreenshotWidth, aimScreenshotHeight) = CaptureScreenshot(options.AimScreenshotPath);
+            CancelAim();
+
+            var abilityTransition = await SubmitAndRedrawAsync(() => live.SubmitAbilityAsync(
+                ClientAbilitySlot.Main,
+                angleMillidegrees: smokeAngleMillidegrees,
+                powerBasisPoints: smokePowerBasisPoints,
+                targetPlayerId: null))
+                .ConfigureAwait(true)
+                ?? throw new InvalidOperationException("The picker-started ability was rejected.");
+            var lockedImmediatelyAfterAbility = IsInputLocked();
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var fireFrame = CurrentPresentationFrame();
+            var fireCue = fireFrame.CueFor(beforeActivePlayer ?? string.Empty);
+            var fireCueObserved = fireCue?.Kind ==
+                ActorPresentationCueKind.Fire;
+            var (fireScreenshotWidth, fireScreenshotHeight) = CaptureScreenshot(options.FireScreenshotPath);
+
+            var impactTick = LastImpactTick(abilityTransition.Events);
+            var impactReachedWhileLocked = await WaitForPlaybackTickAsync(impactTick).ConfigureAwait(true);
+            var impactFrame = CurrentPresentationFrame();
+            var hitCue = impactFrame.CueFor(defenderId);
+            var hitCueObserved = hitCue?.Kind == ActorPresentationCueKind.Hit;
+            var impactCueObserved = impactFrame.ImpactCues.Count > 0;
+            var cameraImpulseObserved = impactFrame.CameraImpulse.IsActive;
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (impactScreenshotWidth, impactScreenshotHeight) = CaptureScreenshot(options.ImpactScreenshotPath);
+            if (!impactReachedWhileLocked || !fireCueObserved || !hitCueObserved || !impactCueObserved)
+            {
+                throw new InvalidOperationException(
+                    "C5 must observe fire, hit, and impact feedback while authoritative playback is locked. " +
+                    $"Fire={fireCue?.Kind.ToString() ?? "none"}; " +
+                    $"Hit={hitCue?.Kind.ToString() ?? "none"}; " +
+                    $"ImpactCount={impactFrame.ImpactCues.Count}; " +
+                    $"ImpactReachedWhileLocked={impactReachedWhileLocked}; " +
+                    $"ImpactTick={impactTick}.");
+            }
+
+            await WaitTicksAsync(abilityTransition.InputLockTicks, abilityTransition.PresentationTickRate)
+                .ConfigureAwait(true);
+            await WaitUntilInputUnlockedAsync().ConfigureAwait(true);
+            var unlockedAfterWaiting = !IsInputLocked();
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            var final = live.CurrentSnapshot;
+            var defenderHealthAfter = HealthOf(final, defenderId);
+            var terminal = final.Outcome is not ClientInProgressOutcome;
+            var handedOver = final.ActivePlayerId != beforeActivePlayer;
+            if (!handedOver && !terminal)
+            {
+                throw new InvalidOperationException(
+                    "C5 must hand the turn over or finish the match after the picker-started shot.");
+            }
+
+            return new C5SmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                BeforeActivePlayerId: beforeActivePlayer,
+                MoveAccepted: moveTransition.Disposition == ClientTransitionDisposition.Accepted,
+                MoveEventCount: moveTransition.Events.Count,
+                MoveDx: moveStepDx,
+                MoveInputLockTicks: moveTransition.InputLockTicks,
+                AbilityAccepted: abilityTransition.Disposition == ClientTransitionDisposition.Accepted,
+                AbilityEventCount: abilityTransition.Events.Count,
+                AbilityInputLockTicks: abilityTransition.InputLockTicks,
+                InputLockedImmediatelyAfterAbility: lockedImmediatelyAfterAbility,
+                InputUnlockedAfterWaitingOutTheAbilityLock: unlockedAfterWaiting,
+                FireCueObserved: fireCueObserved,
+                HitCueObserved: hitCueObserved,
+                ImpactCueObserved: impactCueObserved,
+                CameraImpulseObserved: cameraImpulseObserved,
+                AimGuideObserved: true,
+                AimGuidePredictedHit: aimGuide.HitsTarget,
+                DefenderPlayerId: defenderId,
+                DefenderHealthBeforeAbility: defenderHealthBefore,
+                DefenderHealthAfterAbility: defenderHealthAfter,
+                AbilityDealtRealDamage: defenderHealthAfter < defenderHealthBefore,
+                FinalSnapshotMatchesAbilityPostSnapshot: final.StateHash == abilityTransition.PostSnapshot.StateHash,
+                AfterActivePlayerId: final.ActivePlayerId,
+                TurnHandedOverToTheOtherPlayer: handedOver,
+                TurnNumberAfter: final.TurnNumber,
+                FireScreenshotWidth: fireScreenshotWidth,
+                FireScreenshotHeight: fireScreenshotHeight,
+                ImpactScreenshotWidth: impactScreenshotWidth,
+                ImpactScreenshotHeight: impactScreenshotHeight,
+                AimScreenshotWidth: aimScreenshotWidth,
+                AimScreenshotHeight: aimScreenshotHeight,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight,
+                MapId: final.MapId,
+                CharacterId: _roster?[_selectedItemIndex].Id ?? string.Empty,
+                UsedCharacterSelect: _roster is not null,
+                MatchReachedTerminalOutcome: terminal);
+        }
+        catch (Exception exception)
+        {
+            return new C5SmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                BeforeActivePlayerId: null,
+                MoveAccepted: false,
+                MoveEventCount: 0,
+                MoveDx: 0,
+                MoveInputLockTicks: 0,
+                AbilityAccepted: false,
+                AbilityEventCount: 0,
+                AbilityInputLockTicks: 0,
+                InputLockedImmediatelyAfterAbility: false,
+                InputUnlockedAfterWaitingOutTheAbilityLock: false,
+                FireCueObserved: false,
+                HitCueObserved: false,
+                ImpactCueObserved: false,
+                CameraImpulseObserved: false,
+                AimGuideObserved: false,
+                AimGuidePredictedHit: false,
+                DefenderPlayerId: null,
+                DefenderHealthBeforeAbility: 0,
+                DefenderHealthAfterAbility: 0,
+                AbilityDealtRealDamage: false,
+                FinalSnapshotMatchesAbilityPostSnapshot: false,
+                AfterActivePlayerId: null,
+                TurnHandedOverToTheOtherPlayer: false,
+                TurnNumberAfter: 0,
+                FireScreenshotWidth: 0,
+                FireScreenshotHeight: 0,
+                ImpactScreenshotWidth: 0,
+                ImpactScreenshotHeight: 0,
+                AimScreenshotWidth: 0,
+                AimScreenshotHeight: 0,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0,
+                MapId: string.Empty,
+                CharacterId: string.Empty,
+                UsedCharacterSelect: false,
+                MatchReachedTerminalOutcome: false);
+        }
+        finally
+        {
+            if (live is not null)
+            {
+                await live.DisposeAsync().ConfigureAwait(true);
+            }
+
+            _live = null;
+        }
+    }
+
+    private async Task RunC6SmokeAndQuitAsync(C6SmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC6SmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C6SmokeReport> RunC6SmokeAsync(C6SmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+
+        try
+        {
+            // Drives the exact same methods a real player's input does — EnterLocalSetup,
+            // EnterLoadoutSelect, ConfirmLoadoutAndStartDuel, then Rematch — rather than
+            // building requests by hand and calling FixtureMatchBootstrapper.StartLive directly.
+            // A hand-built request proves the backend accepts well-formed input; it does not
+            // prove the interactive screens themselves (DrawLocalSetup, DrawLoadoutSelect/
+            // HandleLoadoutSelectInput) ever ran or rendered. This is the whole point of a C6
+            // smoke test, per CLIENT_SPEC §20.5's own rule: a real pixel is the proof, not a
+            // claim that the code compiles.
+            EnterLocalSetup();
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (localSetupWidth, localSetupHeight) = CaptureScreenshot(options.LocalSetupScreenshotPath);
+            _inLocalSetup = false;
+
+            EnterLoadoutSelect();
+            if (_roster is null || _roster.Count == 0)
+            {
+                throw new InvalidOperationException($"Loadout select failed to load a roster: {_menuError}");
+            }
+
+            var rosterCount = _roster.Count;
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (characterSelectWidth, characterSelectHeight) = CaptureScreenshot(options.CharacterSelectScreenshotPath);
+
+            // Exercises the hover-float animation through the exact input path real mouse
+            // motion goes through, and proves the "cannot be interrupted" requirement: hover a
+            // tile, let its float-up motion start, move the hover away before that motion
+            // finishes, and confirm it still completes the float — never reverses mid-flight —
+            // before landing begins.
+            var hoverVisible = Math.Min(2, Math.Max(0, _roster.Count - 1));
+            var hoverCatalogIndex = hoverVisible;
+            var hoverPoint = ItemTileRestRect(hoverVisible).GetCenter();
+            using (var hoverEvent = new InputEventMouseMotion { Position = hoverPoint })
+            {
+                HandleLoadoutSelectInput(hoverEvent);
+            }
+
+            // The state transition into "animating toward floated" and the actual time-advance
+            // happen in separate branches of UpdateItemTileAnimations (a tile only starts
+            // consuming delta once IsAnimating is already true entering the call) — so this
+            // needs two calls: one to begin the motion, a second to actually move partway
+            // through it. A single call here would (incorrectly) start the animation without
+            // visibly moving it at all.
+            UpdateItemTileAnimations(0f);
+            UpdateItemTileAnimations(TileFloatUpSeconds * 0.5f);
+            var wasFloatingMidFlight = _tileAnimations![hoverCatalogIndex].IsAnimating &&
+                _tileAnimations[hoverCatalogIndex].AnimatingTowardFloated &&
+                _tileAnimations[hoverCatalogIndex].YOffset < -1f;
+
+            using (var awayEvent = new InputEventMouseMotion { Position = new Vector2(-100, -100) })
+            {
+                HandleLoadoutSelectInput(awayEvent);
+            }
+
+            UpdateItemTileAnimations(0.001f);
+            var stillCompletingTheFloatAfterHoverLeft = _tileAnimations[hoverCatalogIndex].IsAnimating &&
+                _tileAnimations[hoverCatalogIndex].AnimatingTowardFloated;
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            _ = CaptureScreenshot(options.CharacterSelectHoverScreenshotPath);
+
+            UpdateItemTileAnimations(TileFloatUpSeconds);
+            UpdateItemTileAnimations(TileFloatDownSeconds);
+            var restedCleanlyAfterTheFullCycle = !_tileAnimations[hoverCatalogIndex].IsAnimating &&
+                Mathf.Abs(_tileAnimations[hoverCatalogIndex].YOffset) < 0.01f;
+
+            var hoverAnimationInterruptionTestPassed =
+                wasFloatingMidFlight && stillCompletingTheFloatAfterHoverLeft && restedCleanlyAfterTheFullCycle;
+            _hoveredItemIndex = -1;
+            if (!hoverAnimationInterruptionTestPassed)
+            {
+                throw new InvalidOperationException(
+                    "The loadout-select tile float animation was interrupted mid-flight instead of completing it.");
+            }
+
+            ClickPickerItem("kreena");
+            if (_roster[_selectedItemIndex].Id != "kreena")
+            {
+                throw new InvalidOperationException(
+                    $"Clicking Kreena must select her whole kit; selection was {_roster[_selectedItemIndex].Id}.");
+            }
+
+            var humanCharacterId = _roster[_selectedItemIndex].Id;
+            var botCharacterId = _roster[_botMainItemIndex].Id;
+            _isProcessingBotTurn = true;
+
+            var mapsCompletedCsv = string.Empty;
+            var mapsCompletedCount = 0;
+            var stackedBlocksFell = false;
+            var humanTurnExecuted = false;
+            var botTurnExecuted = false;
+            var passivePromptShownForHuman = false;
+            var passivePromptConfirmedThroughRealInput = false;
+            var turnsPlayed = 0;
+            var rematchCreated = false;
+            var rematchDisposedCleanly = false;
+            var screenshotWidth = 0;
+            var screenshotHeight = 0;
+            ClientMatchSnapshot? finalSnapshot = null;
+
+            for (var mapIndex = 0; mapIndex < PlayableMaps.Length; mapIndex++)
+            {
+                _selectedMapIndex = mapIndex;
+                ConfirmLoadoutAndStartDuel();
+                if (_live is null)
+                {
+                    throw new InvalidOperationException(
+                        $"Confirm failed to start {PlayableMaps[mapIndex]}: {_menuError}");
+                }
+
+                if (_live.CurrentSnapshot.MapId != PlayableMaps[mapIndex])
+                {
+                    throw new InvalidOperationException(
+                        $"Expected map {PlayableMaps[mapIndex]}; snapshot was {_live.CurrentSnapshot.MapId}.");
+                }
+
+                var startedCharacter = CharacterIdOf(_live.CurrentSnapshot, "a-local-player");
+                if (startedCharacter != humanCharacterId)
+                {
+                    throw new InvalidOperationException(
+                        $"{PlayableMaps[mapIndex]} must preserve selected character '{humanCharacterId}'; " +
+                        $"snapshot character was '{startedCharacter}'.");
+                }
+
+                var blocksBefore = _live.CurrentSnapshot;
+                var moveStepDx = _live.CurrentSnapshot.PositionScale;
+
+                var moveTrans = await _live.SubmitMoveAsync(moveStepDx).ConfigureAwait(true);
+                await WaitTicksAsync(moveTrans.InputLockTicks, moveTrans.PresentationTickRate).ConfigureAwait(true);
+
+                var abilityTrans = await _live.SubmitAbilityAsync(
+                    ClientAbilitySlot.Main,
+                    angleMillidegrees: 45_000,
+                    powerBasisPoints: 1_500,
+                    targetPlayerId: null).ConfigureAwait(true);
+                await WaitTicksAsync(abilityTrans.InputLockTicks, abilityTrans.PresentationTickRate).ConfigureAwait(true);
+
+                humanTurnExecuted = humanTurnExecuted
+                    || (moveTrans.Disposition == ClientTransitionDisposition.Accepted
+                        && abilityTrans.Disposition == ClientTransitionDisposition.Accepted);
+                stackedBlocksFell = stackedBlocksFell
+                    || AnyLivingBlockFell(blocksBefore, _live.CurrentSnapshot);
+
+                var decisionSeed = 777uL + (ulong)mapIndex;
+                var mapTurns = 0;
+                while (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome && mapTurns < 300)
+                {
+                    mapTurns++;
+                    turnsPlayed++;
+
+                    if (_live.CurrentSnapshot.ActivePlayerId == "a-local-player" &&
+                        _live.CurrentSnapshot.Phase == ClientMatchPhase.PassiveSelection)
+                    {
+                        passivePromptShownForHuman = true;
+                        QueueRedraw();
+                        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                        _ = CaptureScreenshot(options.PassivePromptScreenshotPath);
+
+                        var beforeGeneration = _live.CurrentSnapshot.SnapshotGeneration;
+                        using (var confirmEvent = new InputEventKey { Keycode = Key.Enter, Pressed = true })
+                        {
+                            HandlePassiveSelectionInput(confirmEvent);
+                        }
+
+                        var pollAttempts = 0;
+                        while (_live.CurrentSnapshot.SnapshotGeneration == beforeGeneration && pollAttempts < 120)
+                        {
+                            pollAttempts++;
+                            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                        }
+
+                        passivePromptConfirmedThroughRealInput =
+                            _live.CurrentSnapshot.SnapshotGeneration != beforeGeneration;
+                        continue;
+                    }
+
+                    var botTrans = await _live.SubmitBotDecisionAsync(ClientBotDifficulty.Standard, decisionSeed++)
+                        .ConfigureAwait(true);
+                    await WaitTicksAsync(botTrans.InputLockTicks, botTrans.PresentationTickRate).ConfigureAwait(true);
+                    botTurnExecuted = botTurnExecuted || botTrans.Disposition == ClientTransitionDisposition.Accepted;
+                    stackedBlocksFell = stackedBlocksFell
+                        || AnyLivingBlockFell(blocksBefore, _live.CurrentSnapshot);
+                }
+
+                if (_live.CurrentSnapshot.Outcome is ClientInProgressOutcome)
+                {
+                    throw new InvalidOperationException(
+                        $"{PlayableMaps[mapIndex]} did not reach a terminal outcome within {mapTurns} bot decisions.");
+                }
+
+                mapsCompletedCsv = mapsCompletedCount == 0
+                    ? PlayableMaps[mapIndex]
+                    : mapsCompletedCsv + "," + PlayableMaps[mapIndex];
+                mapsCompletedCount++;
+                finalSnapshot = _live.CurrentSnapshot;
+
+                QueueRedraw();
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+                if (mapIndex == 0)
+                {
+                    Rematch();
+                    if (_live is null)
+                    {
+                        throw new InvalidOperationException($"Rematch failed to start a fresh match: {_menuError}");
+                    }
+
+                    rematchCreated = _live.CurrentSnapshot.TurnNumber == 1;
+                    await _live.DisposeAsync().ConfigureAwait(true);
+                    rematchDisposedCleanly = true;
+                    _live = null;
+                }
+                else
+                {
+                    await _live.DisposeAsync().ConfigureAwait(true);
+                    _live = null;
+                }
+            }
+
+            if (mapsCompletedCount != PlayableMaps.Length)
+            {
+                throw new InvalidOperationException(
+                    $"C6 must finish every playable map; completed {mapsCompletedCsv}.");
+            }
+
+            if (finalSnapshot is null)
+            {
+                throw new InvalidOperationException("C6 finished with no snapshot.");
+            }
+
+            return new C6SmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                RosterCount: rosterCount,
+                HumanCharacterId: humanCharacterId,
+                BotCharacterId: botCharacterId,
+                InitialMatchCreated: true,
+                HoverAnimationInterruptionTestPassed: hoverAnimationInterruptionTestPassed,
+                HumanTurnExecuted: humanTurnExecuted,
+                BotTurnExecuted: botTurnExecuted,
+                PassivePromptShownForHuman: passivePromptShownForHuman,
+                PassivePromptConfirmedThroughRealInput: passivePromptConfirmedThroughRealInput,
+                MatchCompleted: true,
+                TurnsPlayed: turnsPlayed,
+                FinalTurnNumber: finalSnapshot.TurnNumber,
+                FinalStateHash: finalSnapshot.StateHash,
+                RematchSessionCreated: rematchCreated,
+                RematchSessionDisposedCleanly: rematchDisposedCleanly,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight,
+                CharacterSelectScreenshotWidth: characterSelectWidth,
+                CharacterSelectScreenshotHeight: characterSelectHeight,
+                LocalSetupScreenshotWidth: localSetupWidth,
+                LocalSetupScreenshotHeight: localSetupHeight,
+                MapsCompleted: mapsCompletedCsv,
+                AllPlayableMapsCompleted: mapsCompletedCount == PlayableMaps.Length,
+                StackedBlocksFell: stackedBlocksFell);
+        }
+        catch (Exception exception)
+        {
+            return new C6SmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                RosterCount: 0,
+                HumanCharacterId: string.Empty,
+                BotCharacterId: string.Empty,
+                InitialMatchCreated: false,
+                HoverAnimationInterruptionTestPassed: false,
+                HumanTurnExecuted: false,
+                BotTurnExecuted: false,
+                PassivePromptShownForHuman: false,
+                PassivePromptConfirmedThroughRealInput: false,
+                MatchCompleted: false,
+                TurnsPlayed: 0,
+                FinalTurnNumber: 0,
+                FinalStateHash: string.Empty,
+                RematchSessionCreated: false,
+                RematchSessionDisposedCleanly: false,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0,
+                CharacterSelectScreenshotWidth: 0,
+                CharacterSelectScreenshotHeight: 0,
+                LocalSetupScreenshotWidth: 0,
+                LocalSetupScreenshotHeight: 0,
+                MapsCompleted: string.Empty,
+                AllPlayableMapsCompleted: false,
+                StackedBlocksFell: false);
+        }
+        finally
+        {
+            if (_live is not null)
+            {
+                await _live.DisposeAsync().ConfigureAwait(true);
+                _live = null;
+            }
+
+            _inLoadoutSelect = false;
+            _isProcessingBotTurn = false;
+        }
+    }
+
+    private async Task RunC6TimeoutSmokeAndQuitAsync(C6TimeoutSmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC6TimeoutSmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C6TimeoutSmokeReport> RunC6TimeoutSmokeAsync(C6TimeoutSmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+
+        try
+        {
+            // A minimal boot to a live match — LocalSetup and loadout select's own screens are
+            // already proven pixel-for-pixel by the C6 smoke path; this test exists to prove one
+            // thing neither of those does: that an idle turn ends on its own, through the real
+            // Main._Process trigger, without this test ever calling SubmitTimeoutAsync itself.
+            EnterLocalSetup();
+            _inLocalSetup = false;
+            EnterLoadoutSelect();
+            if (_roster is null || _roster.Count == 0)
+            {
+                throw new InvalidOperationException($"Loadout select failed to load a roster: {_menuError}");
+            }
+
+            ConfirmLoadoutAndStartDuel();
+            if (_live is null)
+            {
+                throw new InvalidOperationException($"Loadout select confirmation failed to start a match: {_menuError}");
+            }
+
+            var deadline = _live.PlanningDeadlineUtc
+                ?? throw new InvalidOperationException("A freshly started match must arm a planning deadline.");
+            var configuredSeconds = (deadline - DateTimeOffset.UtcNow).TotalSeconds;
+            var turnNumberBeforeTimeout = _live.CurrentSnapshot.TurnNumber;
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (startWidth, startHeight) = CaptureScreenshot(options.StartScreenshotPath);
+            var countdownWasVisibleAtStart = _live.PlanningDeadlineUtc is not null;
+
+            // Deliberately never submits anything for this player — the whole point is proving
+            // the turn ends on its own once real wall-clock time passes the armed deadline.
+            await Task.Delay(LiveMatch.DefaultPlanningDeadline + TimeSpan.FromSeconds(2)).ConfigureAwait(true);
+
+            // Bounded by real elapsed time, not a fixed frame count: an unfocused windowed export
+            // can run its process loop far slower than headless does (observed well under 60fps
+            // here), so a frame-count bound sized for headless timing under-waits in that build.
+            // What actually matters is real wall-clock time elapsed, which this measures directly.
+            var pollDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(60);
+            while (_live.CurrentSnapshot.TurnNumber == turnNumberBeforeTimeout && DateTimeOffset.UtcNow < pollDeadline)
+            {
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            }
+
+            var timeoutTriggeredAutomatically = _live.CurrentSnapshot.TurnNumber != turnNumberBeforeTimeout;
+            if (!timeoutTriggeredAutomatically)
+            {
+                throw new InvalidOperationException(
+                    "The idle turn never ended automatically — Main._Process's local-timeout trigger did not fire.");
+            }
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            return new C6TimeoutSmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                ConfiguredDeadlineSeconds: configuredSeconds,
+                CountdownWasVisibleAtStart: countdownWasVisibleAtStart,
+                TimeoutTriggeredAutomatically: timeoutTriggeredAutomatically,
+                TurnNumberBeforeTimeout: turnNumberBeforeTimeout,
+                TurnNumberAfterTimeout: _live.CurrentSnapshot.TurnNumber,
+                ActivePlayerIdAfterTimeout: _live.CurrentSnapshot.ActivePlayerId,
+                StartScreenshotWidth: startWidth,
+                StartScreenshotHeight: startHeight,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight);
+        }
+        catch (Exception exception)
+        {
+            return new C6TimeoutSmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                ConfiguredDeadlineSeconds: 0,
+                CountdownWasVisibleAtStart: false,
+                TimeoutTriggeredAutomatically: false,
+                TurnNumberBeforeTimeout: 0,
+                TurnNumberAfterTimeout: 0,
+                ActivePlayerIdAfterTimeout: null,
+                StartScreenshotWidth: 0,
+                StartScreenshotHeight: 0,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0);
+        }
+        finally
+        {
+            if (_live is not null)
+            {
+                await _live.DisposeAsync().ConfigureAwait(true);
+                _live = null;
+            }
+
+            _inLoadoutSelect = false;
+            _isProcessingBotTurn = false;
+            _isProcessingTimeout = false;
+        }
+    }
+
+    private async Task RunC7SmokeAndQuitAsync(C7SmokeOptions options)
+    {
+        var exitCode = 1;
+        try
+        {
+            var report = await RunC7SmokeAsync(options).ConfigureAwait(true);
+            report.Write(options.ReportPath);
+            exitCode = report.Success ? 0 : 1;
+        }
+        finally
+        {
+            GetTree().Quit(exitCode);
+        }
+    }
+
+    private async Task<C7SmokeReport> RunC7SmokeAsync(C7SmokeOptions options)
+    {
+        var diagnostics = _diagnostics ?? BuildDiagnostics.Capture();
+
+        try
+        {
+            // 1. Settings Recovery Verification
+            var nonExistentPath = Path.Combine(Path.GetTempPath(), $"missing_settings_{Guid.NewGuid():N}.json");
+            var recoveredDefaults = UserSettingsStore.Load(nonExistentPath);
+            var settingsRecoveryVerified = recoveredDefaults is not null && recoveredDefaults.SchemaVersion == 1;
+
+            // 2. Audio Clamping Verification
+            var unclampedAudio = new ClientAudioSettings(MasterVolume: 250, SfxVolume: 120, MusicVolume: 90);
+            var clampedAudio = unclampedAudio.Clamp();
+            var audioClampingVerified = clampedAudio.MasterVolume == 100 && clampedAudio.SfxVolume == 100 && clampedAudio.MusicVolume == 90;
+
+            // 3. Accessibility Scaling Verification
+            var unclampedAccess = new ClientAccessibilitySettings(TextScale: 3.0f);
+            var clampedAccess = unclampedAccess.Clamp();
+            var accessibilityScalingVerified = clampedAccess.TextScale == 2.0f;
+
+            // 4. Localization Verification
+            var catalog = new LocalizationCatalog("en-US");
+            var enTitle = catalog.Get("ui.title");
+            catalog.SetLocale("es-ES");
+            var esVictory = catalog.Get("ui.victory");
+            var localizationVerified = enTitle == "Dungeon Barrage" && esVictory == "VICTORIA";
+
+            // 5. Performance Tier Verification
+            var perfSettings = new ClientPerformanceSettings(Tier: ClientPerformanceTier.Medium, TargetFps: 60);
+            var performanceTierSwitchVerified = perfSettings.Tier == ClientPerformanceTier.Medium && perfSettings.TargetFps == 60;
+
+            // 6. Multi-Platform Export Presets Verification
+            var presetsPath = "res://export_presets.cfg";
+            string presetsText = string.Empty;
+            if (Godot.FileAccess.FileExists(presetsPath))
+            {
+                using var file = Godot.FileAccess.Open(presetsPath, Godot.FileAccess.ModeFlags.Read);
+                presetsText = file?.GetAsText() ?? string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(presetsText))
+            {
+                var candidatePaths = new[]
+                {
+                    Path.Combine(AppContext.BaseDirectory, "export_presets.cfg"),
+                    Path.Combine(AppContext.BaseDirectory, "../../../client/src/DungeonBarrage.Client/export_presets.cfg"),
+                    Path.Combine(Directory.GetCurrentDirectory(), "client/src/DungeonBarrage.Client/export_presets.cfg"),
+                };
+                foreach (var candidate in candidatePaths)
+                {
+                    if (File.Exists(candidate))
+                    {
+                        presetsText = await File.ReadAllTextAsync(candidate).ConfigureAwait(true);
+                        break;
+                    }
+                }
+            }
+
+            var multiPlatformExportPresetsVerified = presetsText.Contains("name=\"Windows Desktop\"") &&
+                                                     presetsText.Contains("name=\"Linux/X11\"") &&
+                                                     presetsText.Contains("name=\"macOS\"");
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
+
+            return new C7SmokeReport(
+                Success: true,
+                Error: null,
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                SettingsRecoveryVerified: settingsRecoveryVerified,
+                AudioClampingVerified: audioClampingVerified,
+                AccessibilityScalingVerified: accessibilityScalingVerified,
+                LocalizationVerified: localizationVerified,
+                PerformanceTierSwitchVerified: performanceTierSwitchVerified,
+                MultiPlatformExportPresetsVerified: multiPlatformExportPresetsVerified,
+                ScreenshotWidth: screenshotWidth,
+                ScreenshotHeight: screenshotHeight);
+        }
+        catch (Exception exception)
+        {
+            return new C7SmokeReport(
+                Success: false,
+                Error: $"{exception.GetType().Name}: {exception.Message}",
+                ClientVersion: diagnostics.ClientVersion,
+                GodotVersion: diagnostics.GodotVersion,
+                SettingsRecoveryVerified: false,
+                AudioClampingVerified: false,
+                AccessibilityScalingVerified: false,
+                LocalizationVerified: false,
+                PerformanceTierSwitchVerified: false,
+                MultiPlatformExportPresetsVerified: false,
+                ScreenshotWidth: 0,
+                ScreenshotHeight: 0);
+        }
+    }
+
+    private static ushort HealthOf(ClientMatchSnapshot snapshot, string playerId)
+    {
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == playerId)
+            {
+                return snapshot.Players[i].Health;
+            }
+        }
+
+        throw new InvalidOperationException($"No player '{playerId}' in the snapshot.");
+    }
+
+    private void ClickPickerItem(string itemId)
+    {
+        if (_roster is null)
+        {
+            throw new InvalidOperationException("The character catalog is not loaded.");
+        }
+
+        var visibleIndex = -1;
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            if (_roster[i].Id == itemId)
+            {
+                visibleIndex = i;
+                break;
+            }
+        }
+
+        if (visibleIndex < 0)
+        {
+            throw new InvalidOperationException(
+                $"Character select does not show {itemId}.");
+        }
+
+        using var click = new InputEventMouseButton
+        {
+            Pressed = true,
+            ButtonIndex = MouseButton.Left,
+            Position = ItemTileRestRect(visibleIndex).GetCenter(),
+        };
+        HandleLoadoutSelectInput(click);
+    }
+
+    private void ClickContinue()
+    {
+        using var click = new InputEventMouseButton
+        {
+            Pressed = true,
+            ButtonIndex = MouseButton.Left,
+            Position = ContinueButtonRect().GetCenter(),
+        };
+        HandleLoadoutSelectInput(click);
+    }
+
+    private void SpawnTransitionEffects(ClientMatchTransition transition)
+    {
+        for (var i = 0; i < transition.Events.Count; i++)
+        {
+            if (transition.Events[i] is ClientBlockChangedEvent block)
+            {
+                var bounds = block.PreviousSurvivingBounds ?? block.NewSurvivingBounds;
+                if (bounds is not null &&
+                    (block.NewHealth is 0 ||
+                     (block.PreviousSurvivingBounds is { } previous &&
+                      block.NewSurvivingBounds is { } next &&
+                      next.Y > previous.Y)))
+                {
+                    var blockWorldX = (bounds.X + (bounds.Width / 2f)) * _cellSize;
+                    var blockWorldY = (bounds.Y + (bounds.Height / 2f)) * _cellSize;
+                    var blockScreen = new Vector2(
+                        _worldOrigin.X + blockWorldX + EffectiveCameraOffset.X,
+                        _worldOrigin.Y + blockWorldY + EffectiveCameraOffset.Y);
+                    _effects.SpawnTerrainDebris(
+                        new PresentationPoint(blockScreen.X, blockScreen.Y),
+                        _cellSize * 1.5f,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
+            }
+        }
+    }
+
+    private static string DescribeLiveFault(Exception exception)
+    {
+        var text = exception.Message ?? string.Empty;
+        if (text.Contains("invalidTarget", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Shot could not land — it left the arena or had no legal target.";
+        }
+
+        if (text.Contains("inputOutOfRange", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Aim was out of range. Pull away from the other crow; 20 cells is 100%.";
+        }
+
+        return text;
+    }
+
+    private static string TrinketHud(ClientMatchSnapshot snapshot)
+    {
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == "a-local-player")
+            {
+                var charge = snapshot.Players[i].TrinketCharge;
+                return charge >= 10_000
+                    ? "SS READY (3)"
+                    : $"SS {charge / 100}%";
+            }
+        }
+
+        return "SS --";
+    }
+
+    private static string CharacterIdOf(ClientMatchSnapshot snapshot, string playerId)
+    {
+        for (var i = 0; i < snapshot.Players.Count; i++)
+        {
+            if (snapshot.Players[i].PlayerId == playerId)
+            {
+                return snapshot.Players[i].CharacterId;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool AnyLivingBlockFell(ClientMatchSnapshot before, ClientMatchSnapshot after)
+    {
+        for (var i = 0; i < after.Blocks.Count; i++)
+        {
+            var fallen = after.Blocks[i];
+            if (fallen.Health == 0)
+            {
+                continue;
+            }
+
+            for (var j = 0; j < before.Blocks.Count; j++)
+            {
+                if (before.Blocks[j].Id == fallen.Id && fallen.OriginCellY > before.Blocks[j].OriginCellY)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static async Task WaitTicksAsync(uint ticks, uint tickRate)
+    {
+        if (ticks == 0 || tickRate == 0)
+        {
+            return;
+        }
+
+        var seconds = ticks / (double)tickRate;
+        await Task.Delay(TimeSpan.FromSeconds(seconds)).ConfigureAwait(true);
+    }
+
+    private static uint LastImpactTick(IReadOnlyList<ClientPresentationEvent> events)
+    {
+        ArgumentNullException.ThrowIfNull(events);
+        var found = false;
+        var latest = 0u;
+        for (var index = 0; index < events.Count; index++)
+        {
+            if (events[index] is not ClientImpactEvent impact)
+            {
+                continue;
+            }
+
+            found = true;
+            if (impact.PresentationTick > latest)
+            {
+                latest = impact.PresentationTick;
+            }
+        }
+
+        return found
+            ? latest
+            : throw new InvalidOperationException("A C5 projectile transition must publish an impact event.");
+    }
+
+    private async Task<bool> WaitForPlaybackTickAsync(uint targetTick)
+    {
+        if (_playback is null)
+        {
+            return false;
+        }
+
+        var deadline = _playback.StartMsec + ProjectilePlayback.PlaybackMsec(
+            _playback.LockTicks,
+            _playback.TickRate) + 1000UL;
+        while (IsInputLocked() && Time.GetTicksMsec() < deadline)
+        {
+            var tick = ProjectilePlayback.TickAt(
+                Time.GetTicksMsec() - _playback.StartMsec,
+                _playback.TickRate,
+                _playback.LockTicks);
+            if (tick >= targetTick)
+            {
+                return true;
+            }
+
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        }
+
+        return false;
+    }
+
+    private async Task WaitUntilInputUnlockedAsync()
+    {
+        var deadline = Time.GetTicksMsec() + 5000UL;
+        while (IsInputLocked() && Time.GetTicksMsec() < deadline)
+        {
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        }
+    }
+
+    private (int Width, int Height) CaptureScreenshot(string path)
+    {
+        if (DisplayServer.GetName() == "headless")
+        {
+            return (0, 0);
+        }
+
+        using var image = GetViewport().GetTexture().GetImage();
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        image.SavePng(path);
+        return (image.GetWidth(), image.GetHeight());
+    }
+
+    private const float WeaponBarSlotWidth = 158f;
+    private const float WeaponBarSlotHeight = 46f;
+    private const float WeaponBarSlotGap = 8f;
+
+    private static readonly ClientAbilitySlot[] WeaponSlotOrder =
+    [
+        ClientAbilitySlot.Main,
+        ClientAbilitySlot.Secondary,
+        ClientAbilitySlot.Trinket,
+    ];
+
+    private static readonly string[] WeaponSlotBadges =
+    [
+        "[1] SHOT 1",
+        "[2] SHOT 2 / MELEE",
+        "[3] SPECIAL (SS)",
+    ];
+
+    private static int ActionKey(ClientAbilitySlot slot) => slot switch
+    {
+        ClientAbilitySlot.Main => 1,
+        ClientAbilitySlot.Secondary => 2,
+        ClientAbilitySlot.Trinket => 3,
+        _ => 0,
+    };
+
+    private static Rect2 WeaponSlotRect(int slotIndex, Vector2 viewportSize)
+    {
+        const int count = 3;
+        var totalWidth = (count * WeaponBarSlotWidth) + ((count - 1) * WeaponBarSlotGap);
+        var startX = (viewportSize.X - totalWidth) * 0.5f;
+        var y = viewportSize.Y - WeaponBarSlotHeight - 24f;
+        return new Rect2(startX + (slotIndex * (WeaponBarSlotWidth + WeaponBarSlotGap)), y, WeaponBarSlotWidth, WeaponBarSlotHeight);
+    }
+
+    private (int remaining, int max, bool canUse, string itemName) GetSlotAmmo(ClientPlayerSnapshot? player, ClientAbilitySlot slot)
+    {
+        if (player is null)
+        {
+            return (0, 0, false, string.Empty);
+        }
+
+        if (slot == ClientAbilitySlot.Trinket)
+        {
+            var ready = player.TrinketCharge >= 10_000;
+            return (ready ? 1 : 0, 1, ready, ItemDisplayName(player.Loadout.Trinket));
+        }
+
+        var index = slot switch
+        {
+            ClientAbilitySlot.Main => 0,
+            ClientAbilitySlot.Secondary => 1,
+            _ => 0,
+        };
+
+        var itemName = slot switch
+        {
+            ClientAbilitySlot.Main => ItemDisplayName(player.Loadout.Main),
+            ClientAbilitySlot.Secondary => ItemDisplayName(player.Loadout.Secondary),
+            _ => string.Empty,
+        };
+
+        return (0, 0, true, itemName);
+    }
+
+    private void AutoSelectAvailableWeapon(ClientPlayerSnapshot? player)
+    {
+        if (player is null)
+        {
+            return;
+        }
+
+        var current = GetSlotAmmo(player, _selectedAbilitySlot);
+        if (current.canUse)
+        {
+            return;
+        }
+
+        ReadOnlySpan<ClientAbilitySlot> candidates =
+        [
+            ClientAbilitySlot.Main,
+            ClientAbilitySlot.Secondary,
+            ClientAbilitySlot.Trinket,
+        ];
+
+        foreach (var slot in candidates)
+        {
+            var info = GetSlotAmmo(player, slot);
+            if (info.canUse)
+            {
+                _selectedAbilitySlot = slot;
+                _lastPreviewAngle = int.MinValue;
+                break;
+            }
+        }
+    }
+
+    private void DrawWeaponActionBar(ClientPlayerSnapshot? player)
+    {
+        if (player is null)
+        {
+            return;
+        }
+
+        var font = ThemeDB.FallbackFont;
+        var viewport = GetViewportRect().Size;
+
+        for (var i = 0; i < WeaponSlotOrder.Length; i++)
+        {
+            var slot = WeaponSlotOrder[i];
+            var rect = WeaponSlotRect(i, viewport);
+            var isSelected = _selectedAbilitySlot == slot;
+            var info = GetSlotAmmo(player, slot);
+
+            Color bg;
+            Color border;
+            float borderWidth;
+
+            if (isSelected)
+            {
+                bg = new Color(0.24f, 0.21f, 0.10f, 0.95f);
+                border = Colors.Gold;
+                borderWidth = 2.5f;
+            }
+            else if (!info.canUse)
+            {
+                bg = new Color(0.06f, 0.06f, 0.08f, 0.75f);
+                border = new Color(0.35f, 0.25f, 0.25f, 0.5f);
+                borderWidth = 1f;
+            }
+            else
+            {
+                bg = new Color(0.10f, 0.12f, 0.16f, 0.88f);
+                border = new Color(0.5f, 0.55f, 0.65f, 0.6f);
+                borderWidth = 1.5f;
+            }
+
+            DrawRect(rect, bg);
+            DrawRect(rect, border, filled: false, width: borderWidth);
+
+            var badgeColor = isSelected ? Colors.Gold : (info.canUse ? Colors.White : Colors.Gray);
+            DrawString(font, rect.Position + new Vector2(8, 14), WeaponSlotBadges[i], fontSize: 11, modulate: badgeColor);
+
+            var nameColor = info.canUse ? Colors.White : new Color(0.6f, 0.6f, 0.6f);
+            var displayName = string.IsNullOrEmpty(info.itemName) ? slot.ToString() : info.itemName;
+            DrawString(font, rect.Position + new Vector2(8, 28), displayName, fontSize: 12, modulate: nameColor);
+
+            string statusText;
+            Color statusColor;
+            if (slot == ClientAbilitySlot.Trinket)
+            {
+                if (info.canUse)
+                {
+                    statusText = "SS READY · FREE ACTION";
+                    statusColor = Colors.Cyan;
+                }
+                else
+                {
+                    statusText = $"{player.TrinketCharge / 100}% CHARGE";
+                    statusColor = Colors.DarkGray;
+                }
+            }
+            else
+            {
+                statusText = "READY";
+                statusColor = Colors.LightGreen;
+            }
+
+            DrawString(font, rect.Position + new Vector2(8, 41), statusText, fontSize: 10, modulate: statusColor);
+        }
+    }
+
+    private static float ComputeBlockFallOffset(
+        uint blockId,
+        IReadOnlyList<ClientPresentationEvent>? events,
+        uint currentTick,
+        float cellSize,
+        bool reduceMotion)
+    {
+        if (events is null || reduceMotion)
+        {
+            return 0f;
+        }
+
+        for (var i = 0; i < events.Count; i++)
+        {
+            if (events[i] is ClientBlockChangedEvent b &&
+                b.BlockId == blockId &&
+                b.PreviousSurvivingBounds is { } prev &&
+                b.NewSurvivingBounds is { } next &&
+                next.Y > prev.Y)
+            {
+                if (currentTick < b.PresentationTick)
+                {
+                    return 0f;
+                }
+
+                const float fallDurationTicks = 8f;
+                var elapsed = (float)(currentTick - b.PresentationTick);
+                var progress = Math.Clamp(elapsed / fallDurationTicks, 0f, 1f);
+                var ease = progress * progress;
+                var deltaCells = (next.Y - prev.Y) * ease;
+                return deltaCells * cellSize;
+            }
+        }
+
+        return 0f;
+    }
+}

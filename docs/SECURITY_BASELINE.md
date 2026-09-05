@@ -67,6 +67,9 @@ purchase confirmation, another player's command, or a completed-match result.
 
 ## 3. Transport
 
+No network or web delivery surface exists in C0-C2. Every control in this section is **PLANNED**
+and becomes a merge gate in the milestone that introduces the corresponding server or web surface.
+
 - TLS 1.2+ for all HTTP; WSS for all realtime. No plaintext fallback, including in development
   against remote services.
 - HSTS with a ≥1 year `max-age` and `includeSubDomains` once the domain is stable.
@@ -149,11 +152,12 @@ security events, not gameplay errors.
   no `eval`, no dynamic import of downloaded code, and no user-uploaded assets
   (`PRODUCT_SPEC.md` §1 non-goals). A definition naming an unknown behavior fails validation at
   load time.
-- Database access is exclusively parameterized (Drizzle query builder). Raw string-concatenated
-  SQL is prohibited and grep-gated in CI.
+- The future Rust persistence layer must use parameterized queries exclusively. Raw
+  string-concatenated SQL is prohibited; a structural or grep gate becomes mandatory in the same
+  milestone that introduces database code. **PLANNED** — there is no database surface yet.
 - All player-authored text — display names, chat — is length-bounded, rejected on control
-  characters, and rendered as text. React escapes by default; `dangerouslySetInnerHTML` is
-  prohibited and grep-gated.
+  characters, and rendered as text by the Godot/C# presentation layer. Rich-text markup must be
+  disabled or escaped at the rendering boundary. **PLANNED** — the C# client does not exist yet.
 
 ## 7. Data minimization
 
@@ -171,9 +175,11 @@ security events, not gameplay errors.
 ## 8. Supply chain
 
 - `cargo deny` gates advisories, licenses, and duplicate versions. **CI gate.**
-- `npm audit` at a defined severity threshold, plus lockfile integrity. **CI gate.**
-- Lockfiles committed; installs use `npm ci` / `--locked`. No floating versions in production
-  builds.
+- `Cargo.lock` is committed and Rust compilation/test jobs use `--locked`. No floating versions
+  are permitted in production builds. **CI gate.**
+- When C3 introduces .NET packages, it must commit the NuGet lock file and gate restore with
+  `--locked-mode`, build, tests, analyzers, and dependency vulnerability review in the same change.
+  **PLANNED** — there is no C# package graph yet.
 - New third-party dependencies require justification — a dependency in the authoritative path is
   a trust decision, not a convenience.
 - Chrome MV3, if ever built, packages all executable code and WASM locally. Remote endpoints serve
@@ -201,21 +207,30 @@ failure spikes, and durable-write failure.
 
 ## 10. CI gates
 
-A change cannot merge unless all of these pass. These are the enforceable core of this document.
+A change cannot merge unless every gate applicable to the checked-in surfaces passes. These are the
+currently enforceable core of this document; a future surface must add its stage-specific gates in
+the same milestone that introduces it. ADR 0004 retired the TypeScript/npm/web surface, so obsolete
+green jobs for code that no longer exists are not security evidence.
 
 | Gate | Enforces |
 |---|---|
-| `cargo clippy -- -D warnings` | Lint cleanliness in the core |
-| `forbid(unsafe_code)` present in `db-sim-core` | ADR 0001 memory-safety invariant |
-| `cargo test` | Simulation correctness |
-| Frozen golden vectors | ADR 0001 determinism contract (ADR 0004 replaced parity) |
-| `cargo deny check` | Advisories, licenses, duplicate crates |
-| `npm audit` threshold | JS dependency advisories |
-| Secret scan | No credentials, keys, or tokens in the tree |
-| Grep gate: no raw SQL concatenation | §6 injection |
-| Grep gate: no `dangerouslySetInnerHTML`, no `eval` | §6 XSS/RCE |
-| `tsc --noEmit` and ESLint | Type and lint correctness |
-| Security-header assertion test | §3 headers actually served |
+| `cargo fmt --all --check` and locked `cargo clippy -- -D warnings` | Formatting and lint cleanliness |
+| `forbid(unsafe_code)` workspace lint; unsafe syntax restricted to documented FFI | ADR 0001 memory-safety invariant |
+| No `f32`/`f64` in authoritative core code | Cross-target deterministic arithmetic |
+| Locked workspace and release-FFI tests | Simulation, adapter, and release unwind correctness |
+| Frozen golden vectors and exact shared request/response bytes | Determinism and cross-language contract |
+| Exact release `db_sim_*` export list | No accidental native attack surface |
+| Valgrind complete ABI lifecycle | Rust/C ownership and leak discipline |
+| `cargo deny check` | Advisories, licenses, duplicate crates, and sources |
+| Full-history secret scan | No credentials, keys, or tokens in the tree |
+
+Stage-specific gates are binding before their corresponding surface can merge:
+
+- C3 C#: locked NuGet restore, build, xUnit, analyzers, and dependency-vulnerability review.
+- Persistence/server: parameterized-query tests and a no-raw-SQL-concatenation gate.
+- Network or web delivery: transport/security-header assertions and rendering/injection tests.
+- A web/TypeScript client may restore npm, TypeScript, ESLint, XSS, and package-audit gates only
+  through a new accepted ADR; no such surface exists now.
 
 ## 11. Incident response — **PLANNED**
 
