@@ -60,13 +60,15 @@ public partial class Main : Node2D
     private int _hoveredItemIndex = -1;
 
     private const float TileSize = 108f;
-    private const float TileGap = 16f;
+    private const float CharacterCardWidth = 286f;
+    private const float CharacterCardHeight = 286f;
+    private const float TileGap = 14f;
     private const int TileColumns = 4;
     private const float TileFloatHeight = 14f;
     private const float TileFloatUpSeconds = 0.16f;
     private const float TileFloatDownSeconds = 0.24f;
-    private static readonly Vector2 TileGridOrigin = new(40, 176);
-    private static readonly Vector2 ContinueButtonSize = new(300, 56);
+    private static readonly Vector2 TileGridOrigin = new(47, 142);
+    private static readonly Vector2 ContinueButtonSize = new(310, 64);
 
     /// <summary>
     /// One item tile's float animation: a small non-interruptible state machine, not a
@@ -151,6 +153,9 @@ public partial class Main : Node2D
             _diagnostics = BuildDiagnostics.Capture();
             _settings = UserSettingsStore.Load(Path.Combine(OS.GetUserDataDir(), "settings.json"));
             _spriteRegistry.PreloadAll();
+            var shellRoster = RosterCatalog.Get();
+            _roster = shellRoster.Characters;
+            _botMainItemIndex = BotMainItemIndex(shellRoster.Characters);
         }
         catch (Exception exception)
         {
@@ -230,6 +235,11 @@ public partial class Main : Node2D
         if (_inLoadoutSelect)
         {
             UpdateItemTileAnimations((float)delta);
+        }
+
+        if (_live is null && !_settings.Accessibility.ReduceMotion)
+        {
+            QueueRedraw();
         }
 
         // A visible countdown needs a redraw roughly every frame while it's ticking, not just on
@@ -486,49 +496,97 @@ public partial class Main : Node2D
     private void DrawLocalSetup()
     {
         var font = ThemeDB.FallbackFont;
-
-        DrawRect(new Rect2(0, 0, GetViewportRect().Size.X, 64), new Color(0.55f, 0.10f, 0.12f));
-        DrawString(font, new Vector2(24, 40), "LOCAL MATCH SETUP", fontSize: 24, modulate: Colors.White);
-
-        var pos = new Vector2(24, 110);
-        DrawString(font, pos, "Map  (left/right to change)", fontSize: 14, modulate: Colors.Gold);
-        pos.Y += 22;
-        DrawString(font, pos, PlayableMaps[_selectedMapIndex], fontSize: 18, modulate: MenuTextColor);
-        pos.Y += 40;
-
-        DrawString(font, pos, "Mode", fontSize: 14, modulate: Colors.Gold);
-        pos.Y += 22;
-        DrawString(font, pos, "Turn-Based Duel", fontSize: 18, modulate: MenuTextColor);
-        pos.Y += 40;
-
-        DrawString(font, pos, "Slots", fontSize: 14, modulate: Colors.Gold);
-        pos.Y += 22;
-        DrawString(font, pos, "Player 1: Human   ·   Player 2: CPU (Bot)", fontSize: 18, modulate: MenuTextColor);
-        pos.Y += 40;
-
-        DrawString(
+        var viewport = GetViewportRect().Size;
+        RetroArcadeUi.DrawBackdrop(this, viewport, Time.GetTicksMsec(), _settings.Accessibility.ReduceMotion);
+        RetroArcadeUi.DrawScreenHeader(
+            this,
             font,
-            pos,
-            "Left/right cycles crow-perch, broken-battlements, and twin-spires. Mode is",
-            fontSize: 13,
-            modulate: LockedHintColor);
-        pos.Y += 18;
-        DrawString(
+            viewport,
+            "ARCADE > LOCAL DUEL > ARENA",
+            "SELECT YOUR STAGE",
+            "LEFT / RIGHT TO CYCLE");
+
+        var arenaPanel = new Rect2(34f, 140f, 736f, 500f);
+        RetroArcadeUi.DrawPanel(this, arenaPanel, RetroArcadeUi.Cyan, selected: true);
+        DrawString(font, arenaPanel.Position + new Vector2(24f, 34f), $"STAGE 0{_selectedMapIndex + 1}", fontSize: 13, modulate: RetroArcadeUi.Cyan);
+        RetroArcadeUi.DrawShadowText(this, font, arenaPanel.Position + new Vector2(24f, 78f), MapDisplayName(_selectedMapIndex), 30, RetroArcadeUi.Coin);
+        DrawMapPreview(new Rect2(arenaPanel.Position + new Vector2(24f, 100f), new Vector2(arenaPanel.Size.X - 48f, 286f)), _selectedMapIndex);
+        DrawString(font, arenaPanel.Position + new Vector2(24f, 420f), "[←] PREVIOUS STAGE", fontSize: 14, modulate: RetroArcadeUi.Cyan);
+        var nextText = "NEXT STAGE [→]";
+        var nextSize = font.GetStringSize(nextText, fontSize: 14);
+        DrawString(font, new Vector2(arenaPanel.End.X - nextSize.X - 24f, arenaPanel.Position.Y + 420f), nextText, fontSize: 14, modulate: RetroArcadeUi.Cyan);
+        DrawString(font, arenaPanel.Position + new Vector2(24f, 461f), PlayableMaps[_selectedMapIndex], fontSize: 11, modulate: RetroArcadeUi.Locked);
+
+        var matchPanel = new Rect2(794f, 140f, viewport.X - 828f, 500f);
+        RetroArcadeUi.DrawPanel(this, matchPanel, RetroArcadeUi.Ember);
+        DrawString(font, matchPanel.Position + new Vector2(24f, 34f), "MATCH CARD", fontSize: 13, modulate: RetroArcadeUi.Ember);
+        RetroArcadeUi.DrawShadowText(this, font, matchPanel.Position + new Vector2(24f, 80f), "HUMAN  VS  CPU", 25, RetroArcadeUi.Ink);
+        RetroArcadeUi.DrawStatusPill(this, font, matchPanel.Position + new Vector2(24f, 101f), "TURN-BASED DUEL", RetroArcadeUi.Cyan);
+
+        DrawString(font, matchPanel.Position + new Vector2(24f, 166f), "TWO WAYS TO WIN", fontSize: 13, modulate: RetroArcadeUi.Coin);
+        DrawString(font, matchPanel.Position + new Vector2(24f, 198f), "01  DEAL PURE DAMAGE", fontSize: 16, modulate: RetroArcadeUi.Ink);
+        DrawString(font, matchPanel.Position + new Vector2(46f, 222f), "Spend pressure on health.", fontSize: 12, modulate: RetroArcadeUi.MutedInk);
+        DrawString(font, matchPanel.Position + new Vector2(24f, 260f), "02  BREAK THE DUNGEON", fontSize: 16, modulate: RetroArcadeUi.Ink);
+        DrawString(font, matchPanel.Position + new Vector2(46f, 284f), "Collapse support. Force a ring-out.", fontSize: 12, modulate: RetroArcadeUi.MutedInk);
+        DrawString(font, matchPanel.Position + new Vector2(24f, 329f), "SWITCH TACTICS AT ANY TIME", fontSize: 12, modulate: RetroArcadeUi.Success);
+
+        RetroArcadeUi.DrawButton(
+            this,
             font,
-            pos,
-            "fixed to a turn-based duel. ENTER continues to character select.",
-            fontSize: 13,
-            modulate: LockedHintColor);
+            new Rect2(matchPanel.Position + new Vector2(24f, 374f), new Vector2(matchPanel.Size.X - 48f, 76f)),
+            "CHOOSE FIGHTER",
+            RetroArcadeUi.Ember,
+            selected: true,
+            fontSize: 20);
 
         if (_menuError is not null)
         {
-            pos.Y += 28;
-            DrawString(font, pos, _menuError, fontSize: 14, modulate: Colors.OrangeRed);
+            DrawString(font, matchPanel.Position + new Vector2(24f, 474f), _menuError, fontSize: 12, modulate: RetroArcadeUi.Ember);
         }
 
-        var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
-        DrawString(font, footerPos, "ENTER / Click to choose a character · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
+        DrawString(font, new Vector2(34f, viewport.Y - 30f), "[ENTER] CONTINUE   [ESC] BACK", fontSize: 13, modulate: RetroArcadeUi.Cyan);
     }
+
+    private void DrawMapPreview(Rect2 rect, int mapIndex)
+    {
+        DrawRect(rect, new Color(0.03f, 0.05f, 0.10f, 0.96f));
+        DrawRect(rect, new Color(RetroArcadeUi.Cyan, 0.32f), filled: false, width: 2f);
+
+        var floor = new Rect2(rect.Position + new Vector2(34f, rect.Size.Y - 54f), new Vector2(rect.Size.X - 68f, 24f));
+        DrawRect(floor, new Color("#4e556b"));
+        DrawRect(floor, RetroArcadeUi.Cyan, filled: false, width: 1f);
+
+        var soil = new Color("#775129");
+        switch (mapIndex)
+        {
+            case 0:
+                DrawRect(new Rect2(rect.Position + new Vector2(72f, 124f), new Vector2(76f, 108f)), soil);
+                DrawRect(new Rect2(rect.End - new Vector2(148f, 162f), new Vector2(76f, 108f)), soil);
+                DrawRect(new Rect2(rect.GetCenter() - new Vector2(96f, 86f), new Vector2(192f, 24f)), soil);
+                break;
+            case 1:
+                DrawRect(new Rect2(rect.Position + new Vector2(58f, 150f), new Vector2(158f, 82f)), soil);
+                DrawRect(new Rect2(rect.GetCenter() + new Vector2(-54f, 18f), new Vector2(108f, 58f)), soil);
+                DrawRect(new Rect2(rect.End - new Vector2(216f, 136f), new Vector2(158f, 82f)), soil);
+                break;
+            default:
+                DrawRect(new Rect2(rect.Position + new Vector2(88f, 80f), new Vector2(82f, 152f)), soil);
+                DrawRect(new Rect2(rect.End - new Vector2(170f, 206f), new Vector2(82f, 152f)), soil);
+                DrawRect(new Rect2(rect.GetCenter() - new Vector2(60f, 24f), new Vector2(120f, 78f)), soil);
+                break;
+        }
+
+        DrawCircle(rect.Position + new Vector2(110f, 105f), 12f, RetroArcadeUi.Ember);
+        DrawCircle(rect.End - new Vector2(110f, 181f), 12f, RetroArcadeUi.Cyan);
+        DrawString(ThemeDB.FallbackFont, rect.Position + new Vector2(24f, 30f), "DESTRUCTIBLE STAGE PREVIEW", fontSize: 11, modulate: RetroArcadeUi.Locked);
+    }
+
+    private static string MapDisplayName(int mapIndex) => mapIndex switch
+    {
+        0 => "CROW PERCH",
+        1 => "BROKEN BATTLEMENTS",
+        _ => "TWIN SPIRES",
+    };
 
     private void EnterLoadoutSelect()
     {
@@ -569,8 +627,10 @@ public partial class Main : Node2D
     {
         var column = index % TileColumns;
         var row = index / TileColumns;
-        var position = TileGridOrigin + new Vector2(column * (TileSize + TileGap), row * (TileSize + TileGap));
-        return new Rect2(position, new Vector2(TileSize, TileSize));
+        var position = TileGridOrigin + new Vector2(
+            column * (CharacterCardWidth + TileGap),
+            row * (CharacterCardHeight + TileGap));
+        return new Rect2(position, new Vector2(CharacterCardWidth, CharacterCardHeight));
     }
 
     private int? HitTestItemTile(Vector2 point)
@@ -1340,38 +1400,103 @@ public partial class Main : Node2D
     private void DrawMenu()
     {
         var font = ThemeDB.FallbackFont;
-        const int fontSize = 20;
-        var position = new Vector2(24, 40);
+        var viewport = GetViewportRect().Size;
+        RetroArcadeUi.DrawBackdrop(this, viewport, Time.GetTicksMsec(), _settings.Accessibility.ReduceMotion);
 
-        DrawString(font, position, "DUNGEON BARRAGE", fontSize: fontSize, modulate: MenuTextColor);
-        position.Y += 32;
+        var logoRect = new Rect2(42f, 36f, 606f, 286f);
+        RetroArcadeUi.DrawPanel(this, logoRect, RetroArcadeUi.Ember, selected: true);
+        DrawRect(new Rect2(logoRect.Position + new Vector2(12f, 12f), new Vector2(10f, logoRect.Size.Y - 24f)), RetroArcadeUi.Cyan);
+        RetroArcadeUi.DrawShadowText(this, font, logoRect.Position + new Vector2(46f, 83f), "DUNGEON", 54, RetroArcadeUi.Coin);
+        RetroArcadeUi.DrawShadowText(this, font, logoRect.Position + new Vector2(46f, 151f), "BARRAGE", 58, RetroArcadeUi.Ember);
+        RetroArcadeUi.DrawStatusPill(this, font, logoRect.Position + new Vector2(48f, 185f), "INSERT COURAGE", RetroArcadeUi.Cyan);
         DrawString(
             font,
-            position,
-            _diagnostics?.DisplayText ?? "diagnostics unavailable",
-            fontSize: 16,
-            modulate: MenuTextColor);
-        position.Y += 48;
-        DrawString(
+            logoRect.Position + new Vector2(48f, 244f),
+            "TACTICAL ARTILLERY // SERIES 01",
+            fontSize: 13,
+            modulate: RetroArcadeUi.MutedInk);
+
+        DrawFranchiseRoster(font, new Rect2(674f, 36f, viewport.X - 716f, 372f));
+
+        var localRect = new Rect2(42f, 348f, 496f, 278f);
+        RetroArcadeUi.DrawPanel(this, localRect, RetroArcadeUi.Ember, selected: true);
+        DrawString(font, localRect.Position + new Vector2(30f, 38f), "1P  VS  CPU", fontSize: 15, modulate: RetroArcadeUi.Cyan);
+        RetroArcadeUi.DrawShadowText(this, font, localRect.Position + new Vector2(30f, 104f), "LOCAL DUEL", 38, RetroArcadeUi.Coin);
+        DrawString(font, localRect.Position + new Vector2(30f, 143f), "Damage them. Break the stage. Ring them out.", fontSize: 14, modulate: RetroArcadeUi.Ink);
+        DrawString(font, localRect.Position + new Vector2(30f, 166f), "Switch tactics every turn. Your second action never runs dry.", fontSize: 12, modulate: RetroArcadeUi.MutedInk);
+        RetroArcadeUi.DrawButton(
+            this,
             font,
-            position,
-            "Press Enter or Click to Enter Local Match Setup.",
-            fontSize: 16,
-            modulate: MenuTextColor);
-        position.Y += 24;
-        DrawString(
-            font,
-            position,
-            "Choose Leslie, Crow, Erus, or Kreena — each brings two normal actions and a charged SS.",
-            fontSize: 14,
-            modulate: LockedHintColor);
+            new Rect2(localRect.Position + new Vector2(28f, 194f), new Vector2(localRect.Size.X - 56f, 58f)),
+            "PRESS ENTER TO PLAY",
+            RetroArcadeUi.Ember,
+            selected: true,
+            fontSize: 18);
+
+        DrawFutureModeCard(font, new Rect2(562f, 432f, 318f, 194f), "ARCADE RUN", "A gauntlet of dungeon challengers", RetroArcadeUi.Cyan);
+        DrawFutureModeCard(font, new Rect2(904f, 432f, 334f, 194f), "FRANCHISE VAULT", "Heroes, rivals, lore, and rewards", RetroArcadeUi.Purple);
+
+        DrawString(font, new Vector2(42f, viewport.Y - 35f), "[ENTER] SELECT   [ESC] QUIT", fontSize: 13, modulate: RetroArcadeUi.Cyan);
+        var versionText = _diagnostics?.DisplayText ?? "diagnostics unavailable";
+        var versionSize = font.GetStringSize(versionText, fontSize: 11);
+        DrawString(font, new Vector2(viewport.X - versionSize.X - 42f, viewport.Y - 35f), versionText, fontSize: 11, modulate: RetroArcadeUi.Locked);
 
         if (_menuError is not null)
         {
-            position.Y += 32;
-            DrawString(font, position, $"Bootstrap failed: {_menuError}", fontSize: 16, modulate: Colors.OrangeRed);
+            DrawString(font, new Vector2(42f, viewport.Y - 56f), $"BOOTSTRAP FAULT // {_menuError}", fontSize: 13, modulate: RetroArcadeUi.Ember);
         }
     }
+
+    private void DrawFranchiseRoster(Font font, Rect2 rect)
+    {
+        RetroArcadeUi.DrawPanel(this, rect, RetroArcadeUi.Cyan);
+        DrawString(font, rect.Position + new Vector2(20f, 28f), "LAUNCH ROSTER // FOUR HEROES", fontSize: 14, modulate: RetroArcadeUi.Cyan);
+        DrawString(font, rect.Position + new Vector2(20f, 49f), "The first fighters in the Dungeon Barrage saga", fontSize: 12, modulate: RetroArcadeUi.MutedInk);
+
+        if (_roster is null or { Count: 0 })
+        {
+            DrawString(font, rect.Position + new Vector2(20f, 92f), "ROSTER LINK OFFLINE", fontSize: 16, modulate: RetroArcadeUi.Ember);
+            return;
+        }
+
+        const float gap = 8f;
+        var cardWidth = (rect.Size.X - 40f - (gap * 3f)) / 4f;
+        for (var index = 0; index < Math.Min(_roster.Count, 4); index++)
+        {
+            var character = _roster[index];
+            var accent = CharacterAccent(index);
+            var card = new Rect2(rect.Position + new Vector2(20f + (index * (cardWidth + gap)), 72f), new Vector2(cardWidth, rect.Size.Y - 92f));
+            RetroArcadeUi.DrawPanel(this, card, accent);
+
+            var portrait = new Rect2(card.Position + new Vector2(7f, 20f), new Vector2(card.Size.X - 14f, 160f));
+            if (!_spriteRegistry.TryDrawPortrait(this, character.Shot1.Id, portrait, Time.GetTicksMsec(), facesRight: index < 2))
+            {
+                RetroArcadeUi.DrawCenteredText(this, font, portrait, character.DisplayName[..1].ToUpperInvariant(), 38, accent);
+            }
+
+            var nameRect = new Rect2(card.Position + new Vector2(7f, 184f), new Vector2(card.Size.X - 14f, 38f));
+            DrawRect(nameRect, new Color(accent, 0.18f));
+            RetroArcadeUi.DrawCenteredText(this, font, nameRect, character.DisplayName.ToUpperInvariant(), 13, RetroArcadeUi.Ink);
+            RetroArcadeUi.DrawCenteredText(this, font, new Rect2(card.Position + new Vector2(4f, 226f), new Vector2(card.Size.X - 8f, 28f)), $"HP {character.MaxHealth}", 11, RetroArcadeUi.MutedInk);
+        }
+    }
+
+    private void DrawFutureModeCard(Font font, Rect2 rect, string title, string description, Color accent)
+    {
+        RetroArcadeUi.DrawPanel(this, rect, accent);
+        RetroArcadeUi.DrawStatusPill(this, font, rect.Position + new Vector2(18f, 18f), "COMING NEXT", accent);
+        DrawString(font, rect.Position + new Vector2(20f, 94f), title, fontSize: 23, modulate: RetroArcadeUi.MutedInk);
+        DrawString(font, rect.Position + new Vector2(20f, 124f), description, fontSize: 11, modulate: RetroArcadeUi.Locked);
+        DrawString(font, rect.Position + new Vector2(20f, 161f), "LOCKED", fontSize: 12, modulate: RetroArcadeUi.Locked);
+    }
+
+    private static Color CharacterAccent(int index) => index switch
+    {
+        0 => RetroArcadeUi.Coin,
+        1 => RetroArcadeUi.Success,
+        2 => RetroArcadeUi.Cyan,
+        _ => RetroArcadeUi.Purple,
+    };
 
     private static Color ItemTileColor(int index, int count) =>
         Color.FromHsv(count <= 0 ? 0f : (float)index / count, 0.55f, 0.5f);
@@ -1380,18 +1505,20 @@ public partial class Main : Node2D
     {
         var font = ThemeDB.FallbackFont;
         var viewport = GetViewportRect().Size;
-
-        DrawRect(new Rect2(0, 0, viewport.X, 56), new Color(0.55f, 0.10f, 0.12f));
-        const string title = "CHARACTER SELECT";
-        DrawString(font, new Vector2(24, 38), title, fontSize: 24, modulate: Colors.White);
+        RetroArcadeUi.DrawBackdrop(this, viewport, Time.GetTicksMsec(), _settings.Accessibility.ReduceMotion);
+        RetroArcadeUi.DrawScreenHeader(
+            this,
+            font,
+            viewport,
+            "ARCADE > LOCAL DUEL > FIGHTER",
+            "CHOOSE YOUR CHAMPION",
+            "ONE HERO // THREE SIGNATURE ACTIONS");
 
         if (_roster is null or { Count: 0 })
         {
-            DrawString(font, new Vector2(24, 100), "Loading roster…", fontSize: 16, modulate: MenuTextColor);
+            DrawString(font, new Vector2(47f, 164f), "ROSTER LINKING…", fontSize: 18, modulate: RetroArcadeUi.Cyan);
             return;
         }
-
-        DrawEquippedStrip(font);
 
         var visible = Enumerable.Range(0, _roster.Count).ToArray();
         for (var visibleIndex = 0; visibleIndex < visible.Length; visibleIndex++)
@@ -1402,82 +1529,51 @@ public partial class Main : Node2D
             var yOffset = _tileAnimations?[catalogIndex].YOffset ?? 0f;
             var tileRect = new Rect2(restRect.Position + new Vector2(0, yOffset), restRect.Size);
             var isEquipped = catalogIndex == _selectedItemIndex;
+            var isHovered = catalogIndex == _hoveredItemIndex;
+            var accent = CharacterAccent(catalogIndex);
+            RetroArcadeUi.DrawPanel(this, tileRect, accent, isEquipped || isHovered);
 
-            DrawRect(tileRect, ItemTileColor(catalogIndex, _roster.Count));
-            if (isEquipped)
+            RetroArcadeUi.DrawStatusPill(
+                this,
+                font,
+                tileRect.Position + new Vector2(14f, 12f),
+                isEquipped ? "PLAYER 1" : $"FIGHTER 0{catalogIndex + 1}",
+                isEquipped ? RetroArcadeUi.Coin : accent);
+
+            var portrait = new Rect2(tileRect.Position + new Vector2(12f, 38f), new Vector2(tileRect.Size.X - 24f, 136f));
+            if (!_spriteRegistry.TryDrawPortrait(this, item.Shot1.Id, portrait, Time.GetTicksMsec(), facesRight: catalogIndex < 2))
             {
-                DrawRect(tileRect, new Color(1f, 0.82f, 0.12f, 0.72f));
+                RetroArcadeUi.DrawCenteredText(this, font, portrait, item.DisplayName[..1].ToUpperInvariant(), 44, accent);
             }
 
-            var borderColor = isEquipped ? Colors.Yellow : new Color(1, 1, 1, 0.28f);
-            DrawRect(tileRect, borderColor, filled: false, width: isEquipped ? 6f : 1.5f);
-
-            var letter = char.ToUpperInvariant(item.DisplayName.Length > 0 ? item.DisplayName[0] : '?').ToString();
-            var letterSize = font.GetStringSize(letter, fontSize: 36);
-            var letterPos = tileRect.Position +
-                new Vector2((tileRect.Size.X - letterSize.X) / 2f, (tileRect.Size.Y + letterSize.Y * 0.35f) / 2f);
-            DrawString(font, letterPos, letter, fontSize: 36, modulate: Colors.White);
-
-            var nameSize = font.GetStringSize(item.DisplayName, fontSize: 13);
-            DrawString(
-                font,
-                tileRect.Position + new Vector2((tileRect.Size.X - nameSize.X) / 2f, tileRect.Size.Y - 18),
-                item.DisplayName,
-                fontSize: 13,
-                modulate: Colors.White);
+            var nameRect = new Rect2(tileRect.Position + new Vector2(12f, 178f), new Vector2(tileRect.Size.X - 24f, 40f));
+            DrawRect(nameRect, new Color(accent, 0.18f));
+            RetroArcadeUi.DrawCenteredText(this, font, nameRect, item.DisplayName.ToUpperInvariant(), 18, RetroArcadeUi.Ink);
+            RetroArcadeUi.DrawCenteredText(this, font, new Rect2(tileRect.Position + new Vector2(8f, 218f), new Vector2(tileRect.Size.X - 16f, 24f)), item.Role.ToUpperInvariant(), 11, RetroArcadeUi.MutedInk);
+            RetroArcadeUi.DrawCenteredText(this, font, new Rect2(tileRect.Position + new Vector2(8f, 240f), new Vector2(tileRect.Size.X - 16f, 20f)), $"HP {item.MaxHealth}  //  MOVE {item.MovementClass.ToString().ToUpperInvariant()}", 11, RetroArcadeUi.Ink);
+            RetroArcadeUi.DrawCenteredText(this, font, new Rect2(tileRect.Position + new Vector2(8f, 260f), new Vector2(tileRect.Size.X - 16f, 19f)), item.Shot1.DisplayName.ToUpperInvariant(), 10, accent);
 
             if (isEquipped)
             {
-                const string badge = "SELECTED";
-                var badgeSize = font.GetStringSize(badge, fontSize: 12);
-                var badgeRect = new Rect2(
-                    tileRect.Position + new Vector2((tileRect.Size.X - badgeSize.X) / 2f - 8, 8),
-                    badgeSize + new Vector2(16, 16));
-                DrawRect(badgeRect, new Color(0.12f, 0.08f, 0.02f, 0.85f));
-                DrawString(
-                    font,
-                    badgeRect.Position + new Vector2(8, 14),
-                    badge,
-                    fontSize: 12,
-                    modulate: Colors.Yellow);
+                DrawRect(new Rect2(tileRect.Position + new Vector2(4f, 4f), new Vector2(tileRect.Size.X - 8f, 5f)), RetroArcadeUi.Coin);
             }
         }
 
-        var detailIndex = _hoveredItemIndex >= 0 ? _hoveredItemIndex : _selectedItemIndex;
-        if (detailIndex >= 0 && detailIndex < _roster.Count)
-        {
-            var detail = _roster[detailIndex];
-            var detailPos = new Vector2(24, TileGridOrigin.Y + (2 * (TileSize + TileGap)) + 20);
-            DrawString(font, detailPos, $"{detail.DisplayName}  ({detail.Id})", fontSize: 18, modulate: Colors.Gold);
-            detailPos.Y += 24;
-            DrawString(
-                font,
-                detailPos,
-                DetailLine(detail),
-                fontSize: 14,
-                modulate: MenuTextColor);
-        }
+        DrawEquippedStrip(font);
 
         var continueRect = ContinueButtonRect();
-        DrawRect(continueRect, new Color(0.12f, 0.52f, 0.28f));
-        DrawRect(continueRect, Colors.White, filled: false, width: 2f);
-        const string continueLabel = "START DUEL";
-        var continueSize = font.GetStringSize(continueLabel, fontSize: 22);
-        DrawString(
-            font,
-            continueRect.Position + new Vector2(
-                (continueRect.Size.X - continueSize.X) / 2f,
-                (continueRect.Size.Y + continueSize.Y * 0.55f) / 2f),
-            continueLabel,
-            fontSize: 22,
-            modulate: Colors.White);
+        RetroArcadeUi.DrawButton(this, font, continueRect, "START DUEL", RetroArcadeUi.Ember, selected: true, fontSize: 22);
+
+        var selected = _roster[_selectedItemIndex];
+        DrawString(font, new Vector2(47f, 584f), $"READY // {selected.DisplayName.ToUpperInvariant()} // {selected.Role.ToUpperInvariant()}", fontSize: 14, modulate: RetroArcadeUi.Success);
+        DrawString(font, new Vector2(47f, 607f), "Shot 1 and Shot 2/Melee are always available. A charged SS is a bonus action.", fontSize: 12, modulate: RetroArcadeUi.MutedInk);
 
         DrawString(
             font,
-            new Vector2(24, viewport.Y - 24),
-            "Choose one complete hero kit · arrows or click select · ENTER starts · ESC goes back",
+            new Vector2(47f, viewport.Y - 18f),
+            "[ARROWS] SELECT   [CLICK] PREVIEW   [ENTER] START   [ESC] BACK",
             fontSize: 13,
-            modulate: Colors.Cyan);
+            modulate: RetroArcadeUi.Cyan);
     }
 
     private void DrawEquippedStrip(Font font)
@@ -1494,23 +1590,28 @@ public partial class Main : Node2D
             ("[2] SHOT 2 / MELEE", character.Shot2OrMelee),
             ("[3] SPECIAL (SS)", character.Special),
         };
-        var x = 24f;
-        const float chipWidth = 340f;
-        const float chipHeight = 52f;
+        var viewport = GetViewportRect().Size;
+        const float xOrigin = 47f;
+        const float gap = 14f;
+        var chipWidth = (viewport.X - (xOrigin * 2f) - (gap * 2f)) / 3f;
+        const float chipHeight = 104f;
+        var x = xOrigin;
         for (var i = 0; i < chips.Length; i++)
         {
             var chip = chips[i];
-            var rect = new Rect2(x, 68, chipWidth, chipHeight);
-            DrawRect(rect, new Color(0.16f, 0.17f, 0.22f));
-            DrawRect(rect, new Color(1, 1, 1, 0.25f), filled: false, width: 1f);
-            DrawString(font, rect.Position + new Vector2(10, 18), chip.Label, fontSize: 12, modulate: Colors.White);
-            DrawString(
-                font,
-                rect.Position + new Vector2(10, 40),
-                chip.Ability.DisplayName,
-                fontSize: 16,
-                modulate: Colors.Gold);
-            x += chipWidth + 10f;
+            var accent = i switch
+            {
+                0 => RetroArcadeUi.Coin,
+                1 => RetroArcadeUi.Cyan,
+                _ => RetroArcadeUi.Purple,
+            };
+            var rect = new Rect2(x, 454f, chipWidth, chipHeight);
+            RetroArcadeUi.DrawPanel(this, rect, accent);
+            DrawString(font, rect.Position + new Vector2(15f, 23f), chip.Label, fontSize: 11, modulate: accent);
+            DrawString(font, rect.Position + new Vector2(15f, 53f), chip.Ability.DisplayName.ToUpperInvariant(), fontSize: 16, modulate: RetroArcadeUi.Ink);
+            var availability = i < 2 ? "UNLIMITED" : "CHARGED SS // BONUS ACTION";
+            DrawString(font, rect.Position + new Vector2(15f, 79f), $"{chip.Ability.DamagePercent}% DAMAGE  //  {availability}", fontSize: 10, modulate: RetroArcadeUi.MutedInk);
+            x += chipWidth + gap;
         }
     }
 

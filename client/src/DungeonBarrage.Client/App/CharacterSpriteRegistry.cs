@@ -65,6 +65,41 @@ public sealed class CharacterSpriteRegistry
         return texture;
     }
 
+    /// <summary>
+    /// Draws an idle equipment portrait for menu and roster cards. This is presentation-only:
+    /// the ability identifier selects an existing sheet, but never changes authoritative loadout.
+    /// </summary>
+    /// <returns><see langword="true"/> when a production sprite was available.</returns>
+    public bool TryDrawPortrait(
+        CanvasItem canvas,
+        string mainAbilityId,
+        Rect2 bounds,
+        ulong visualTimeMsec,
+        bool facesRight = true)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentException.ThrowIfNullOrWhiteSpace(mainAbilityId);
+
+        var menuLoadout = new ClientLoadout(mainAbilityId, mainAbilityId, mainAbilityId, mainAbilityId);
+        var sheetKey = CharacterPresentationModel.ResolveSpriteSheetKey(menuLoadout, ClientAbilitySlot.Main);
+        var texture = GetTexture(sheetKey);
+        if (texture is null)
+        {
+            return false;
+        }
+
+        var idleColumn = (int)((visualTimeMsec / 240uL) % 4uL);
+        var source = new Rect2(idleColumn * CellWidth, 0f, CellWidth, CellHeight);
+        var fitScale = Math.Min(bounds.Size.X / CellWidth, bounds.Size.Y / CellHeight) * 0.94f;
+        var destination = new Rect2(-AnchorX, -AnchorY, CellWidth, CellHeight);
+        var anchor = new Vector2(bounds.GetCenter().X, bounds.End.Y - 2f);
+
+        canvas.DrawSetTransform(anchor, 0f, new Vector2(facesRight ? fitScale : -fitScale, fitScale));
+        canvas.DrawTextureRectRegion(texture, destination, source, Colors.White);
+        canvas.DrawSetTransform(Vector2.Zero, 0f, Vector2.One);
+        return true;
+    }
+
     private static Texture2D? LoadTexture(string sheetKey)
     {
         var resPath = $"res://assets/sprites/{sheetKey}.png";
