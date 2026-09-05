@@ -9,6 +9,11 @@ internal sealed record C7SmokeOptions(string ReportPath, string ScreenshotPath)
     private const string ReportArgument = "--c7-smoke-report";
     private const string ScreenshotArgument = "--c7-screenshot";
 
+    internal string SettingsScreenshotPath =>
+        Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-settings" + Path.GetExtension(ScreenshotPath));
+
     internal static C7SmokeOptions? Parse(IReadOnlyList<string> arguments)
     {
         var argsList = arguments.Count > 0 ? arguments : Godot.OS.GetCmdlineArgs();
@@ -55,7 +60,9 @@ internal sealed record C7SmokeReport(
     bool PerformanceTierSwitchVerified,
     bool MultiPlatformExportPresetsVerified,
     int ScreenshotWidth,
-    int ScreenshotHeight)
+    int ScreenshotHeight,
+    int SettingsScreenshotWidth,
+    int SettingsScreenshotHeight)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = true };
 

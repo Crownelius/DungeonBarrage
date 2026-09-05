@@ -20,6 +20,9 @@ internal sealed record C5SmokeOptions(string ReportPath, string ScreenshotPath)
     /// <summary>Where the live dotted authoritative aim guide is captured before firing.</summary>
     internal string AimScreenshotPath => DerivedScreenshotPath("-aim");
 
+    /// <summary>Where a dotted authoritative preview that misses every body is captured.</summary>
+    internal string MissAimScreenshotPath => DerivedScreenshotPath("-aim-miss");
+
     internal static C5SmokeOptions? Parse(IReadOnlyList<string> arguments)
     {
         string? report = null;
@@ -139,6 +142,8 @@ internal sealed record C5SmokeReport(
     bool CameraImpulseObserved,
     bool AimGuideObserved,
     bool AimGuidePredictedHit,
+    bool MissAimGuideObserved,
+    bool MissAimGuidePredictedHit,
     string? DefenderPlayerId,
     ushort DefenderHealthBeforeAbility,
     ushort DefenderHealthAfterAbility,
@@ -153,6 +158,8 @@ internal sealed record C5SmokeReport(
     int ImpactScreenshotHeight,
     int AimScreenshotWidth,
     int AimScreenshotHeight,
+    int MissAimScreenshotWidth,
+    int MissAimScreenshotHeight,
     int ScreenshotWidth,
     int ScreenshotHeight,
     string MapId,

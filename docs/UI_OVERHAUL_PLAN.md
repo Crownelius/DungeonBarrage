@@ -1,8 +1,8 @@
 # Dungeon Barrage UI Overhaul — Retro Arcade Franchise System
 
-Status: **implementation started**
+Status: **U1-U3 implemented and renderer-verified; U4 production art remains**
 Reference direction: [Jae-hak Park's Gunbound Season 4 UI/UX presentation](https://comde.artstation.com/projects/rNel2)
-Concept board: [`design/retro-arcade-menu-concept-v1.png`](./design/retro-arcade-menu-concept-v1.png)
+Current concept board: [`design/retro-arcade-menu-concept-v2-leslie-frog.png`](./design/retro-arcade-menu-concept-v2-leslie-frog.png)
 
 ## Product intent
 
@@ -19,6 +19,15 @@ at the expense of readability.
 The ArtStation work is inspiration for hierarchy only: branded frames, character-forward panels,
 large mode cards, persistent navigation, and decisive calls to action. Dungeon Barrage must not copy
 its pastel dream treatment, logos, characters, icons, layouts, or source assets.
+
+## Franchise identity invariants
+
+- **Leslie is a frog**, with an unmistakable amphibian silhouette, broad head, raised frog eyes,
+  and webbed hands and feet. Never substitute a Crow sheet, bird silhouette, or recolor for Leslie.
+- Crow remains the avian artillery fighter. Erus and Kreena must receive equally distinct original
+  silhouettes before production-art acceptance.
+- Menu, portrait, combat, results, marketing, and future franchise art must agree on species,
+  silhouette, name, signature weapon, and accent color.
 
 ## Experience contract
 
@@ -48,30 +57,40 @@ its pastel dream treatment, logos, characters, icons, layouts, or source assets.
 
 ## Delivery slices
 
-### U1 — opening flow (in progress)
+### U1 — opening flow (complete)
 
 - Shared retro-arcade primitives.
 - Franchise title screen with Local Duel and honest future-mode locks.
 - Arena setup stage card and Human-vs-CPU match card.
 - Four-card character select using real sprite sheets and complete kit information.
 - Preserve keyboard, mouse, smoke-test, and back-navigation contracts.
+- Leslie uses an original procedural frog presentation until the production animation sheet lands;
+  this is preferable to knowingly presenting the wrong species.
 
-### U2 — combat readability
+### U2 — combat readability (complete)
 
 - Replace the debug-first HUD with player/team plates, timer, wind, action rail, and concise prompts.
 - Keep one dotted authority preview; visually verify both gold-hit and red-miss states against visible
   character sprites.
 - Make normal-action and charged-SS availability legible without implying finite secondary ammo.
+- C5 evidence must capture both guide states, not infer the red-miss state from unit logic.
 
-### U3 — results and shell
+### U3 — results and shell (complete)
 
 - Franchise-quality victory/draw panel, rematch, return-to-roster, and return-to-title.
 - Retro-arcade settings and accessibility screens wired to the existing C7 settings model.
 - Boot transition, reduced-motion alternative, audio hooks, and consistent controller focus.
 
+The current settings screen persists the existing audio, accessibility, and performance contracts.
+Reduce Motion is honored by current animation systems. Audio playback, global high-contrast palette
+application, and global text-scale application remain production integration work rather than
+being misrepresented as complete merely because their values can be saved.
+
 ### U4 — production art and release QA
 
-- Replace concept-only graphics with original production logo, portraits, cabinet decals, and icons.
+- Replace concept-only graphics and procedural stand-ins with original production logo, portraits,
+  character animation sheets, cabinet decals, and icons. Leslie's sheet must preserve the frog
+  identity established by the v2 concept board.
 - Test 16:9 scaling, contrast modes, text scale, controller-only completion, and window resize.
 - Export and visually inspect C5, C6, timeout, and C7 renderer evidence. Headless success alone is
   insufficient for a UI milestone.

@@ -4066,3 +4066,67 @@ Evidence is preserved locally at `C:\tmp\DungeonBarrage-retro-ui-20260905\eviden
 does not finish the complete overhaul: U2 must migrate the combat HUD and weapon rail, U3 must
 migrate results/settings/accessibility, and U4 must replace shared Crow silhouettes with original
 identity-specific production portrait and idle sheets before release acceptance.
+
+## 2026-09-05 - retro-arcade UI overhaul U2/U3 and Leslie identity correction
+
+The user designated public `main` merge `4811fca` as the continuing branch. That merge already
+contains U1 commit `2455531`; the uncommitted continuation moved onto local `main` without patch
+loss or history rewriting.
+
+U2 replaces the debug-first live HUD with a compact turn/timer/wind header, persistent combatant
+health cards, a non-modal two-tactic readout, and three cabinet-style action cards. Both normal
+actions say `UNLIMITED // SWITCH FREELY`; SS remains visually separate as a charged bonus action.
+The C5 harness now captures and asserts two distinct authority previews: a gold dotted body hit and
+a red dotted terrain/miss path. Exactly one guide is drawn in either state.
+
+U3 adds a persisted settings/accessibility screen and replaces the terminal debug box with a
+victory/draw/defeat cabinet. Results expose rematch and return-to-title routes while keeping outcome
+and provenance authority-owned. C7 now captures the settings screen in addition to the title.
+Saved audio, accessibility, and performance values use the existing normalized settings contract;
+Reduce Motion is active today, while real audio playback plus global high-contrast/text-scale
+application remain explicit U4 integration gaps.
+
+Leslie's franchise identity is corrected across the current presentation. The revised generated
+concept board at `docs/design/retro-arcade-menu-concept-v2-leslie-frog.png` preserves the approved
+cover composition but makes Leslie an unmistakable frog. The title, picker, and combat renderer now
+use an original procedural frog stand-in instead of knowingly drawing a Crow sheet under Leslie's
+name. A production animated frog sheet remains required for U4.
+
+### Restricted runner crash diagnosis
+
+One C5 launch from the restricted command sandbox failed to open Godot's `user://logs` path, then
+Windows displayed a native invalid-memory-read dialog. The run produced no smoke report. Repeating
+the same export with ordinary user permissions and an explicit `--log-file` completed cleanly;
+subsequent C5, C6, and C7 windowed runs also exited normally with clean logs and no lingering game
+or Windows Error Reporting process. This is recorded rather than hidden: automated exported runs
+should always receive an explicit writable log path.
+
+### Renderer evidence
+
+- `c5-main-final.json`: success; both aim guides observed; hit predicts true, miss predicts false;
+  34 damage; playback lock/unlock and turn handoff; every screenshot 1280x720.
+- `c6-main-final.json`: success; roster 4; 3/3 maps; 50 actions; terminal turn 16; hash
+  `6b28cd9b5e7c4f3c`; falling blocks; rematch/disposal.
+- `c7-main-final.json`: success; all six existing release/settings checks; title and settings
+  screenshots 1280x720.
+- All screenshots and logs were inspected under
+  `C:\tmp\DungeonBarrage-retro-ui-20260905\evidence`.
+
+The generated v2 cover was produced with the built-in image generator by editing only Leslie into
+a broad-headed green amphibian hero with raised frog eyes and webbed extremities, while preserving
+the approved retro-arcade cabinet composition, palette, labels, and other three characters.
+
+### Final gates on public main base `4811fca`
+
+| Gate | Result |
+|---|---|
+| `dotnet restore client/DungeonBarrage.sln --locked-mode` | pass |
+| `dotnet build client/DungeonBarrage.sln -c Release --no-restore` | pass; 0 warnings, 0 errors |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-build` | 12 contract + 152 interop = 164 passed |
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --all-targets --locked` | 514 passed, 0 failed, 1 ignored fixture writer |
+| `cargo deny check` | pass; only pre-existing unused license-allow warnings |
+| Godot 4.7.1 Windows Desktop release export | pass |
+| Visible C5, C6, and C7 exported-client runs | pass; reports/logs/screenshots inspected |

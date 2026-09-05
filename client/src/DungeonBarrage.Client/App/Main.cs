@@ -14,7 +14,6 @@ namespace DungeonBarrage.Client.App;
 public partial class Main : Node2D
 {
     private static readonly Color BackgroundColor = new(0.08f, 0.09f, 0.12f);
-    private static readonly Color MenuTextColor = Colors.White;
     private static readonly Color TerrainSoilColor = new(0.45f, 0.32f, 0.18f);
     private static readonly Color TerrainWoodColor = new(0.55f, 0.42f, 0.20f);
     private static readonly Color TerrainStoneColor = new(0.55f, 0.55f, 0.58f);
@@ -28,8 +27,6 @@ public partial class Main : Node2D
     private static readonly Color AimHitColor = new(1f, 0.88f, 0.30f, 0.95f);
     private static readonly Color AimMissColor = new(0.96f, 0.20f, 0.16f, 0.95f);
     private static readonly Color ProjectileColor = new(1f, 0.78f, 0.15f);
-    private static readonly Color LockedHintColor = new(0.6f, 0.6f, 0.65f);
-
     private BuildDiagnostics? _diagnostics;
     private MatchBootstrapResult? _match;
     [SuppressMessage(
@@ -45,6 +42,8 @@ public partial class Main : Node2D
     private ClientUserSettingsContainer _settings = ClientUserSettingsContainer.Default;
 
     private bool _inLocalSetup;
+    private bool _inSettings;
+    private int _settingsSelection;
     private IReadOnlyList<ClientCharacterDefinition>? _roster;
     private int _selectedMapIndex;
     private static readonly string[] PlayableMaps =
@@ -379,6 +378,29 @@ public partial class Main : Node2D
             return;
         }
 
+        if (_inSettings)
+        {
+            HandleSettingsInput(@event);
+            return;
+        }
+
+        if (@event is InputEventKey { Pressed: true, Keycode: Key.S })
+        {
+            GetViewport().SetInputAsHandled();
+            _inSettings = true;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left } click &&
+            SettingsButtonRect(GetViewportRect().Size).HasPoint(click.Position))
+        {
+            GetViewport().SetInputAsHandled();
+            _inSettings = true;
+            QueueRedraw();
+            return;
+        }
+
         var isActivation = @event.IsActionPressed("ui_accept") ||
             (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left });
         if (!isActivation)
@@ -424,6 +446,10 @@ public partial class Main : Node2D
         else if (_inLocalSetup)
         {
             DrawLocalSetup();
+        }
+        else if (_inSettings)
+        {
+            DrawSettings();
         }
         else
         {
@@ -889,6 +915,23 @@ public partial class Main : Node2D
         ConfirmLoadoutAndStartDuel();
     }
 
+    private void ReturnToTitle()
+    {
+        _live?.Dispose();
+        _live = null;
+        _match?.Session.Dispose();
+        _match = null;
+        _inLoadoutSelect = false;
+        _inLocalSetup = false;
+        _inSettings = false;
+        _started = false;
+        _liveError = null;
+        _menuError = null;
+        _selectedAbilitySlot = ClientAbilitySlot.Main;
+        _camera.Reset();
+        QueueRedraw();
+    }
+
     private static LiveMatch CreateLiveMatch(MatchBootstrapResult bootstrap) =>
         LiveMatch.Create(
             bootstrap.Session,
@@ -917,6 +960,15 @@ public partial class Main : Node2D
                 Rematch();
                 return;
             }
+
+            if (@event.IsActionPressed("ui_cancel"))
+            {
+                GetViewport().SetInputAsHandled();
+                ReturnToTitle();
+                return;
+            }
+
+            return;
         }
 
         // Handles Passive Selection prompt when phase is PassiveSelection
@@ -1436,15 +1488,223 @@ public partial class Main : Node2D
         DrawFutureModeCard(font, new Rect2(562f, 432f, 318f, 194f), "ARCADE RUN", "A gauntlet of dungeon challengers", RetroArcadeUi.Cyan);
         DrawFutureModeCard(font, new Rect2(904f, 432f, 334f, 194f), "FRANCHISE VAULT", "Heroes, rivals, lore, and rewards", RetroArcadeUi.Purple);
 
-        DrawString(font, new Vector2(42f, viewport.Y - 35f), "[ENTER] SELECT   [ESC] QUIT", fontSize: 13, modulate: RetroArcadeUi.Cyan);
-        var versionText = _diagnostics?.DisplayText ?? "diagnostics unavailable";
-        var versionSize = font.GetStringSize(versionText, fontSize: 11);
-        DrawString(font, new Vector2(viewport.X - versionSize.X - 42f, viewport.Y - 35f), versionText, fontSize: 11, modulate: RetroArcadeUi.Locked);
+        RetroArcadeUi.DrawButton(
+            this,
+            font,
+            SettingsButtonRect(viewport),
+            "SETTINGS + ACCESS  [S]",
+            RetroArcadeUi.Cyan,
+            selected: false,
+            fontSize: 14);
+
+        DrawString(font, new Vector2(42f, viewport.Y - 16f), "[ENTER] PLAY", fontSize: 11, modulate: RetroArcadeUi.Cyan);
 
         if (_menuError is not null)
         {
             DrawString(font, new Vector2(42f, viewport.Y - 56f), $"BOOTSTRAP FAULT // {_menuError}", fontSize: 13, modulate: RetroArcadeUi.Ember);
         }
+    }
+
+    private void HandleSettingsInput(InputEvent @event)
+    {
+        if (@event.IsActionPressed("ui_cancel"))
+        {
+            GetViewport().SetInputAsHandled();
+            _inSettings = false;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_up"))
+        {
+            GetViewport().SetInputAsHandled();
+            _settingsSelection = (_settingsSelection + 7) % 8;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_down"))
+        {
+            GetViewport().SetInputAsHandled();
+            _settingsSelection = (_settingsSelection + 1) % 8;
+            QueueRedraw();
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_left"))
+        {
+            GetViewport().SetInputAsHandled();
+            AdjustSelectedSetting(-1);
+            return;
+        }
+
+        if (@event.IsActionPressed("ui_right") || @event.IsActionPressed("ui_accept"))
+        {
+            GetViewport().SetInputAsHandled();
+            AdjustSelectedSetting(1);
+            return;
+        }
+
+        if (@event is InputEventKey { Pressed: true, Keycode: Key.R })
+        {
+            GetViewport().SetInputAsHandled();
+            _settings = ClientUserSettingsContainer.Default;
+            PersistSettings();
+            QueueRedraw();
+        }
+    }
+
+    private void AdjustSelectedSetting(int direction)
+    {
+        var audio = _settings.Audio;
+        var access = _settings.Accessibility;
+        var performance = _settings.Performance;
+
+        _settings = _settingsSelection switch
+        {
+            0 => _settings with
+            {
+                Audio = audio with
+                {
+                    MasterVolume = StepPercent(audio.MasterVolume, direction),
+                },
+            },
+            1 => _settings with
+            {
+                Audio = audio with
+                {
+                    SfxVolume = StepPercent(audio.SfxVolume, direction),
+                },
+            },
+            2 => _settings with
+            {
+                Audio = audio with
+                {
+                    MusicVolume = StepPercent(audio.MusicVolume, direction),
+                },
+            },
+            3 => _settings with { Audio = audio with { Muted = !audio.Muted } },
+            4 => _settings with
+            {
+                Accessibility = access with { HighContrast = !access.HighContrast },
+            },
+            5 => _settings with
+            {
+                Accessibility = access with
+                {
+                    TextScale = Math.Clamp(access.TextScale + (direction * 0.1f), 0.8f, 2f),
+                },
+            },
+            6 => _settings with
+            {
+                Accessibility = access with { ReduceMotion = !access.ReduceMotion },
+            },
+            7 => _settings with
+            {
+                Performance = performance with
+                {
+                    Tier = CyclePerformanceTier(performance.Tier, direction),
+                },
+            },
+            _ => _settings,
+        };
+
+        _settings = _settings.Normalized();
+        PersistSettings();
+        QueueRedraw();
+    }
+
+    private static byte StepPercent(byte value, int direction) =>
+        (byte)Math.Clamp(value + (direction * 10), 0, 100);
+
+    private static ClientPerformanceTier CyclePerformanceTier(
+        ClientPerformanceTier tier,
+        int direction)
+    {
+        const int count = 3;
+        var next = (((int)tier + direction) % count + count) % count;
+        return (ClientPerformanceTier)next;
+    }
+
+    private void PersistSettings()
+    {
+        if (!UserSettingsStore.Save(Path.Combine(OS.GetUserDataDir(), "settings.json"), _settings))
+        {
+            _menuError = "SETTINGS COULD NOT BE SAVED";
+        }
+    }
+
+    private void DrawSettings()
+    {
+        var font = ThemeDB.FallbackFont;
+        var viewport = GetViewportRect().Size;
+        RetroArcadeUi.DrawBackdrop(
+            this,
+            viewport,
+            Time.GetTicksMsec(),
+            _settings.Accessibility.ReduceMotion);
+        RetroArcadeUi.DrawScreenHeader(
+            this,
+            font,
+            viewport,
+            "SYSTEM > PLAYER COMFORT",
+            "SETTINGS + ACCESS",
+            "NO GAMEPLAY ADVANTAGE // PLAYER-OWNED");
+
+        var guide = new Rect2(34f, 140f, 294f, 500f);
+        RetroArcadeUi.DrawPanel(this, guide, RetroArcadeUi.Purple);
+        DrawString(font, guide.Position + new Vector2(22f, 35f), "PLAYER COMFORT", fontSize: 17, modulate: RetroArcadeUi.Purple);
+        DrawString(font, guide.Position + new Vector2(22f, 70f), "Tune the cabinet to you.", fontSize: 13, modulate: RetroArcadeUi.Ink);
+        DrawString(font, guide.Position + new Vector2(22f, 94f), "Changes save immediately.", fontSize: 11, modulate: RetroArcadeUi.MutedInk);
+
+        DrawString(font, guide.Position + new Vector2(22f, 150f), "ACCESS PROMISE", fontSize: 12, modulate: RetroArcadeUi.Coin);
+        DrawString(font, guide.Position + new Vector2(22f, 180f), "Motion can stop.", fontSize: 13, modulate: RetroArcadeUi.Ink);
+        DrawString(font, guide.Position + new Vector2(22f, 204f), "Text can grow.", fontSize: 13, modulate: RetroArcadeUi.Ink);
+        DrawString(font, guide.Position + new Vector2(22f, 228f), "Focus stays visible.", fontSize: 13, modulate: RetroArcadeUi.Ink);
+
+        DrawString(font, guide.Position + new Vector2(22f, 292f), "COLOR LANGUAGE", fontSize: 12, modulate: RetroArcadeUi.Cyan);
+        DrawString(font, guide.Position + new Vector2(22f, 321f), "GOLD  SELECT / HIT", fontSize: 11, modulate: RetroArcadeUi.Coin);
+        DrawString(font, guide.Position + new Vector2(22f, 344f), "RED   DANGER / MISS", fontSize: 11, modulate: RetroArcadeUi.Ember);
+        DrawString(font, guide.Position + new Vector2(22f, 367f), "CYAN  NAVIGATION", fontSize: 11, modulate: RetroArcadeUi.Cyan);
+        DrawString(font, guide.Position + new Vector2(22f, 390f), "PURPLE  SPECIAL", fontSize: 11, modulate: RetroArcadeUi.Purple);
+
+        var rows = new (string Label, string Value, Color Accent)[]
+        {
+            ("MASTER VOLUME", $"{_settings.Audio.MasterVolume}%", RetroArcadeUi.Coin),
+            ("SOUND EFFECTS", $"{_settings.Audio.SfxVolume}%", RetroArcadeUi.Cyan),
+            ("MUSIC", $"{_settings.Audio.MusicVolume}%", RetroArcadeUi.Purple),
+            ("MUTE ALL", _settings.Audio.Muted ? "ON" : "OFF", RetroArcadeUi.Ember),
+            ("HIGH CONTRAST", _settings.Accessibility.HighContrast ? "ON" : "OFF", RetroArcadeUi.Coin),
+            ("TEXT SCALE", $"{_settings.Accessibility.TextScale * 100f:0}%", RetroArcadeUi.Cyan),
+            ("REDUCE MOTION", _settings.Accessibility.ReduceMotion ? "ON" : "OFF", RetroArcadeUi.Success),
+            ("PERFORMANCE", _settings.Performance.Tier.ToString().ToUpperInvariant(), RetroArcadeUi.Purple),
+        };
+
+        var list = new Rect2(352f, 140f, viewport.X - 386f, 500f);
+        RetroArcadeUi.DrawPanel(this, list, RetroArcadeUi.Cyan);
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var row = new Rect2(
+                list.Position + new Vector2(18f, 18f + (i * 57f)),
+                new Vector2(list.Size.X - 36f, 49f));
+            var selected = i == _settingsSelection;
+            DrawRect(row, selected ? new Color(rows[i].Accent, 0.19f) : RetroArcadeUi.DeepNavy);
+            DrawRect(
+                row,
+                new Color(rows[i].Accent, selected ? 0.96f : 0.30f),
+                filled: false,
+                width: selected ? 3f : 1f);
+            DrawString(font, row.Position + new Vector2(16f, 29f), rows[i].Label, fontSize: 13, modulate: selected ? RetroArcadeUi.Ink : RetroArcadeUi.MutedInk);
+            var valueSize = font.GetStringSize(rows[i].Value, fontSize: 13);
+            DrawString(font, new Vector2(row.End.X - valueSize.X - 18f, row.Position.Y + 29f), rows[i].Value, fontSize: 13, modulate: rows[i].Accent);
+        }
+
+        DrawString(
+            font,
+            new Vector2(34f, viewport.Y - 28f),
+            "[UP/DOWN] SELECT   [LEFT/RIGHT] CHANGE   [R] RESET   [ESC] SAVE + BACK",
+            fontSize: 12,
+            modulate: RetroArcadeUi.Cyan);
     }
 
     private void DrawFranchiseRoster(Font font, Rect2 rect)
@@ -1469,7 +1729,13 @@ public partial class Main : Node2D
             RetroArcadeUi.DrawPanel(this, card, accent);
 
             var portrait = new Rect2(card.Position + new Vector2(7f, 20f), new Vector2(card.Size.X - 14f, 160f));
-            if (!_spriteRegistry.TryDrawPortrait(this, character.Shot1.Id, portrait, Time.GetTicksMsec(), facesRight: index < 2))
+            if (!_spriteRegistry.TryDrawPortrait(
+                this,
+                character.Id,
+                character.Shot1.Id,
+                portrait,
+                Time.GetTicksMsec(),
+                facesRight: index < 2))
             {
                 RetroArcadeUi.DrawCenteredText(this, font, portrait, character.DisplayName[..1].ToUpperInvariant(), 38, accent);
             }
@@ -1497,6 +1763,9 @@ public partial class Main : Node2D
         2 => RetroArcadeUi.Cyan,
         _ => RetroArcadeUi.Purple,
     };
+
+    private static Rect2 SettingsButtonRect(Vector2 viewport) =>
+        new(562f, viewport.Y - 74f, 318f, 50f);
 
     private static Color ItemTileColor(int index, int count) =>
         Color.FromHsv(count <= 0 ? 0f : (float)index / count, 0.55f, 0.5f);
@@ -1541,7 +1810,13 @@ public partial class Main : Node2D
                 isEquipped ? RetroArcadeUi.Coin : accent);
 
             var portrait = new Rect2(tileRect.Position + new Vector2(12f, 38f), new Vector2(tileRect.Size.X - 24f, 136f));
-            if (!_spriteRegistry.TryDrawPortrait(this, item.Shot1.Id, portrait, Time.GetTicksMsec(), facesRight: catalogIndex < 2))
+            if (!_spriteRegistry.TryDrawPortrait(
+                this,
+                item.Id,
+                item.Shot1.Id,
+                portrait,
+                Time.GetTicksMsec(),
+                facesRight: catalogIndex < 2))
             {
                 RetroArcadeUi.DrawCenteredText(this, font, portrait, item.DisplayName[..1].ToUpperInvariant(), 44, accent);
             }
@@ -1644,6 +1919,24 @@ public partial class Main : Node2D
         return id;
     }
 
+    private string CharacterDisplayName(string id)
+    {
+        if (_roster is null)
+        {
+            return id;
+        }
+
+        for (var i = 0; i < _roster.Count; i++)
+        {
+            if (string.Equals(_roster[i].Id, id, StringComparison.Ordinal))
+            {
+                return _roster[i].DisplayName;
+            }
+        }
+
+        return id;
+    }
+
     private static string DetailLine(ClientCharacterDefinition detail)
     {
         return $"{detail.Role} · HP {detail.MaxHealth} · Move {detail.MovementClass}";
@@ -1699,71 +1992,9 @@ public partial class Main : Node2D
             }
         }
 
-        var font = ThemeDB.FallbackFont;
-        var hudY = 8f;
-        DrawString(
-            font,
-            new Vector2(8, hudY),
-            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   action [{ActionKey(_selectedAbilitySlot)}]   {TrinketHud(snapshot)}",
-            fontSize: 14,
-            modulate: MenuTextColor);
-
-        var anemometerX = (GetViewportRect().Size.X - 210f) * 0.5f;
-        DrawWindAnemometer(snapshot, new Vector2(anemometerX, 6f));
-
         var active = ActivePlayer(snapshot);
-        if (_isAiming)
-        {
-            hudY += 18;
-            var slotInfo = GetSlotAmmo(active, _selectedAbilitySlot);
-            if (!slotInfo.canUse)
-            {
-                var emptyWarning = $"{slotInfo.itemName} needs a full SS gauge — press [1] or [2] to keep fighting.";
-                DrawString(font, new Vector2(8, hudY), emptyWarning, fontSize: 14, modulate: Colors.OrangeRed);
-            }
-            else
-            {
-                var aim = CurrentAim();
-                var dragSide = aim.FacesRight ? "LEFT" : "RIGHT";
-                var maxPct = aim.MaxPowerBasisPoints / 100;
-                var aimText = aim.CanFire
-                    ? $"pull {dragSide}  {aim.AngleDegrees}°  power {aim.PowerPercent}% of {maxPct}% max  — dotted gold hits; red misses"
-                    : $"click anywhere, drag {dragSide} — longer line is more power, max this turn {maxPct}%";
-                DrawString(font, new Vector2(8, hudY), aimText, fontSize: 14, modulate: Colors.Gold);
-            }
-        }
-
-        if (live.PlanningDeadlineUtc is { } planningDeadline)
-        {
-            hudY += 18;
-            var remainingSeconds = Math.Max(0.0, (planningDeadline - DateTimeOffset.UtcNow).TotalSeconds);
-            var timeColor = remainingSeconds <= 10.0 ? Colors.OrangeRed : MenuTextColor;
-            DrawString(font, new Vector2(8, hudY), $"time to act: {remainingSeconds:F0}s", fontSize: 12, modulate: timeColor);
-        }
-
-        if (IsInputLocked())
-        {
-            hudY += 18;
-            DrawString(font, new Vector2(8, hudY), "input locked — playing transition", fontSize: 12, modulate: LockedHintColor);
-        }
-
-        if (_liveError is not null)
-        {
-            hudY += 18;
-            DrawString(font, new Vector2(8, hudY), $"rejected: {_liveError}", fontSize: 12, modulate: Colors.OrangeRed);
-        }
-
+        DrawCombatHud(live, snapshot, active);
         DrawWeaponActionBar(active);
-        if (snapshot.TurnNumber <= 1 && !IsInputLocked())
-        {
-            var actionBarTop = WeaponSlotRect(0, GetViewportRect().Size).Position.Y;
-            DrawString(
-                font,
-                new Vector2(Math.Max(12f, (GetViewportRect().Size.X * 0.5f) - 290f), actionBarTop - 10f),
-                "Choose Shot 1 or Shot 2/Melee freely. A full SS is a bonus action, so you can still take a normal shot.",
-                fontSize: 13,
-                modulate: Colors.LightYellow);
-        }
 
         if (snapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
         {
@@ -1779,38 +2010,336 @@ public partial class Main : Node2D
         }
     }
 
+    private void DrawCombatHud(
+        LiveMatch live,
+        ClientMatchSnapshot snapshot,
+        ClientPlayerSnapshot? active)
+    {
+        var font = ThemeDB.FallbackFont;
+        var viewport = GetViewportRect().Size;
+        var activeIsBot = active is not null && IsBotPlayer(active.PlayerId);
+        var activeAccent = activeIsBot ? RetroArcadeUi.Ember : RetroArcadeUi.Coin;
+
+        var turnPanel = new Rect2(20f, 18f, 304f, 48f);
+        RetroArcadeUi.DrawPanel(this, turnPanel, activeAccent, selected: !IsInputLocked());
+        DrawString(
+            font,
+            turnPanel.Position + new Vector2(14f, 20f),
+            activeIsBot ? "RIVAL TURN" : "YOUR TURN",
+            fontSize: 13,
+            modulate: activeAccent);
+        var fighterName = active is null
+            ? "WAITING"
+            : CharacterDisplayName(active.CharacterId).ToUpperInvariant();
+        DrawString(
+            font,
+            turnPanel.Position + new Vector2(106f, 20f),
+            fighterName,
+            fontSize: 14,
+            modulate: RetroArcadeUi.Ink);
+        DrawString(
+            font,
+            turnPanel.Position + new Vector2(250f, 20f),
+            $"T{snapshot.TurnNumber:00}",
+            fontSize: 12,
+            modulate: RetroArcadeUi.MutedInk);
+
+        var anemometerX = Math.Max(338f, ((viewport.X - 242f) - 210f) * 0.5f);
+        DrawWindAnemometer(snapshot, new Vector2(anemometerX, 28f));
+
+        if (live.PlanningDeadlineUtc is { } planningDeadline)
+        {
+            var remainingSeconds = Math.Max(
+                0.0,
+                (planningDeadline - DateTimeOffset.UtcNow).TotalSeconds);
+            var timerColor = remainingSeconds <= 10.0
+                ? RetroArcadeUi.Ember
+                : RetroArcadeUi.Cyan;
+            RetroArcadeUi.DrawStatusPill(
+                this,
+                font,
+                new Vector2(viewport.X - 340f, 26f),
+                $"{remainingSeconds:00}s",
+                timerColor);
+        }
+
+        var rail = new Rect2(
+            viewport.X - 232f,
+            78f,
+            212f,
+            Math.Max(390f, viewport.Y - 184f));
+        RetroArcadeUi.DrawPanel(this, rail, RetroArcadeUi.Cyan);
+        DrawString(
+            font,
+            rail.Position + new Vector2(16f, 26f),
+            "DUEL READOUT",
+            fontSize: 13,
+            modulate: RetroArcadeUi.Cyan);
+
+        var playerY = rail.Position.Y + 42f;
+        for (var i = 0; i < Math.Min(snapshot.Players.Count, 2); i++)
+        {
+            DrawCombatantCard(
+                font,
+                snapshot.Players[i],
+                new Rect2(rail.Position.X + 12f, playerY, rail.Size.X - 24f, 82f),
+                i);
+            playerY += 90f;
+        }
+
+        var tacticY = playerY + 5f;
+        DrawString(
+            font,
+            new Vector2(rail.Position.X + 16f, tacticY),
+            "TACTIC SWITCH",
+            fontSize: 12,
+            modulate: RetroArcadeUi.Coin);
+        DrawString(
+            font,
+            new Vector2(rail.Position.X + 16f, tacticY + 25f),
+            "1  DIRECT DAMAGE",
+            fontSize: 13,
+            modulate: RetroArcadeUi.Ink);
+        DrawString(
+            font,
+            new Vector2(rail.Position.X + 16f, tacticY + 46f),
+            "2  BREAK + RING OUT",
+            fontSize: 13,
+            modulate: RetroArcadeUi.Ink);
+        DrawString(
+            font,
+            new Vector2(rail.Position.X + 16f, tacticY + 70f),
+            "BOTH LIVE EVERY TURN",
+            fontSize: 10,
+            modulate: RetroArcadeUi.Success);
+
+        var statusY = tacticY + 104f;
+        if (_isAiming)
+        {
+            var guide = AimPreviewPresentationResolver.Resolve(_previewTraces);
+            var predictsHit = guide?.HitsTarget == true;
+            var aimColor = predictsHit ? AimHitColor : AimMissColor;
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, statusY),
+                predictsHit ? "BODY HIT LINED UP" : "NO BODY HIT",
+                fontSize: 12,
+                modulate: aimColor);
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, statusY + 20f),
+                predictsHit ? "GOLD DOTS = DAMAGE" : "RED DOTS = TERRAIN / MISS",
+                fontSize: 10,
+                modulate: RetroArcadeUi.MutedInk);
+        }
+        else if (IsInputLocked())
+        {
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, statusY),
+                "ACTION IN FLIGHT",
+                fontSize: 12,
+                modulate: RetroArcadeUi.Purple);
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, statusY + 20f),
+                "WATCH THE DUNGEON REACT",
+                fontSize: 10,
+                modulate: RetroArcadeUi.MutedInk);
+        }
+        else
+        {
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, statusY),
+                "PICK 1 OR 2 FREELY",
+                fontSize: 12,
+                modulate: RetroArcadeUi.Cyan);
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, statusY + 20f),
+                "SS IS A CHARGED BONUS",
+                fontSize: 10,
+                modulate: RetroArcadeUi.MutedInk);
+        }
+
+        if (_liveError is not null)
+        {
+            DrawString(
+                font,
+                new Vector2(rail.Position.X + 16f, rail.End.Y - 18f),
+                _liveError,
+                fontSize: 10,
+                modulate: RetroArcadeUi.Ember);
+        }
+    }
+
+    private void DrawCombatantCard(
+        Font font,
+        ClientPlayerSnapshot player,
+        Rect2 rect,
+        int index)
+    {
+        var accent = index == 0 ? RetroArcadeUi.Cyan : RetroArcadeUi.Ember;
+        var isActive = string.Equals(
+            player.PlayerId,
+            _live?.CurrentSnapshot.ActivePlayerId,
+            StringComparison.Ordinal);
+        DrawRect(
+            rect,
+            new Color(RetroArcadeUi.PanelRaised, isActive ? 0.98f : 0.72f));
+        DrawRect(
+            rect,
+            new Color(accent, isActive ? 0.95f : 0.38f),
+            filled: false,
+            width: isActive ? 2f : 1f);
+        DrawString(
+            font,
+            rect.Position + new Vector2(10f, 19f),
+            CharacterDisplayName(player.CharacterId).ToUpperInvariant(),
+            fontSize: 12,
+            modulate: RetroArcadeUi.Ink);
+        DrawString(
+            font,
+            rect.Position + new Vector2(10f, 37f),
+            index == 0 ? "PLAYER" : "RIVAL",
+            fontSize: 9,
+            modulate: accent);
+
+        var healthFraction = player.MaxHealth == 0
+            ? 0f
+            : Math.Clamp(player.Health / (float)player.MaxHealth, 0f, 1f);
+        var healthRect = new Rect2(
+            rect.Position + new Vector2(10f, 49f),
+            new Vector2(rect.Size.X - 20f, 10f));
+        DrawRect(healthRect, RetroArcadeUi.Void);
+        if (healthFraction > 0f)
+        {
+            var healthColor = healthFraction <= 0.25f
+                ? RetroArcadeUi.Ember
+                : RetroArcadeUi.Success;
+            DrawRect(
+                new Rect2(
+                    healthRect.Position,
+                    new Vector2(healthRect.Size.X * healthFraction, healthRect.Size.Y)),
+                healthColor);
+        }
+
+        DrawRect(healthRect, new Color(accent, 0.54f), filled: false, width: 1f);
+        DrawString(
+            font,
+            rect.Position + new Vector2(10f, 75f),
+            $"HP {player.Health}/{player.MaxHealth}",
+            fontSize: 10,
+            modulate: RetroArcadeUi.MutedInk);
+        if (isActive)
+        {
+            DrawString(
+                font,
+                rect.Position + new Vector2(rect.Size.X - 46f, 19f),
+                "GO!",
+                fontSize: 10,
+                modulate: accent);
+        }
+    }
+
     private static void DrawPassiveSelectModal()
     {
     }
 
     private void DrawResultsScreen(ClientMatchSnapshot snapshot)
     {
-        var rect = new Rect2(new Vector2(180, 120), new Vector2(440, 260));
-        DrawRect(rect, new Color(0.05f, 0.08f, 0.15f, 0.95f));
-        DrawRect(rect, Colors.Gold, filled: false, width: 3);
-
         var font = ThemeDB.FallbackFont;
-        var pos = rect.Position + new Vector2(30, 40);
+        var viewport = GetViewportRect().Size;
+        DrawRect(new Rect2(Vector2.Zero, viewport), new Color(0.01f, 0.02f, 0.06f, 0.72f));
 
-        DrawString(font, pos, "MATCH COMPLETE", fontSize: 22, modulate: Colors.Gold);
-        pos.Y += 36;
+        var isPlayerVictory = snapshot.Outcome is ClientVictoryOutcome { Team: 0 };
+        var isDraw = snapshot.Outcome is ClientDrawOutcome;
+        var accent = isDraw
+            ? RetroArcadeUi.Cyan
+            : (isPlayerVictory ? RetroArcadeUi.Coin : RetroArcadeUi.Ember);
+        var headline = isDraw ? "DRAW GAME" : (isPlayerVictory ? "VICTORY!" : "DEFEAT");
 
-        if (snapshot.Outcome is ClientVictoryOutcome victory)
+        var rect = new Rect2(
+            new Vector2((viewport.X - 660f) * 0.5f, 98f),
+            new Vector2(660f, 430f));
+        RetroArcadeUi.DrawPanel(this, rect, accent, selected: true);
+        DrawRect(new Rect2(rect.Position, new Vector2(rect.Size.X, 10f)), accent);
+        RetroArcadeUi.DrawStatusPill(
+            this,
+            font,
+            rect.Position + new Vector2(28f, 30f),
+            "ARCADE MATCH COMPLETE",
+            accent);
+        RetroArcadeUi.DrawShadowText(
+            this,
+            font,
+            rect.Position + new Vector2(28f, 112f),
+            headline,
+            48,
+            accent);
+
+        var summary = isDraw
+            ? "The dungeon survives both challengers."
+            : (isPlayerVictory
+                ? "The arena belongs to you."
+                : "The rival claims this round. Run it back.");
+        DrawString(
+            font,
+            rect.Position + new Vector2(31f, 148f),
+            summary,
+            fontSize: 14,
+            modulate: RetroArcadeUi.Ink);
+
+        var scoreY = rect.Position.Y + 184f;
+        for (var i = 0; i < Math.Min(snapshot.Players.Count, 2); i++)
         {
-            DrawString(font, pos, $"VICTORY: Team {victory.Team} Wins!", fontSize: 18, modulate: Colors.LightGreen);
-        }
-        else
-        {
-            DrawString(font, pos, "DRAW: Match Ended in Draw!", fontSize: 18, modulate: Colors.LightBlue);
+            var player = snapshot.Players[i];
+            var playerAccent = i == 0 ? RetroArcadeUi.Cyan : RetroArcadeUi.Ember;
+            var scoreRect = new Rect2(
+                rect.Position.X + 28f + (i * 304f),
+                scoreY,
+                286f,
+                74f);
+            DrawRect(scoreRect, RetroArcadeUi.DeepNavy);
+            DrawRect(scoreRect, new Color(playerAccent, 0.62f), filled: false, width: 2f);
+            DrawString(
+                font,
+                scoreRect.Position + new Vector2(14f, 25f),
+                CharacterDisplayName(player.CharacterId).ToUpperInvariant(),
+                fontSize: 14,
+                modulate: RetroArcadeUi.Ink);
+            DrawString(
+                font,
+                scoreRect.Position + new Vector2(14f, 50f),
+                player.IsEliminated ? "KNOCKED OUT" : $"HP {player.Health}/{player.MaxHealth}",
+                fontSize: 11,
+                modulate: player.IsEliminated ? RetroArcadeUi.Ember : RetroArcadeUi.Success);
         }
 
-        pos.Y += 30;
-        DrawString(font, pos, $"Turns Elapsed: {snapshot.TurnNumber} | State Hash: {snapshot.StateHash}", fontSize: 14, modulate: MenuTextColor);
-        pos.Y += 24;
-        DrawString(font, pos, $"Snapshot Gen: {snapshot.SnapshotGeneration}", fontSize: 14, modulate: MenuTextColor);
+        RetroArcadeUi.DrawButton(
+            this,
+            font,
+            new Rect2(rect.Position + new Vector2(28f, 286f), new Vector2(378f, 72f)),
+            "REMATCH  [ENTER]",
+            accent,
+            selected: true,
+            fontSize: 19);
+        RetroArcadeUi.DrawButton(
+            this,
+            font,
+            new Rect2(rect.Position + new Vector2(424f, 286f), new Vector2(208f, 72f)),
+            "TITLE  [ESC]",
+            RetroArcadeUi.Cyan,
+            selected: false,
+            fontSize: 15);
 
-        pos.Y += 40;
-        DrawString(font, pos, "Press [R] or [ENTER] to REMATCH", fontSize: 16, modulate: Colors.Cyan);
+        DrawString(
+            font,
+            rect.Position + new Vector2(28f, 397f),
+            $"AUTHORITY VERIFIED // TURN {snapshot.TurnNumber} // {snapshot.StateHash}",
+            fontSize: 10,
+            modulate: RetroArcadeUi.Locked);
     }
 
     private void DrawMatch(
@@ -1911,10 +2440,10 @@ public partial class Main : Node2D
         var font = ThemeDB.FallbackFont;
         DrawString(
             font,
-            new Vector2(8, GetViewportRect().Size.Y - 12),
-            $"turn {snapshot.TurnNumber}  move {snapshot.MovementRemaining}  hash {snapshot.StateHash}  [A/D walk  Space hop  arrows camera  1/2 actions  3 SS  P pass]",
-            fontSize: 14,
-            modulate: MenuTextColor);
+            new Vector2(20f, GetViewportRect().Size.Y - 12f),
+            $"[A/D] MOVE   [SPACE] HOP   [1/2/3] ACTION   [P] PASS   MOVE {snapshot.MovementRemaining}",
+            fontSize: 11,
+            modulate: RetroArcadeUi.MutedInk);
     }
 
     private void FitWorld(uint widthCells, uint heightCells)
@@ -1922,8 +2451,8 @@ public partial class Main : Node2D
         var viewport = GetViewportRect().Size;
         const float padLeft = 16f;
         const float padRight = 252f;
-        const float padTop = 72f;
-        const float padBottom = 36f;
+        const float padTop = 82f;
+        const float padBottom = 92f;
         var availW = Math.Max(80f, viewport.X - padLeft - padRight);
         var availH = Math.Max(80f, viewport.Y - padTop - padBottom);
         var width = Math.Max(1, (int)widthCells);
@@ -2207,6 +2736,7 @@ public partial class Main : Node2D
         var drawnSprite = _spriteRegistry.TryDrawCharacter(
             this,
             model,
+            player.CharacterId,
             defeated,
             cue,
             color,
@@ -2385,10 +2915,10 @@ public partial class Main : Node2D
         var wind = WindDisplayModel.Create(snapshot.WindPerTick, activeWeapon);
 
         var width = 210f;
-        var height = 26f;
+        var height = 30f;
         var rect = new Rect2(pos, new Vector2(width, height));
-        DrawRect(rect, new Color(0.04f, 0.06f, 0.10f, 0.88f));
-        DrawRect(rect, new Color(0.3f, 0.4f, 0.55f, 0.6f), filled: false, width: 1.5f);
+        DrawRect(rect, new Color(RetroArcadeUi.Panel, 0.94f));
+        DrawRect(rect, new Color(RetroArcadeUi.Cyan, 0.62f), filled: false, width: 1.5f);
 
         var font = ThemeDB.FallbackFont;
 
@@ -2401,7 +2931,9 @@ public partial class Main : Node2D
         else
         {
             var arrowDir = wind.Direction == WindDirection.BlowingLeft ? -1f : 1f;
-            var arrowColor = wind.NormalizedIntensity > 0.6f ? Colors.Orange : Colors.Cyan;
+            var arrowColor = wind.NormalizedIntensity > 0.6f
+                ? RetroArcadeUi.Ember
+                : RetroArcadeUi.Cyan;
             var arrowStart = iconCenter - new Vector2(arrowDir * 8f, 0);
             var arrowEnd = iconCenter + new Vector2(arrowDir * 8f, 0);
             DrawLine(arrowStart, arrowEnd, arrowColor, width: 2.5f);
@@ -2412,23 +2944,23 @@ public partial class Main : Node2D
         // Speed text
         DrawString(
             font,
-            pos + new Vector2(34f, 17f),
+            pos + new Vector2(34f, 19f),
             wind.FormattedText,
-            fontSize: 12,
-            modulate: Colors.White);
+            fontSize: 11,
+            modulate: RetroArcadeUi.Ink);
 
         // Sensitivity badge on the right
         var badgeColor = wind.Sensitivity switch
         {
-            WindSensitivityTier.Immune => Colors.LightGreen,
-            WindSensitivityTier.Resistant => Colors.DeepSkyBlue,
-            WindSensitivityTier.Standard => Colors.Khaki,
-            WindSensitivityTier.High => Colors.LightCoral,
-            _ => Colors.White,
+            WindSensitivityTier.Immune => RetroArcadeUi.Success,
+            WindSensitivityTier.Resistant => RetroArcadeUi.Cyan,
+            WindSensitivityTier.Standard => RetroArcadeUi.Coin,
+            WindSensitivityTier.High => RetroArcadeUi.Ember,
+            _ => RetroArcadeUi.Ink,
         };
         DrawString(
             font,
-            pos + new Vector2(width - 52f, 17f),
+            pos + new Vector2(width - 52f, 19f),
             $"[{wind.SensitivityBadge}]",
             fontSize: 11,
             modulate: badgeColor);
@@ -2991,14 +3523,40 @@ public partial class Main : Node2D
             var maxPower = AimSolver.MaxPowerAfterMovement(
                 live.CurrentSnapshot.MovementRemaining,
                 movementAllowance);
+            _aimOrigin = ToPixels(aimPlayer.Position, live.CurrentSnapshot.PositionScale);
+
+            const int missAngleMillidegrees = 90_000;
+            const int missPowerBasisPoints = 2_500;
+            var missPullLength = missPowerBasisPoints / (float)maxPower * 20f * _cellSize;
+            var missFireVector = new Vector2(0f, -missPullLength);
+            _aimCursor = _aimOrigin - missFireVector;
+            _isAiming = true;
+            var missAimPreview = await live.PreviewAbilityAsync(
+                ClientAbilitySlot.Main,
+                missAngleMillidegrees,
+                missPowerBasisPoints).ConfigureAwait(true);
+            _previewTraces = missAimPreview is { Legal: true }
+                ? missAimPreview.ProjectileTraces
+                : [];
+            var missAimGuide = AimPreviewPresentationResolver.Resolve(_previewTraces);
+            if (missAimGuide is null || missAimGuide.HitsTarget)
+            {
+                throw new InvalidOperationException(
+                    "C5 authoritative miss preview must produce one red guide without a body hit.");
+            }
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (missAimScreenshotWidth, missAimScreenshotHeight) =
+                CaptureScreenshot(options.MissAimScreenshotPath);
+
             var pullLength = smokePowerBasisPoints / (float)maxPower * 20f * _cellSize;
             var angleRadians = smokeAngleMillidegrees / 1000f * (MathF.PI / 180f);
             var fireVector = new Vector2(
                 MathF.Cos(angleRadians) * pullLength,
                 -MathF.Sin(angleRadians) * pullLength);
-            _aimOrigin = ToPixels(aimPlayer.Position, live.CurrentSnapshot.PositionScale);
             _aimCursor = _aimOrigin - fireVector;
-            _isAiming = true;
             var aimPreview = await live.PreviewAbilityAsync(
                 ClientAbilitySlot.Main,
                 smokeAngleMillidegrees,
@@ -3102,6 +3660,8 @@ public partial class Main : Node2D
                 CameraImpulseObserved: cameraImpulseObserved,
                 AimGuideObserved: true,
                 AimGuidePredictedHit: aimGuide.HitsTarget,
+                MissAimGuideObserved: true,
+                MissAimGuidePredictedHit: missAimGuide.HitsTarget,
                 DefenderPlayerId: defenderId,
                 DefenderHealthBeforeAbility: defenderHealthBefore,
                 DefenderHealthAfterAbility: defenderHealthAfter,
@@ -3116,6 +3676,8 @@ public partial class Main : Node2D
                 ImpactScreenshotHeight: impactScreenshotHeight,
                 AimScreenshotWidth: aimScreenshotWidth,
                 AimScreenshotHeight: aimScreenshotHeight,
+                MissAimScreenshotWidth: missAimScreenshotWidth,
+                MissAimScreenshotHeight: missAimScreenshotHeight,
                 ScreenshotWidth: screenshotWidth,
                 ScreenshotHeight: screenshotHeight,
                 MapId: final.MapId,
@@ -3146,6 +3708,8 @@ public partial class Main : Node2D
                 CameraImpulseObserved: false,
                 AimGuideObserved: false,
                 AimGuidePredictedHit: false,
+                MissAimGuideObserved: false,
+                MissAimGuidePredictedHit: false,
                 DefenderPlayerId: null,
                 DefenderHealthBeforeAbility: 0,
                 DefenderHealthAfterAbility: 0,
@@ -3160,6 +3724,8 @@ public partial class Main : Node2D
                 ImpactScreenshotHeight: 0,
                 AimScreenshotWidth: 0,
                 AimScreenshotHeight: 0,
+                MissAimScreenshotWidth: 0,
+                MissAimScreenshotHeight: 0,
                 ScreenshotWidth: 0,
                 ScreenshotHeight: 0,
                 MapId: string.Empty,
@@ -3720,6 +4286,13 @@ public partial class Main : Node2D
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             var (screenshotWidth, screenshotHeight) = CaptureScreenshot(options.ScreenshotPath);
 
+            _inSettings = true;
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (settingsScreenshotWidth, settingsScreenshotHeight) =
+                CaptureScreenshot(options.SettingsScreenshotPath);
+
             return new C7SmokeReport(
                 Success: true,
                 Error: null,
@@ -3732,7 +4305,9 @@ public partial class Main : Node2D
                 PerformanceTierSwitchVerified: performanceTierSwitchVerified,
                 MultiPlatformExportPresetsVerified: multiPlatformExportPresetsVerified,
                 ScreenshotWidth: screenshotWidth,
-                ScreenshotHeight: screenshotHeight);
+                ScreenshotHeight: screenshotHeight,
+                SettingsScreenshotWidth: settingsScreenshotWidth,
+                SettingsScreenshotHeight: settingsScreenshotHeight);
         }
         catch (Exception exception)
         {
@@ -3748,7 +4323,9 @@ public partial class Main : Node2D
                 PerformanceTierSwitchVerified: false,
                 MultiPlatformExportPresetsVerified: false,
                 ScreenshotWidth: 0,
-                ScreenshotHeight: 0);
+                ScreenshotHeight: 0,
+                SettingsScreenshotWidth: 0,
+                SettingsScreenshotHeight: 0);
         }
     }
 
@@ -3850,22 +4427,6 @@ public partial class Main : Node2D
         }
 
         return text;
-    }
-
-    private static string TrinketHud(ClientMatchSnapshot snapshot)
-    {
-        for (var i = 0; i < snapshot.Players.Count; i++)
-        {
-            if (snapshot.Players[i].PlayerId == "a-local-player")
-            {
-                var charge = snapshot.Players[i].TrinketCharge;
-                return charge >= 10_000
-                    ? "SS READY (3)"
-                    : $"SS {charge / 100}%";
-            }
-        }
-
-        return "SS --";
     }
 
     private static string CharacterIdOf(ClientMatchSnapshot snapshot, string playerId)
@@ -3992,9 +4553,9 @@ public partial class Main : Node2D
         return (image.GetWidth(), image.GetHeight());
     }
 
-    private const float WeaponBarSlotWidth = 158f;
-    private const float WeaponBarSlotHeight = 46f;
-    private const float WeaponBarSlotGap = 8f;
+    private const float WeaponBarSlotWidth = 174f;
+    private const float WeaponBarSlotHeight = 62f;
+    private const float WeaponBarSlotGap = 10f;
 
     private static readonly ClientAbilitySlot[] WeaponSlotOrder =
     [
@@ -4009,14 +4570,6 @@ public partial class Main : Node2D
         "[2] SHOT 2 / MELEE",
         "[3] SPECIAL (SS)",
     ];
-
-    private static int ActionKey(ClientAbilitySlot slot) => slot switch
-    {
-        ClientAbilitySlot.Main => 1,
-        ClientAbilitySlot.Secondary => 2,
-        ClientAbilitySlot.Trinket => 3,
-        _ => 0,
-    };
 
     private static Rect2 WeaponSlotRect(int slotIndex, Vector2 viewportSize)
     {
@@ -4039,13 +4592,6 @@ public partial class Main : Node2D
             var ready = player.TrinketCharge >= 10_000;
             return (ready ? 1 : 0, 1, ready, ItemDisplayName(player.Loadout.Trinket));
         }
-
-        var index = slot switch
-        {
-            ClientAbilitySlot.Main => 0,
-            ClientAbilitySlot.Secondary => 1,
-            _ => 0,
-        };
 
         var itemName = slot switch
         {
@@ -4106,38 +4652,37 @@ public partial class Main : Node2D
             var isSelected = _selectedAbilitySlot == slot;
             var info = GetSlotAmmo(player, slot);
 
-            Color bg;
-            Color border;
-            float borderWidth;
-
-            if (isSelected)
+            var accent = slot switch
             {
-                bg = new Color(0.24f, 0.21f, 0.10f, 0.95f);
-                border = Colors.Gold;
-                borderWidth = 2.5f;
-            }
-            else if (!info.canUse)
+                ClientAbilitySlot.Main => RetroArcadeUi.Coin,
+                ClientAbilitySlot.Secondary => RetroArcadeUi.Cyan,
+                _ => RetroArcadeUi.Purple,
+            };
+            var effectiveAccent = info.canUse ? accent : RetroArcadeUi.Locked;
+            RetroArcadeUi.DrawPanel(this, rect, effectiveAccent, isSelected && info.canUse);
+            if (isSelected && info.canUse)
             {
-                bg = new Color(0.06f, 0.06f, 0.08f, 0.75f);
-                border = new Color(0.35f, 0.25f, 0.25f, 0.5f);
-                borderWidth = 1f;
-            }
-            else
-            {
-                bg = new Color(0.10f, 0.12f, 0.16f, 0.88f);
-                border = new Color(0.5f, 0.55f, 0.65f, 0.6f);
-                borderWidth = 1.5f;
+                DrawRect(rect.Grow(-7f), new Color(accent, 0.10f));
             }
 
-            DrawRect(rect, bg);
-            DrawRect(rect, border, filled: false, width: borderWidth);
+            var badgeColor = isSelected
+                ? effectiveAccent
+                : (info.canUse ? RetroArcadeUi.Ink : RetroArcadeUi.Locked);
+            DrawString(
+                font,
+                rect.Position + new Vector2(10f, 16f),
+                WeaponSlotBadges[i],
+                fontSize: 10,
+                modulate: badgeColor);
 
-            var badgeColor = isSelected ? Colors.Gold : (info.canUse ? Colors.White : Colors.Gray);
-            DrawString(font, rect.Position + new Vector2(8, 14), WeaponSlotBadges[i], fontSize: 11, modulate: badgeColor);
-
-            var nameColor = info.canUse ? Colors.White : new Color(0.6f, 0.6f, 0.6f);
+            var nameColor = info.canUse ? RetroArcadeUi.Ink : RetroArcadeUi.MutedInk;
             var displayName = string.IsNullOrEmpty(info.itemName) ? slot.ToString() : info.itemName;
-            DrawString(font, rect.Position + new Vector2(8, 28), displayName, fontSize: 12, modulate: nameColor);
+            DrawString(
+                font,
+                rect.Position + new Vector2(10f, 36f),
+                displayName.ToUpperInvariant(),
+                fontSize: 10,
+                modulate: nameColor);
 
             string statusText;
             Color statusColor;
@@ -4145,22 +4690,27 @@ public partial class Main : Node2D
             {
                 if (info.canUse)
                 {
-                    statusText = "SS READY · FREE ACTION";
-                    statusColor = Colors.Cyan;
+                    statusText = "READY // BONUS ACTION";
+                    statusColor = RetroArcadeUi.Purple;
                 }
                 else
                 {
-                    statusText = $"{player.TrinketCharge / 100}% CHARGE";
-                    statusColor = Colors.DarkGray;
+                    statusText = $"SS CHARGE {player.TrinketCharge / 100}%";
+                    statusColor = RetroArcadeUi.Locked;
                 }
             }
             else
             {
-                statusText = "READY";
-                statusColor = Colors.LightGreen;
+                statusText = "UNLIMITED // SWITCH FREELY";
+                statusColor = RetroArcadeUi.Success;
             }
 
-            DrawString(font, rect.Position + new Vector2(8, 41), statusText, fontSize: 10, modulate: statusColor);
+            DrawString(
+                font,
+                rect.Position + new Vector2(10f, 53f),
+                statusText,
+                fontSize: 9,
+                modulate: statusColor);
         }
     }
 

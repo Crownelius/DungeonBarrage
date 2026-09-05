@@ -72,13 +72,21 @@ public sealed class CharacterSpriteRegistry
     /// <returns><see langword="true"/> when a production sprite was available.</returns>
     public bool TryDrawPortrait(
         CanvasItem canvas,
+        string characterId,
         string mainAbilityId,
         Rect2 bounds,
         ulong visualTimeMsec,
         bool facesRight = true)
     {
         ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentException.ThrowIfNullOrWhiteSpace(characterId);
         ArgumentException.ThrowIfNullOrWhiteSpace(mainAbilityId);
+
+        if (string.Equals(characterId, "leslie", StringComparison.Ordinal))
+        {
+            DrawLeslieFrogPortrait(canvas, bounds, visualTimeMsec, facesRight);
+            return true;
+        }
 
         var menuLoadout = new ClientLoadout(mainAbilityId, mainAbilityId, mainAbilityId, mainAbilityId);
         var sheetKey = CharacterPresentationModel.ResolveSpriteSheetKey(menuLoadout, ClientAbilitySlot.Main);
@@ -151,6 +159,7 @@ public sealed class CharacterSpriteRegistry
     public bool TryDrawCharacter(
         CanvasItem canvas,
         CharacterPresentationModel model,
+        string characterId,
         bool isEliminated,
         ActorPresentationCue? cue,
         Color teamColor,
@@ -165,6 +174,22 @@ public sealed class CharacterSpriteRegistry
     {
         ArgumentNullException.ThrowIfNull(canvas);
         ArgumentNullException.ThrowIfNull(model);
+        ArgumentException.ThrowIfNullOrWhiteSpace(characterId);
+
+        if (string.Equals(characterId, "leslie", StringComparison.Ordinal))
+        {
+            var anchor = new Vector2(
+                model.Body.Center.X + flinchX,
+                model.ShadowPivot.Y + bobY);
+            DrawLeslieFrog(
+                canvas,
+                anchor,
+                model.Body.Radius / 22f,
+                model.FacingSign,
+                isEliminated,
+                flashIntensity);
+            return true;
+        }
 
         var frame = CharacterAnimationFrameResolver.Resolve(
             model,
@@ -210,6 +235,73 @@ public sealed class CharacterSpriteRegistry
         canvas.DrawSetTransform(Vector2.Zero, 0f, Vector2.One);
 
         return true;
+    }
+
+    private static void DrawLeslieFrogPortrait(
+        CanvasItem canvas,
+        Rect2 bounds,
+        ulong visualTimeMsec,
+        bool facesRight)
+    {
+        var pulse = MathF.Sin(visualTimeMsec / 260f) * 2.5f;
+        var scale = Math.Min(bounds.Size.X / 100f, bounds.Size.Y / 118f);
+        var anchor = new Vector2(bounds.GetCenter().X, bounds.End.Y - 5f + pulse);
+        DrawLeslieFrog(canvas, anchor, scale, facesRight ? 1f : -1f, false, 0f);
+    }
+
+    private static void DrawLeslieFrog(
+        CanvasItem canvas,
+        Vector2 groundAnchor,
+        float scale,
+        float facingSign,
+        bool isEliminated,
+        float flashIntensity)
+    {
+        var frogGreen = isEliminated
+            ? new Color("#6d7278")
+            : new Color("#68b83e").Lerp(Colors.White, flashIntensity * 0.72f);
+        var frogLight = isEliminated
+            ? new Color("#92969a")
+            : new Color("#b4d96a").Lerp(Colors.White, flashIntensity * 0.62f);
+        var frogDark = isEliminated ? new Color("#4f545b") : new Color("#285f37");
+        var scarf = isEliminated ? RetroArcadeUi.Locked : RetroArcadeUi.Ember;
+        var ink = isEliminated ? new Color("#3f4248") : RetroArcadeUi.Void;
+
+        canvas.DrawSetTransform(groundAnchor, 0f, new Vector2(facingSign * scale, scale));
+
+        canvas.DrawCircle(new Vector2(-24f, -8f), 15f, frogDark);
+        canvas.DrawCircle(new Vector2(24f, -8f), 15f, frogDark);
+        canvas.DrawCircle(new Vector2(0f, -30f), 31f, frogGreen);
+        canvas.DrawCircle(new Vector2(0f, -13f), 24f, frogDark);
+        canvas.DrawCircle(new Vector2(0f, -18f), 20f, frogGreen);
+
+        canvas.DrawCircle(new Vector2(-16f, -55f), 12f, frogGreen);
+        canvas.DrawCircle(new Vector2(16f, -55f), 12f, frogGreen);
+        canvas.DrawCircle(new Vector2(-16f, -57f), 7f, RetroArcadeUi.Coin);
+        canvas.DrawCircle(new Vector2(16f, -57f), 7f, RetroArcadeUi.Coin);
+        canvas.DrawCircle(new Vector2(-14f, -57f), 3.2f, ink);
+        canvas.DrawCircle(new Vector2(18f, -57f), 3.2f, ink);
+
+        canvas.DrawLine(new Vector2(-12f, -35f), new Vector2(12f, -35f), ink, 2.4f);
+        canvas.DrawLine(new Vector2(-10f, -34f), new Vector2(0f, -30f), frogLight, 1.8f);
+        canvas.DrawLine(new Vector2(0f, -30f), new Vector2(10f, -34f), frogLight, 1.8f);
+
+        canvas.DrawRect(new Rect2(-24f, -24f, 48f, 13f), scarf);
+        canvas.DrawRect(new Rect2(-19f, -12f, 38f, 25f), new Color("#28364a"));
+        canvas.DrawRect(new Rect2(-16f, -8f, 32f, 5f), new Color("#9b6a2f"));
+        canvas.DrawCircle(new Vector2(0f, -5f), 3f, RetroArcadeUi.Coin);
+
+        canvas.DrawLine(new Vector2(-12f, 9f), new Vector2(-18f, 20f), frogLight, 7f);
+        canvas.DrawLine(new Vector2(12f, 9f), new Vector2(18f, 20f), frogLight, 7f);
+        canvas.DrawCircle(new Vector2(-20f, 21f), 7f, frogGreen);
+        canvas.DrawCircle(new Vector2(20f, 21f), 7f, frogGreen);
+
+        var weaponY = -22f;
+        canvas.DrawRect(new Rect2(13f, weaponY - 5f, 37f, 11f), new Color("#7d6b4b"));
+        canvas.DrawRect(new Rect2(25f, weaponY - 3f, 31f, 7f), new Color("#b38a38"));
+        canvas.DrawCircle(new Vector2(56f, weaponY + 0.5f), 6f, RetroArcadeUi.Coin);
+
+        canvas.DrawSetTransform(Vector2.Zero, 0f, Vector2.One);
     }
 
     /// <summary>

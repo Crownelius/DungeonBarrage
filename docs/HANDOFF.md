@@ -4,7 +4,7 @@
 
 **Audience:** the next implementation agent, including an Opus agent resuming this branch
 
-**Branch:** `codex/retro-arcade-ui` (based on public `main` at `e218156`)
+**Branch:** public `main`; this continuation starts at user-designated merge `4811fca`
 
 ## Current product truth
 
@@ -23,10 +23,14 @@ red means it does not. Do not restore the old solid rubber-band plus separate im
 The Rust-published body center/radius is the collision and drawing contract, so a visible hit and
 an authoritative hit refer to the same body.
 
-The active product priority is now a start-to-finish retro-arcade UI overhaul. The first implemented
-slice replaces the title, arena setup, and character-select screens. `docs/UI_OVERHAUL_PLAN.md` is
-the governing visual plan and `docs/design/retro-arcade-menu-concept-v1.png` is the concept board.
-The ArtStation Gunbound Season 4 presentation is hierarchy inspiration only; do not copy its art.
+The active product priority is a start-to-finish retro-arcade UI overhaul. U1-U3 now replace the
+title, arena setup, character select, combat HUD/action rail, results, and settings/accessibility
+shell. `docs/UI_OVERHAUL_PLAN.md` is the governing visual plan and
+`docs/design/retro-arcade-menu-concept-v2-leslie-frog.png` is the current concept board. The
+ArtStation Gunbound Season 4 presentation is hierarchy inspiration only; do not copy its art.
+
+**Franchise invariant:** Leslie is a frog. The v2 concept and current procedural runtime art make
+the amphibian silhouette explicit. Never label a Crow/bird sheet as Leslie again.
 
 ## Repository and ownership
 
@@ -91,21 +95,25 @@ replay/low-level resolver coverage. Do not expose it in the UI.
 - Updated shared C-ABI fixtures and Rust golden vectors.
 - Frozen fixture hashes: initial `5e95a1dd6ba37637`, move `d3681302b21ba8ef`, ability
   `06fa4183bbd03425`.
+- Retro-arcade U1-U3: branded opening flow, persistent two-tactic combat readout, unlimited-action
+  labels, gold-hit/red-miss smoke captures, results routes, and a persisted settings shell.
+- Leslie renders as an original procedural frog in title, picker, and combat until the production
+  animation sheet replaces that honest stand-in.
 
 The detailed governing plan is `docs/CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md`. `PLAY.md` is the
 current build and control guide. `docs/CLIENT_SPEC.md` is the client contract.
 
 ## Honest gaps
 
-The retro-arcade opening-flow slice is implemented and renderer-verified, but the repository still
-contains Crow equipment sheets rather than four identity-specific production character portrait
-sets. The new roster and picker deliberately render those real shipped sheets instead of placeholder
-initials; consequently Leslie, Crow, and Erus currently share similar Crow silhouettes. Original
-Leslie, Crow, Erus, and Kreena portrait/idle sheets are the largest remaining franchise-art gap.
+The repository still lacks identity-specific production animation sheets. Leslie no longer uses the
+wrong species—an original procedural frog now appears in title, picker, and combat—but that is a
+temporary honest stand-in. Crow, Erus, and Kreena still reuse closely related Crow equipment sheets.
+Original Leslie, Crow, Erus, and Kreena portrait/idle/action sheets are the largest franchise-art
+gap and govern U4 acceptance.
 
-The combat HUD, results overlay, settings/accessibility shell, and transitions have not yet moved to
-the new `RetroArcadeUi` system. Do not call the full UI overhaul complete until U2-U4 in
-`docs/UI_OVERHAUL_PLAN.md` are renderer-verified.
+The settings shell persists the existing model, and Reduce Motion is honored by current animation
+systems. Actual audio playback plus global high-contrast and text-scale application are not yet
+integrated. Do not infer feature completion from a saved toggle alone.
 
 Phase 1 is accepted. A real Windows Desktop export rendered the character screen, three-action
 bar, a single dotted gold hit guide terminating on the visible body, and terminal results at
@@ -131,12 +139,11 @@ vector regeneration.
 
 ## Next task
 
-Implement U2 combat readability from `docs/UI_OVERHAUL_PLAN.md`: migrate the live HUD and weapon
-rail onto `RetroArcadeUi`, remove debug-first labels from the primary hierarchy, keep exactly one
-authority-owned dotted guide, and add renderer evidence for both a gold character hit and a red
-miss. Preserve free switching between both unlimited normal actions and keep the charge-gated SS
-visually separate as a bonus action. After U2, migrate results and settings in U3. Leslie's Ant Glob
-ground-roll mechanic remains the first deferred Phase 2 gameplay task; do not mix it into UI work.
+Implement U4 production art and release QA from `docs/UI_OVERHAUL_PLAN.md`: create original,
+identity-specific character animation sheets beginning with Leslie's frog sheet; then apply global
+high-contrast/text-scale behavior and wire audio settings to real audio buses. Preserve the U2/U3
+screen hierarchy and rerun visible C5/C6/C7/timeout evidence. Leslie's Ant Glob ground-roll mechanic
+remains the first deferred Phase 2 gameplay task; do not mix authority changes into art/UI work.
 
 ## Verified checkpoint
 
@@ -149,10 +156,17 @@ ground-roll mechanic remains the first deferred Phase 2 gameplay task; do not mi
   `libdb_sim_ffi.dylib` from `target/release` beside its test assembly. Keep this cross-platform;
   Linux CI must never depend on an ambient native-library search path.
 - Strict Clippy, rustfmt check, `cargo deny`, .NET format, release export, and diff checks passed.
-- C5: Crow selected through Character Select; one-cell move and direct Precision .57 hit; one
-  dotted gold guide; 34 real damage; fire/hit/impact cues; input lock/unlock; turn handoff.
+- C5: Crow selected through Character Select; one-cell move and direct Precision .57 hit; exactly
+  one dotted guide; both gold-hit and red-miss captures; 34 real damage; fire/hit/impact cues;
+  input lock/unlock; turn handoff.
 - C6: roster 4; Kreena vs Erus; human/bot turns; all three maps; stacked blocks fell; terminal at
   turn 16; state hash `6b28cd9b5e7c4f3c`; rematch created and disposed cleanly.
+- C7: title plus settings screen captured at 1280x720; all six existing settings/platform checks
+  true.
+- Current evidence root: `C:\tmp\DungeonBarrage-retro-ui-20260905\evidence`.
+- A restricted-runner-only launch once failed to open `user://logs` and produced a Windows access
+  violation dialog. Two normal-permission exports with explicit `--log-file` then completed C5 and
+  C6 with clean logs and no lingering process. Keep explicit local log paths in automated runs.
 - C6-timeout: visible countdown and automatic authority timeout passed.
 - C7: settings recovery, audio clamping, UI scaling, localization, performance-tier switching,
   and multi-platform export presets passed.
