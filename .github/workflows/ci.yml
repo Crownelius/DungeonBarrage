@@ -121,6 +121,9 @@ jobs:
       - name: Build
         run: dotnet build client/DungeonBarrage.sln -c Release --no-restore
 
+      - name: Verify Linux native test payload
+        run: test -f client/tests/DungeonBarrage.Client.Interop.Tests/bin/Release/net10.0/libdb_sim_ffi.so
+
       - name: Test
         run: dotnet test client/DungeonBarrage.sln -c Release --no-build
 

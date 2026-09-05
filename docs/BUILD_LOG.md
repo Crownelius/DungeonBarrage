@@ -4014,3 +4014,12 @@ current solution graph without an explicit runtime identifier. The resulting pro
 contain only `net10.0`, and the app lock contains all three Godot SDK dependencies. The exact CI
 command `dotnet restore client/DungeonBarrage.sln --locked-mode` passes, followed by .NET format,
 12 contract tests, 152 interop tests, and `git diff --check`.
+
+### Linux native-test packaging follow-up
+
+The subsequent Linux test run exposed a separate platform packaging gap: CI built
+`target/release/libdb_sim_ffi.so`, but `DungeonBarrage.Client.Interop.Tests.csproj` copied only the
+Windows `db_sim_ffi.dll` beside the test assembly. The absolute-path native resolver therefore
+failed closed, as designed. The test project now conditionally copies each advertised host
+artifact (`.dll`, `.so`, or `.dylib`) when it exists. This fixes Linux CI without enabling ambient
+library search or weakening the resolver's trust boundary.

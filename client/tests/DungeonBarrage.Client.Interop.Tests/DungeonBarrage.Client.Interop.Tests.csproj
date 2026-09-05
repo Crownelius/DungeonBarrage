@@ -24,7 +24,9 @@
   </ItemGroup>
 
   <!--
-    The release native library and the frozen fixture corpus are copied next to the test binary.
+    The release native library for the current host and the frozen fixture corpus are copied next
+    to the test binary. Each native item is conditional on its artifact existing, so the same
+    project works after a native build on Windows, Linux, or macOS without declaring a project RID.
     The fixtures are referenced from their canonical location rather than duplicated: a second copy
     would drift, and the whole point is that C# reproduces the *same* bytes Rust froze.
   -->
@@ -32,6 +34,14 @@
     <None Include="..\..\..\target\release\db_sim_ffi.dll"
           Condition="Exists('..\..\..\target\release\db_sim_ffi.dll')"
           Link="db_sim_ffi.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\target\release\libdb_sim_ffi.so"
+          Condition="Exists('..\..\..\target\release\libdb_sim_ffi.so')"
+          Link="libdb_sim_ffi.so"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\target\release\libdb_sim_ffi.dylib"
+          Condition="Exists('..\..\..\target\release\libdb_sim_ffi.dylib')"
+          Link="libdb_sim_ffi.dylib"
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\tests\fixtures\matches\**\*.json"
           Link="fixtures\%(RecursiveDir)%(Filename)%(Extension)"

@@ -128,6 +128,9 @@ bot parity before adding presentation.
 - .NET: 12 contract + 152 interop = 164 passed, 0 failed.
 - Exact CI restore `dotnet restore client/DungeonBarrage.sln --locked-mode`: passed after
   regenerating RID-neutral production lock files and restoring `GodotSharpEditor` to the app lock.
+- The interop test project conditionally copies `db_sim_ffi.dll`, `libdb_sim_ffi.so`, or
+  `libdb_sim_ffi.dylib` from `target/release` beside its test assembly. Keep this cross-platform;
+  Linux CI must never depend on an ambient native-library search path.
 - Strict Clippy, rustfmt check, `cargo deny`, .NET format, release export, and diff checks passed.
 - C5: Crow selected through Character Select; one-cell move and direct Precision .57 hit; one
   dotted gold guide; 34 real damage; fire/hit/impact cues; input lock/unlock; turn handoff.
