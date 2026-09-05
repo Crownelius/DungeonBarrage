@@ -33,9 +33,6 @@ public static class AimSolver
     /// <summary>The drag must travel this far away from the opponent.</summary>
     public const float MinimumHorizontalPixels = 12f;
 
-    /// <summary>Crow Normal class: 4 body-widths, 4 cells each, in fixed-point units.</summary>
-    public static int CrowMovementAllowance(int positionScale) => 16 * positionScale;
-
     /// <summary>
     /// Whether the actor is on the left of the opponent and therefore drags left (away).
     /// </summary>

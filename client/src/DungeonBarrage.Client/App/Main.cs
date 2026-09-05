@@ -8,8 +8,8 @@ using Godot;
 namespace DungeonBarrage.Client.App;
 
 /// <summary>
-/// The scene root: menu with build diagnostics, sequential loadout (ranged, melee, secondary,
-/// crown/anklet), playable authoritative match with human and bot turns, results, and rematch.
+/// The scene root: menu, single-screen character select, authoritative human/bot match,
+/// results, and rematch.
 /// </summary>
 public partial class Main : Node2D
 {
@@ -25,8 +25,8 @@ public partial class Main : Node2D
     private static readonly Color ArenaEdgeColor = new(0.85f, 0.78f, 0.35f);
     private static readonly Color PlayerAColor = new(0.25f, 0.55f, 0.95f);
     private static readonly Color PlayerBColor = new(0.90f, 0.35f, 0.30f);
-    private static readonly Color AimLineColor = new(0.95f, 0.85f, 0.25f);
-    private static readonly Color AimPreviewColor = new(1f, 0.92f, 0.45f, 0.85f);
+    private static readonly Color AimHitColor = new(1f, 0.88f, 0.30f, 0.95f);
+    private static readonly Color AimMissColor = new(0.96f, 0.20f, 0.16f, 0.95f);
     private static readonly Color ProjectileColor = new(1f, 0.78f, 0.15f);
     private static readonly Color LockedHintColor = new(0.6f, 0.6f, 0.65f);
 
@@ -45,9 +45,7 @@ public partial class Main : Node2D
     private ClientUserSettingsContainer _settings = ClientUserSettingsContainer.Default;
 
     private bool _inLocalSetup;
-    private IReadOnlyList<ClientItemDefinition>? _roster;
-    private ClientFighterDefinition? _fighter;
-    private LoadoutPicker? _picker;
+    private IReadOnlyList<ClientCharacterDefinition>? _roster;
     private int _selectedMapIndex;
     private static readonly string[] PlayableMaps =
     [
@@ -111,7 +109,6 @@ public partial class Main : Node2D
     private readonly CharacterSpriteRegistry _spriteRegistry = new();
     private float _cellSize = 12f;
     private Vector2 _worldOrigin = Vector2.Zero;
-    private readonly List<string> _combatLog = [];
 
     /// <summary>
     /// Frozen pre-shot world plus the authority's traces, shown until input unlocks.
@@ -519,7 +516,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             pos,
-            "fixed to a turn-based duel. ENTER continues to the loadout picker.",
+            "fixed to a turn-based duel. ENTER continues to character select.",
             fontSize: 13,
             modulate: LockedHintColor);
 
@@ -530,7 +527,7 @@ public partial class Main : Node2D
         }
 
         var footerPos = new Vector2(24, GetViewportRect().Size.Y - 20);
-        DrawString(font, footerPos, "ENTER / Click to continue to Loadout · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
+        DrawString(font, footerPos, "ENTER / Click to choose a character · ESC to go back", fontSize: 13, modulate: Colors.Cyan);
     }
 
     private void EnterLoadoutSelect()
@@ -538,11 +535,9 @@ public partial class Main : Node2D
         try
         {
             var catalog = RosterCatalog.Get();
-            _fighter = catalog.Fighter;
-            _roster = catalog.Items;
-            _picker = new LoadoutPicker(catalog.Items);
-            _selectedItemIndex = _picker.FocusedIndex;
-            _botMainItemIndex = BotMainItemIndex(catalog.Items);
+            _roster = catalog.Characters;
+            _selectedItemIndex = 0;
+            _botMainItemIndex = BotMainItemIndex(catalog.Characters);
             _inLoadoutSelect = true;
             _menuError = null;
             _hoveredItemIndex = -1;
@@ -580,17 +575,16 @@ public partial class Main : Node2D
 
     private int? HitTestItemTile(Vector2 point)
     {
-        if (_picker is null)
+        if (_roster is null)
         {
             return null;
         }
 
-        var visible = _picker.VisibleCatalogIndices();
-        for (var i = 0; i < visible.Count; i++)
+        for (var i = 0; i < _roster.Count; i++)
         {
             if (ItemTileRestRect(i).HasPoint(point))
             {
-                return visible[i];
+                return i;
             }
         }
 
@@ -685,13 +679,6 @@ public partial class Main : Node2D
         if (@event.IsActionPressed("ui_cancel"))
         {
             GetViewport().SetInputAsHandled();
-            if (_picker is not null && _picker.TryRetreat())
-            {
-                _selectedItemIndex = _picker.FocusedIndex;
-                QueueRedraw();
-                return;
-            }
-
             _inLoadoutSelect = false;
             _inLocalSetup = true;
             QueueRedraw();
@@ -714,8 +701,7 @@ public partial class Main : Node2D
             return;
         }
 
-        // A tile click equips that page's slot. The continue button (or ENTER) advances
-        // the wizard; the last continue starts the duel.
+        // A tile click selects one whole character. The button (or ENTER) starts immediately.
         if (@event is InputEventMouseButton { Pressed: true, ButtonIndex: MouseButton.Left } mouseButton)
         {
             GetViewport().SetInputAsHandled();
@@ -743,13 +729,6 @@ public partial class Main : Node2D
 
     private void AdvanceLoadoutOrStart()
     {
-        if (_picker is not null && _picker.TryAdvance())
-        {
-            _selectedItemIndex = _picker.FocusedIndex;
-            QueueRedraw();
-            return;
-        }
-
         ConfirmLoadoutAndStartDuel();
     }
 
@@ -764,51 +743,36 @@ public partial class Main : Node2D
 
     private void CycleVisible(int delta)
     {
-        if (_picker is null)
+        if (_roster is null || _roster.Count == 0)
         {
             return;
         }
 
-        var visible = _picker.VisibleCatalogIndices();
-        if (visible.Count == 0)
-        {
-            return;
-        }
-
-        var current = 0;
-        for (var i = 0; i < visible.Count; i++)
-        {
-            if (visible[i] == _picker.EquippedIndexForStage)
-            {
-                current = i;
-                break;
-            }
-        }
-
-        var next = (current + delta + visible.Count) % visible.Count;
-        EquipTile(visible[next]);
+        var next = (_selectedItemIndex + delta + _roster.Count) % _roster.Count;
+        EquipTile(next);
     }
 
     private void EquipTile(int index)
     {
-        _picker?.SelectTile(index);
-        _selectedItemIndex = _picker?.FocusedIndex ?? index;
+        if (_roster is not null && index >= 0 && index < _roster.Count)
+        {
+            _selectedItemIndex = index;
+        }
     }
 
     /// <summary>
     /// Catalog index of the opponent's main item, for the CPU card.
     /// </summary>
     /// <remarks>
-    /// The opponent fields <see cref="LocalMatchEnvelope.LaunchDefaultLoadout"/>, independent of
+    /// The opponent fields <see cref="LocalMatchEnvelope.LaunchDefaultBotCharacterId"/>, independent of
     /// the human's pick. This used to track the human's own secondary index, so the CPU card
     /// showed neither side's real loadout.
     /// </remarks>
-    private static int BotMainItemIndex(IReadOnlyList<ClientItemDefinition> items)
+    private static int BotMainItemIndex(IReadOnlyList<ClientCharacterDefinition> characters)
     {
-        var botMain = LocalMatchEnvelope.LaunchDefaultLoadout.Main;
-        for (var i = 0; i < items.Count; i++)
+        for (var i = 0; i < characters.Count; i++)
         {
-            if (items[i].Id == botMain)
+            if (characters[i].Id == LocalMatchEnvelope.LaunchDefaultBotCharacterId)
             {
                 return i;
             }
@@ -819,7 +783,7 @@ public partial class Main : Node2D
 
     private void ConfirmLoadoutAndStartDuel()
     {
-        if (_picker is null || _roster is null || _roster.Count == 0)
+        if (_roster is null || _roster.Count == 0 || _selectedItemIndex >= _roster.Count)
         {
             return;
         }
@@ -830,7 +794,8 @@ public partial class Main : Node2D
             seed: _matchSeed,
             matchId: $"local-duel-{_matchSeed}",
             mapId: PlayableMaps[_selectedMapIndex],
-            humanLoadout: _picker.Loadout);
+            humanCharacterId: _roster[_selectedItemIndex].Id,
+            botCharacterId: _roster[_botMainItemIndex].Id);
 
         try
         {
@@ -838,7 +803,6 @@ public partial class Main : Node2D
             _menuError = null;
             _camera.Reset();
             _effects.Clear();
-            _combatLog.Clear();
         }
         catch (Exception exception)
         {
@@ -902,7 +866,7 @@ public partial class Main : Node2D
             return;
         }
 
-        if (IsInputLocked() || _live.CurrentSnapshot.HasAttackedThisTurn)
+        if (IsInputLocked())
         {
             return;
         }
@@ -918,16 +882,11 @@ public partial class Main : Node2D
                     QueueRedraw();
                     return;
                 case Key.Key2:
-                    _selectedAbilitySlot = ClientAbilitySlot.MeleeTool;
-                    _lastPreviewAngle = int.MinValue;
-                    QueueRedraw();
-                    return;
-                case Key.Key3:
                     _selectedAbilitySlot = ClientAbilitySlot.Secondary;
                     _lastPreviewAngle = int.MinValue;
                     QueueRedraw();
                     return;
-                case Key.Key4:
+                case Key.Key3:
                     _selectedAbilitySlot = ClientAbilitySlot.Trinket;
                     _lastPreviewAngle = int.MinValue;
                     QueueRedraw();
@@ -970,6 +929,11 @@ public partial class Main : Node2D
                     _ = SubmitAndRedrawAsync(() => _live.SubmitPassAsync());
                     return;
             }
+        }
+
+        if (_live.CurrentSnapshot.HasAttackedThisTurn && _selectedAbilitySlot != ClientAbilitySlot.Trinket)
+        {
+            return;
         }
 
         if (@event.IsActionPressed("ui_cancel") && _isAiming)
@@ -1056,7 +1020,9 @@ public partial class Main : Node2D
 
         var opponent = FirstLivingOpponent(_live.CurrentSnapshot, player.PlayerId);
         var facesRight = AimSolver.FacesRight(player.Position.X, opponent?.Position.X);
-        var allowance = AimSolver.CrowMovementAllowance(_live.CurrentSnapshot.PositionScale);
+        var allowance = CharacterMovementAllowance(
+            player.CharacterId,
+            _live.CurrentSnapshot.MovementRemaining);
         var cap = AimSolver.MaxPowerAfterMovement(_live.CurrentSnapshot.MovementRemaining, allowance);
         var solution = AimSolver.FromDrag(
             _aimOrigin.X,
@@ -1093,6 +1059,22 @@ public partial class Main : Node2D
         }
 
         return null;
+    }
+
+    private int CharacterMovementAllowance(string characterId, int fallback)
+    {
+        if (_roster is not null)
+        {
+            for (var index = 0; index < _roster.Count; index++)
+            {
+                if (_roster[index].Id == characterId)
+                {
+                    return _roster[index].MovementAllowance;
+                }
+            }
+        }
+
+        return Math.Max(1, fallback);
     }
 
     private static ClientPlayerSnapshot? FirstLivingOpponent(ClientMatchSnapshot snapshot, string actorId)
@@ -1233,7 +1215,7 @@ public partial class Main : Node2D
         {
             if (transition is not null)
             {
-                RecordCombatNotes(transition);
+                SpawnTransitionEffects(transition);
                 AutoSelectAvailableWeapon(ActivePlayer(_live.CurrentSnapshot));
                 if (!BeginShotPlayback(preSnapshot, preTerrain, transition))
                 {
@@ -1380,7 +1362,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             position,
-            "Pick ranged, then melee, then a one-shot secondary, then a crown or anklet.",
+            "Choose Leslie, Crow, Erus, or Kreena — each brings two normal actions and a charged SS.",
             fontSize: 14,
             modulate: LockedHintColor);
 
@@ -1400,10 +1382,10 @@ public partial class Main : Node2D
         var viewport = GetViewportRect().Size;
 
         DrawRect(new Rect2(0, 0, viewport.X, 56), new Color(0.55f, 0.10f, 0.12f));
-        var title = _picker?.StageTitle ?? "LOADOUT";
+        const string title = "CHARACTER SELECT";
         DrawString(font, new Vector2(24, 38), title, fontSize: 24, modulate: Colors.White);
 
-        if (_roster is null or { Count: 0 } || _picker is null)
+        if (_roster is null or { Count: 0 })
         {
             DrawString(font, new Vector2(24, 100), "Loading roster…", fontSize: 16, modulate: MenuTextColor);
             return;
@@ -1411,15 +1393,15 @@ public partial class Main : Node2D
 
         DrawEquippedStrip(font);
 
-        var visible = _picker.VisibleCatalogIndices();
-        for (var visibleIndex = 0; visibleIndex < visible.Count; visibleIndex++)
+        var visible = Enumerable.Range(0, _roster.Count).ToArray();
+        for (var visibleIndex = 0; visibleIndex < visible.Length; visibleIndex++)
         {
             var catalogIndex = visible[visibleIndex];
             var item = _roster[catalogIndex];
             var restRect = ItemTileRestRect(visibleIndex);
             var yOffset = _tileAnimations?[catalogIndex].YOffset ?? 0f;
             var tileRect = new Rect2(restRect.Position + new Vector2(0, yOffset), restRect.Size);
-            var isEquipped = _picker.IsEquipped(catalogIndex);
+            var isEquipped = catalogIndex == _selectedItemIndex;
 
             DrawRect(tileRect, ItemTileColor(catalogIndex, _roster.Count));
             if (isEquipped)
@@ -1446,7 +1428,7 @@ public partial class Main : Node2D
 
             if (isEquipped)
             {
-                var badge = "EQUIPPED";
+                const string badge = "SELECTED";
                 var badgeSize = font.GetStringSize(badge, fontSize: 12);
                 var badgeRect = new Rect2(
                     tileRect.Position + new Vector2((tileRect.Size.X - badgeSize.X) / 2f - 8, 8),
@@ -1461,7 +1443,7 @@ public partial class Main : Node2D
             }
         }
 
-        var detailIndex = _hoveredItemIndex >= 0 ? _hoveredItemIndex : _picker.EquippedIndexForStage;
+        var detailIndex = _hoveredItemIndex >= 0 ? _hoveredItemIndex : _selectedItemIndex;
         if (detailIndex >= 0 && detailIndex < _roster.Count)
         {
             var detail = _roster[detailIndex];
@@ -1479,7 +1461,7 @@ public partial class Main : Node2D
         var continueRect = ContinueButtonRect();
         DrawRect(continueRect, new Color(0.12f, 0.52f, 0.28f));
         DrawRect(continueRect, Colors.White, filled: false, width: 2f);
-        var continueLabel = _picker.IsLastStage ? "START DUEL" : "NEXT SLOT";
+        const string continueLabel = "START DUEL";
         var continueSize = font.GetStringSize(continueLabel, fontSize: 22);
         DrawString(
             font,
@@ -1493,43 +1475,41 @@ public partial class Main : Node2D
         DrawString(
             font,
             new Vector2(24, viewport.Y - 24),
-            _picker.StageHint,
+            "Choose one complete hero kit · arrows or click select · ENTER starts · ESC goes back",
             fontSize: 13,
             modulate: Colors.Cyan);
     }
 
     private void DrawEquippedStrip(Font font)
     {
-        if (_picker is null || _roster is null)
+        if (_roster is null || _selectedItemIndex < 0 || _selectedItemIndex >= _roster.Count)
         {
             return;
         }
 
-        var loadout = _picker.Loadout;
-        var chips = new (LoadoutStage Stage, string Label, string Id)[]
+        var character = _roster[_selectedItemIndex];
+        var chips = new (string Label, ClientAbilityDefinition Ability)[]
         {
-            (LoadoutStage.Main, "1 RANGED", loadout.Main),
-            (LoadoutStage.Melee, "2 MELEE", loadout.MeleeTool),
-            (LoadoutStage.Secondary, "3 SECONDARY", loadout.Secondary),
-            (LoadoutStage.Trinket, "4 CROWN/ANKLET", loadout.Trinket),
+            ("[1] SHOT 1", character.Shot1),
+            ("[2] SHOT 2 / MELEE", character.Shot2OrMelee),
+            ("[3] SPECIAL (SS)", character.Special),
         };
         var x = 24f;
-        const float chipWidth = 292f;
+        const float chipWidth = 340f;
         const float chipHeight = 52f;
         for (var i = 0; i < chips.Length; i++)
         {
             var chip = chips[i];
             var rect = new Rect2(x, 68, chipWidth, chipHeight);
-            var current = chip.Stage == _picker.Stage;
-            DrawRect(rect, current ? new Color(0.85f, 0.68f, 0.12f) : new Color(0.16f, 0.17f, 0.22f));
-            DrawRect(rect, current ? Colors.Yellow : new Color(1, 1, 1, 0.25f), filled: false, width: current ? 3f : 1f);
+            DrawRect(rect, new Color(0.16f, 0.17f, 0.22f));
+            DrawRect(rect, new Color(1, 1, 1, 0.25f), filled: false, width: 1f);
             DrawString(font, rect.Position + new Vector2(10, 18), chip.Label, fontSize: 12, modulate: Colors.White);
             DrawString(
                 font,
                 rect.Position + new Vector2(10, 40),
-                ItemDisplayName(chip.Id),
+                chip.Ability.DisplayName,
                 fontSize: 16,
-                modulate: current ? Colors.Black : Colors.Gold);
+                modulate: Colors.Gold);
             x += chipWidth + 10f;
         }
     }
@@ -1543,35 +1523,29 @@ public partial class Main : Node2D
 
         for (var i = 0; i < _roster.Count; i++)
         {
-            if (_roster[i].Id == id)
+            var character = _roster[i];
+            if (character.Shot1.Id == id)
             {
-                return _roster[i].DisplayName;
+                return character.Shot1.DisplayName;
+            }
+
+            if (character.Shot2OrMelee.Id == id)
+            {
+                return character.Shot2OrMelee.DisplayName;
+            }
+
+            if (character.Special.Id == id)
+            {
+                return character.Special.DisplayName;
             }
         }
 
         return id;
     }
 
-    private static string DetailLine(ClientItemDefinition detail)
+    private static string DetailLine(ClientCharacterDefinition detail)
     {
-        if (detail.Slot == ClientAbilitySlot.Trinket)
-        {
-            return "Charge with two damaging hits, then press 4 to fire this unique special.";
-        }
-
-        if (detail.Slot == ClientAbilitySlot.Secondary)
-        {
-            return $"One-shot ammo copy · {detail.Ability.DamagePercent}% dmg · gone after one fire";
-        }
-
-        if (detail.Slot == ClientAbilitySlot.MeleeTool)
-        {
-            return "Same melee strike as every other melee — visual only.";
-        }
-
-        var strikes = detail.Ability.StrikesPerTurn;
-        var strikeText = strikes > 1 ? $" · {strikes} shots in a line" : string.Empty;
-        return $"{detail.AmmoPolicy} ammo {detail.StartingAmmo} · {detail.Ability.DamagePercent}% dmg{strikeText}";
+        return $"{detail.Role} · HP {detail.MaxHealth} · Move {detail.MovementClass}";
     }
 
     private void DrawSelectionCard(Rect2 rect, string label, int itemIndex, Color background)
@@ -1596,7 +1570,7 @@ public partial class Main : Node2D
         textPos.Y += 30;
         DrawString(font, textPos, item.DisplayName, fontSize: 22, modulate: Colors.White);
         textPos.Y += 26;
-        DrawString(font, textPos, $"{item.Slot}  ammo {item.StartingAmmo}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
+        DrawString(font, textPos, $"HP {item.MaxHealth} · {item.MovementClass}", fontSize: 13, modulate: new Color(1, 1, 1, 0.75f));
     }
 
     private void DrawLiveMatch(LiveMatch live)
@@ -1629,7 +1603,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             new Vector2(8, hudY),
-            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   slot [{_selectedAbilitySlot}]   {TrinketHud(snapshot)}",
+            $"active {snapshot.ActivePlayerId}   phase {snapshot.Phase}   action [{ActionKey(_selectedAbilitySlot)}]   {TrinketHud(snapshot)}",
             fontSize: 14,
             modulate: MenuTextColor);
 
@@ -1643,7 +1617,7 @@ public partial class Main : Node2D
             var slotInfo = GetSlotAmmo(active, _selectedAbilitySlot);
             if (!slotInfo.canUse)
             {
-                var emptyWarning = $"OUT OF AMMO on {slotInfo.itemName} — Click weapon bar or press [1]-[4] to switch!";
+                var emptyWarning = $"{slotInfo.itemName} needs a full SS gauge — press [1] or [2] to keep fighting.";
                 DrawString(font, new Vector2(8, hudY), emptyWarning, fontSize: 14, modulate: Colors.OrangeRed);
             }
             else
@@ -1652,8 +1626,8 @@ public partial class Main : Node2D
                 var dragSide = aim.FacesRight ? "LEFT" : "RIGHT";
                 var maxPct = aim.MaxPowerBasisPoints / 100;
                 var aimText = aim.CanFire
-                    ? $"pull {dragSide}  {aim.AngleDegrees}°  power {aim.PowerPercent}% of {maxPct}% max  — gold line is first impact   release to fire"
-                    : $"click anywhere, drag {dragSide} (away from the other crow) — longer line is more power, max this turn {maxPct}%";
+                    ? $"pull {dragSide}  {aim.AngleDegrees}°  power {aim.PowerPercent}% of {maxPct}% max  — dotted gold hits; red misses"
+                    : $"click anywhere, drag {dragSide} — longer line is more power, max this turn {maxPct}%";
                 DrawString(font, new Vector2(8, hudY), aimText, fontSize: 14, modulate: Colors.Gold);
             }
         }
@@ -1679,7 +1653,16 @@ public partial class Main : Node2D
         }
 
         DrawWeaponActionBar(active);
-        DrawArenaLegend(snapshot);
+        if (snapshot.TurnNumber <= 1 && !IsInputLocked())
+        {
+            var actionBarTop = WeaponSlotRect(0, GetViewportRect().Size).Position.Y;
+            DrawString(
+                font,
+                new Vector2(Math.Max(12f, (GetViewportRect().Size.X * 0.5f) - 290f), actionBarTop - 10f),
+                "Choose Shot 1 or Shot 2/Melee freely. A full SS is a bonus action, so you can still take a normal shot.",
+                fontSize: 13,
+                modulate: Colors.LightYellow);
+        }
 
         if (snapshot.Phase == ClientMatchPhase.PassiveSelection && !IsInputLocked())
         {
@@ -1828,7 +1811,7 @@ public partial class Main : Node2D
         DrawString(
             font,
             new Vector2(8, GetViewportRect().Size.Y - 12),
-            $"turn {snapshot.TurnNumber}  move {snapshot.MovementRemaining}  hash {snapshot.StateHash}  [A/D walk  Space hop  arrows camera  1-4 weapons  P pass]",
+            $"turn {snapshot.TurnNumber}  move {snapshot.MovementRemaining}  hash {snapshot.StateHash}  [A/D walk  Space hop  arrows camera  1/2 actions  3 SS  P pass]",
             fontSize: 14,
             modulate: MenuTextColor);
     }
@@ -2137,43 +2120,8 @@ public partial class Main : Node2D
 
         if (drawnSprite)
         {
-            // Equipped Trinket (Crown / Gem) socket adornment atop head
-            if (!defeated && model.TrinketAccent is { } trinket)
-            {
-                var crownPos = new Vector2(model.CrownSocket.X + flinchX, model.CrownSocket.Y + bobY);
-                var accentColor = Color.FromHtml(trinket.PrimaryColorHex);
-                if (trinket.Kind == CosmeticAccentKind.Crown)
-                {
-                    var cw = radius * 0.45f;
-                    var ch = radius * 0.30f;
-                    var crownPoints = new Vector2[]
-                    {
-                        crownPos + new Vector2(-cw, ch * 0.5f),
-                        crownPos + new Vector2(-cw, -ch),
-                        crownPos + new Vector2(-cw * 0.5f, -ch * 0.4f),
-                        crownPos + new Vector2(0, -ch * 1.2f),
-                        crownPos + new Vector2(cw * 0.5f, -ch * 0.4f),
-                        crownPos + new Vector2(cw, -ch),
-                        crownPos + new Vector2(cw, ch * 0.5f),
-                    };
-                    DrawColoredPolygon(crownPoints, accentColor);
-                }
-                else if (trinket.Kind == CosmeticAccentKind.Gem)
-                {
-                    var gw = radius * 0.22f;
-                    var gh = radius * 0.30f;
-                    var gemPoints = new Vector2[]
-                    {
-                        crownPos + new Vector2(0, -gh),
-                        crownPos + new Vector2(gw, 0),
-                        crownPos + new Vector2(0, gh * 0.6f),
-                        crownPos + new Vector2(-gw, 0),
-                    };
-                    DrawColoredPolygon(gemPoints, accentColor);
-                }
-            }
-
-            // Spawn particles/muzzle fire/damage numbers from combat effects
+            // Illustrated sheets already contain the character silhouette. Drawing the
+            // procedural crown here covered the crow's eyes and changed the intended art.
             if (cue is not { Kind: ActorPresentationCueKind.Defeat })
             {
                 DrawActorCue(center, radius, cue, model.FacingSign);
@@ -2295,12 +2243,12 @@ public partial class Main : Node2D
         }
 
         // Floating character status plate
-        var activeItemName = model.WeaponAccent?.ItemId ?? player.Loadout.Main;
-        var plate = PlayerStatusPlateModel.Create(player, cue, activeItemName);
+        var plate = PlayerStatusPlateModel.Create(player, cue);
 
         var barW = radius * 2.6f;
         var barH = 5f;
-        var barPos = center + new Vector2(-barW * 0.5f, -radius - 14f);
+        var headClearance = drawnSprite ? (radius * 1.8f) + 18f : radius + 14f;
+        var barPos = center + new Vector2(-barW * 0.5f, -headClearance);
 
         // Background
         DrawRect(new Rect2(barPos, new Vector2(barW, barH)), new Color(0.08f, 0.10f, 0.14f, 0.90f));
@@ -2325,17 +2273,8 @@ public partial class Main : Node2D
             DrawCircle(new Vector2(pipX, pipY), 2.5f, pipColor);
         }
 
-        // Text label: item name & ammo
-        var font = ThemeDB.FallbackFont;
-        var labelPos = center + new Vector2(-barW * 0.5f, -radius - 18f);
-        var cueSuffix = plate.CueLabel is not null ? $" [{plate.CueLabel}]" : string.Empty;
-        var labelText = $"{plate.ActiveItemName} ({plate.AmmoRemaining}){cueSuffix}";
-        DrawString(
-            font,
-            labelPos,
-            labelText,
-            fontSize: 11,
-            modulate: MenuTextColor);
+        // Action name and combat state already have dedicated action-bar presentation.
+        // Repeating them above every fighter obscures the arena.
     }
 
     private void DrawWindAnemometer(ClientMatchSnapshot snapshot, Vector2 pos)
@@ -2481,40 +2420,11 @@ public partial class Main : Node2D
             return;
         }
 
-        var scale = live.CurrentSnapshot.PositionScale;
-        var muzzle = ToPixels(player.CollisionCenter, scale);
         var aim = CurrentAim();
-        var rubberColor = aim.CanFire ? new Color(1f, 1f, 1f, 0.45f) : new Color(0.85f, 0.25f, 0.25f, 0.9f);
-        DrawLine(_aimOrigin, _aimCursor, rubberColor, width: aim.CanFire ? 2 : 5);
-        DrawCircle(_aimOrigin, 3, rubberColor);
-        DrawCircle(_aimCursor, 5, rubberColor);
-
-        var pullHint = aim.FacesRight ? -1f : 1f;
-        DrawLine(muzzle, muzzle + new Vector2(pullHint * 28f, 0), new Color(1f, 1f, 1f, 0.4f), width: 2);
-
-        for (var t = 0; t < _previewTraces.Count; t++)
+        if (aim.CanFire && AimPreviewPresentationResolver.Resolve(_previewTraces) is { } guide)
         {
-            DrawTracePath(_previewTraces[t], uint.MaxValue, scale, AimPreviewColor, 2f);
-        }
-
-        if (aim.CanFire && FirstPreviewImpact() is { } impact)
-        {
-            var hit = ToPixels(impact, scale);
-            var arena = ArenaRect(live.CurrentSnapshot.TerrainWidth, live.CurrentSnapshot.TerrainHeight);
-            var clamped = new Vector2(
-                Mathf.Clamp(hit.X, arena.Position.X, arena.End.X),
-                Mathf.Clamp(hit.Y, arena.Position.Y, arena.End.Y));
-            DrawLine(muzzle, clamped, AimLineColor, width: 4);
-            DrawCircle(clamped, 7, AimLineColor);
-            if (hit != clamped)
-            {
-                DrawString(
-                    ThemeDB.FallbackFont,
-                    clamped + new Vector2(8, -8),
-                    "leaves arena",
-                    fontSize: 12,
-                    modulate: Colors.OrangeRed);
-            }
+            var color = guide.HitsTarget ? AimHitColor : AimMissColor;
+            DrawDottedTracePath(guide.Trace, live.CurrentSnapshot.PositionScale, color, 2.2f);
         }
 
         if (!aim.CanFire)
@@ -2522,27 +2432,40 @@ public partial class Main : Node2D
             DrawString(
                 ThemeDB.FallbackFont,
                 _aimCursor + new Vector2(14, -10),
-                "OUT OF AMMO",
+                "SS NOT CHARGED",
                 fontSize: 13,
                 modulate: Colors.OrangeRed);
         }
     }
 
-    private ClientPosition? FirstPreviewImpact()
+    private void DrawDottedTracePath(
+        ClientProjectileTrace trace,
+        int positionScale,
+        Color color,
+        float dotRadius)
     {
-        ClientPosition? best = null;
-        var bestTick = uint.MaxValue;
-        for (var i = 0; i < _previewTraces.Count; i++)
+        const float spacing = 9f;
+        Vector2? previous = null;
+        for (var index = 0; index < trace.Samples.Count; index++)
         {
-            var impact = _previewTraces[i].TerminalImpact;
-            if (impact.Tick < bestTick)
+            var point = ToPixels(trace.Samples[index].Position, positionScale);
+            if (previous is not { } from)
             {
-                bestTick = impact.Tick;
-                best = impact.Position;
+                DrawCircle(point, dotRadius, color);
+                previous = point;
+                continue;
             }
-        }
 
-        return best;
+            var delta = point - from;
+            var length = delta.Length();
+            var dots = Math.Max(1, (int)MathF.Ceiling(length / spacing));
+            for (var dot = 1; dot <= dots; dot++)
+            {
+                DrawCircle(from.Lerp(point, dot / (float)dots), dotRadius, color);
+            }
+
+            previous = point;
+        }
     }
 
     private void DrawPlaybackProjectiles(TransitionPresentationFrame presentation)
@@ -2564,7 +2487,18 @@ public partial class Main : Node2D
             if (ProjectilePlayback.PositionAt(trace, tick) is { } position)
             {
                 var screen = ToPixels(position, scale);
-                if (returning)
+                var direction = ProjectileDirection(trace, tick, scale);
+                if (_spriteRegistry.TryDrawProjectile(
+                    this,
+                    trace.AbilityId,
+                    screen,
+                    direction,
+                    radius,
+                    tick))
+                {
+                    // Authentic ammunition cell drawn at the authoritative trace position.
+                }
+                else if (returning)
                 {
                     DrawReturningProjectile(screen, radius, tick);
                 }
@@ -2575,15 +2509,6 @@ public partial class Main : Node2D
                 }
             }
 
-            if (tick > trace.TerminalImpact.Tick && returning)
-            {
-                DrawString(
-                    ThemeDB.FallbackFont,
-                    ToPixels(trace.TerminalImpact.Position, scale) + new Vector2(radius, -radius),
-                    "RETURNING",
-                    fontSize: 14,
-                    modulate: Colors.Yellow);
-            }
         }
 
         for (var index = 0; index < presentation.ImpactCues.Count; index++)
@@ -2739,6 +2664,33 @@ public partial class Main : Node2D
         }
     }
 
+    private Vector2 ProjectileDirection(ClientProjectileTrace trace, uint tick, int positionScale)
+    {
+        if (tick > 0 &&
+            ProjectilePlayback.PositionAt(trace, tick - 1) is { } previous &&
+            ProjectilePlayback.PositionAt(trace, tick) is { } current)
+        {
+            var delta = ToPixels(current, positionScale) - ToPixels(previous, positionScale);
+            if (delta.LengthSquared() > 0.001f)
+            {
+                return delta.Normalized();
+            }
+        }
+
+        if (trace.Samples.Count >= 2)
+        {
+            var first = ToPixels(trace.Samples[0].Position, positionScale);
+            var second = ToPixels(trace.Samples[1].Position, positionScale);
+            var delta = second - first;
+            if (delta.LengthSquared() > 0.001f)
+            {
+                return delta.Normalized();
+            }
+        }
+
+        return Vector2.Right;
+    }
+
     private async Task RunSmokeAndQuitAsync(C4SmokeOptions options)
     {
         var exitCode = 1;
@@ -2886,10 +2838,12 @@ public partial class Main : Node2D
             EnterLocalSetup();
             _selectedMapIndex = 0;
             EnterLoadoutSelect();
-            if (_picker is null)
+            if (_roster is null or { Count: 0 })
             {
-                throw new InvalidOperationException($"C5 picker failed to load: {_menuError}");
+                throw new InvalidOperationException($"C5 character picker failed to load: {_menuError}");
             }
+
+            ClickPickerItem("crow");
 
             ConfirmLoadoutAndStartDuel();
             live = _live ?? throw new InvalidOperationException($"C5 confirm failed to start a match: {_menuError}");
@@ -2923,11 +2877,53 @@ public partial class Main : Node2D
                 .ConfigureAwait(true)
                 ?? throw new InvalidOperationException("The picker-started move was rejected.");
             await WaitTicksAsync(moveTransition.InputLockTicks, moveTransition.PresentationTickRate).ConfigureAwait(true);
+            await WaitUntilInputUnlockedAsync().ConfigureAwait(true);
+
+            const int smokeAngleMillidegrees = 0;
+            const int smokePowerBasisPoints = 2_500;
+            _selectedAbilitySlot = ClientAbilitySlot.Main;
+            var aimPlayer = ActivePlayer(live.CurrentSnapshot)
+                ?? throw new InvalidOperationException("C5 could not find the active player for aim evidence.");
+            var movementAllowance = CharacterMovementAllowance(
+                aimPlayer.CharacterId,
+                live.CurrentSnapshot.MovementRemaining);
+            var maxPower = AimSolver.MaxPowerAfterMovement(
+                live.CurrentSnapshot.MovementRemaining,
+                movementAllowance);
+            var pullLength = smokePowerBasisPoints / (float)maxPower * 20f * _cellSize;
+            var angleRadians = smokeAngleMillidegrees / 1000f * (MathF.PI / 180f);
+            var fireVector = new Vector2(
+                MathF.Cos(angleRadians) * pullLength,
+                -MathF.Sin(angleRadians) * pullLength);
+            _aimOrigin = ToPixels(aimPlayer.Position, live.CurrentSnapshot.PositionScale);
+            _aimCursor = _aimOrigin - fireVector;
+            _isAiming = true;
+            var aimPreview = await live.PreviewAbilityAsync(
+                ClientAbilitySlot.Main,
+                smokeAngleMillidegrees,
+                smokePowerBasisPoints).ConfigureAwait(true);
+            _previewTraces = aimPreview is { Legal: true } ? aimPreview.ProjectileTraces : [];
+            var aimGuide = AimPreviewPresentationResolver.Resolve(_previewTraces);
+            if (aimGuide is null)
+            {
+                throw new InvalidOperationException("C5 authoritative preview produced no dotted aim guide.");
+            }
+            if (!aimGuide.HitsTarget)
+            {
+                throw new InvalidOperationException(
+                    "C5 authoritative preview must identify the direct target hit used for the gold aim guide.");
+            }
+
+            QueueRedraw();
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            var (aimScreenshotWidth, aimScreenshotHeight) = CaptureScreenshot(options.AimScreenshotPath);
+            CancelAim();
 
             var abilityTransition = await SubmitAndRedrawAsync(() => live.SubmitAbilityAsync(
                 ClientAbilitySlot.Main,
-                angleMillidegrees: 27_500,
-                powerBasisPoints: 7_800,
+                angleMillidegrees: smokeAngleMillidegrees,
+                powerBasisPoints: smokePowerBasisPoints,
                 targetPlayerId: null))
                 .ConfigureAwait(true)
                 ?? throw new InvalidOperationException("The picker-started ability was rejected.");
@@ -3003,6 +2999,8 @@ public partial class Main : Node2D
                 HitCueObserved: hitCueObserved,
                 ImpactCueObserved: impactCueObserved,
                 CameraImpulseObserved: cameraImpulseObserved,
+                AimGuideObserved: true,
+                AimGuidePredictedHit: aimGuide.HitsTarget,
                 DefenderPlayerId: defenderId,
                 DefenderHealthBeforeAbility: defenderHealthBefore,
                 DefenderHealthAfterAbility: defenderHealthAfter,
@@ -3015,11 +3013,13 @@ public partial class Main : Node2D
                 FireScreenshotHeight: fireScreenshotHeight,
                 ImpactScreenshotWidth: impactScreenshotWidth,
                 ImpactScreenshotHeight: impactScreenshotHeight,
+                AimScreenshotWidth: aimScreenshotWidth,
+                AimScreenshotHeight: aimScreenshotHeight,
                 ScreenshotWidth: screenshotWidth,
                 ScreenshotHeight: screenshotHeight,
                 MapId: final.MapId,
-                LoadoutMain: _picker?.Loadout.Main ?? string.Empty,
-                UsedLoadoutPicker: _picker is not null,
+                CharacterId: _roster?[_selectedItemIndex].Id ?? string.Empty,
+                UsedCharacterSelect: _roster is not null,
                 MatchReachedTerminalOutcome: terminal);
         }
         catch (Exception exception)
@@ -3043,6 +3043,8 @@ public partial class Main : Node2D
                 HitCueObserved: false,
                 ImpactCueObserved: false,
                 CameraImpulseObserved: false,
+                AimGuideObserved: false,
+                AimGuidePredictedHit: false,
                 DefenderPlayerId: null,
                 DefenderHealthBeforeAbility: 0,
                 DefenderHealthAfterAbility: 0,
@@ -3055,11 +3057,13 @@ public partial class Main : Node2D
                 FireScreenshotHeight: 0,
                 ImpactScreenshotWidth: 0,
                 ImpactScreenshotHeight: 0,
+                AimScreenshotWidth: 0,
+                AimScreenshotHeight: 0,
                 ScreenshotWidth: 0,
                 ScreenshotHeight: 0,
                 MapId: string.Empty,
-                LoadoutMain: string.Empty,
-                UsedLoadoutPicker: false,
+                CharacterId: string.Empty,
+                UsedCharacterSelect: false,
                 MatchReachedTerminalOutcome: false);
         }
         finally
@@ -3120,19 +3124,15 @@ public partial class Main : Node2D
             QueueRedraw();
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            var (loadoutSelectWidth, loadoutSelectHeight) = CaptureScreenshot(options.LoadoutSelectScreenshotPath);
+            var (characterSelectWidth, characterSelectHeight) = CaptureScreenshot(options.CharacterSelectScreenshotPath);
 
             // Exercises the hover-float animation through the exact input path real mouse
             // motion goes through, and proves the "cannot be interrupted" requirement: hover a
             // tile, let its float-up motion start, move the hover away before that motion
             // finishes, and confirm it still completes the float — never reverses mid-flight —
             // before landing begins.
-            var hoverVisible = _picker is null
-                ? 0
-                : Math.Min(2, Math.Max(0, _picker.VisibleCatalogIndices().Count - 1));
-            var hoverCatalogIndex = _picker is null
-                ? hoverVisible
-                : _picker.VisibleCatalogIndices()[hoverVisible];
+            var hoverVisible = Math.Min(2, Math.Max(0, _roster.Count - 1));
+            var hoverCatalogIndex = hoverVisible;
             var hoverPoint = ItemTileRestRect(hoverVisible).GetCenter();
             using (var hoverEvent = new InputEventMouseMotion { Position = hoverPoint })
             {
@@ -3163,7 +3163,7 @@ public partial class Main : Node2D
             QueueRedraw();
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-            _ = CaptureScreenshot(options.LoadoutSelectHoverScreenshotPath);
+            _ = CaptureScreenshot(options.CharacterSelectHoverScreenshotPath);
 
             UpdateItemTileAnimations(TileFloatUpSeconds);
             UpdateItemTileAnimations(TileFloatDownSeconds);
@@ -3179,26 +3179,15 @@ public partial class Main : Node2D
                     "The loadout-select tile float animation was interrupted mid-flight instead of completing it.");
             }
 
-            ClickPickerItem("frostfall-mortar");
-            if (_picker is null || _picker.Loadout.Main != "frostfall-mortar")
+            ClickPickerItem("kreena");
+            if (_roster[_selectedItemIndex].Id != "kreena")
             {
                 throw new InvalidOperationException(
-                    $"Clicking frostfall-mortar must equip it as main; loadout was {_picker?.Loadout.Main}.");
+                    $"Clicking Kreena must select her whole kit; selection was {_roster[_selectedItemIndex].Id}.");
             }
 
-            ClickContinue();
-            ClickContinue();
-            ClickContinue();
-            if (_picker.Stage != LoadoutStage.Trinket)
-            {
-                throw new InvalidOperationException(
-                    $"The loadout wizard must land on the crown/anklet page; stage was {_picker.Stage}.");
-            }
-
-            // Each side reports its own main item. These were both the human's pick, which made
-            // the two fields indistinguishable and hid that the bot was mirroring the loadout.
-            var humanMainItemId = _picker.Loadout.Main;
-            var botMainItemId = LocalMatchEnvelope.LaunchDefaultLoadout.Main;
+            var humanCharacterId = _roster[_selectedItemIndex].Id;
+            var botCharacterId = _roster[_botMainItemIndex].Id;
             _isProcessingBotTurn = true;
 
             var mapsCompletedCsv = string.Empty;
@@ -3231,11 +3220,12 @@ public partial class Main : Node2D
                         $"Expected map {PlayableMaps[mapIndex]}; snapshot was {_live.CurrentSnapshot.MapId}.");
                 }
 
-                var startedMain = LoadoutMainOf(_live.CurrentSnapshot, "a-local-player");
-                if (startedMain != "frostfall-mortar")
+                var startedCharacter = CharacterIdOf(_live.CurrentSnapshot, "a-local-player");
+                if (startedCharacter != humanCharacterId)
                 {
                     throw new InvalidOperationException(
-                        $"{PlayableMaps[mapIndex]} must carry frostfall-mortar as main; snapshot main was '{startedMain}'.");
+                        $"{PlayableMaps[mapIndex]} must preserve selected character '{humanCharacterId}'; " +
+                        $"snapshot character was '{startedCharacter}'.");
                 }
 
                 var blocksBefore = _live.CurrentSnapshot;
@@ -3353,8 +3343,8 @@ public partial class Main : Node2D
                 ClientVersion: diagnostics.ClientVersion,
                 GodotVersion: diagnostics.GodotVersion,
                 RosterCount: rosterCount,
-                HumanMainItemId: humanMainItemId,
-                BotMainItemId: botMainItemId,
+                HumanCharacterId: humanCharacterId,
+                BotCharacterId: botCharacterId,
                 InitialMatchCreated: true,
                 HoverAnimationInterruptionTestPassed: hoverAnimationInterruptionTestPassed,
                 HumanTurnExecuted: humanTurnExecuted,
@@ -3369,8 +3359,8 @@ public partial class Main : Node2D
                 RematchSessionDisposedCleanly: rematchDisposedCleanly,
                 ScreenshotWidth: screenshotWidth,
                 ScreenshotHeight: screenshotHeight,
-                LoadoutSelectScreenshotWidth: loadoutSelectWidth,
-                LoadoutSelectScreenshotHeight: loadoutSelectHeight,
+                CharacterSelectScreenshotWidth: characterSelectWidth,
+                CharacterSelectScreenshotHeight: characterSelectHeight,
                 LocalSetupScreenshotWidth: localSetupWidth,
                 LocalSetupScreenshotHeight: localSetupHeight,
                 MapsCompleted: mapsCompletedCsv,
@@ -3385,8 +3375,8 @@ public partial class Main : Node2D
                 ClientVersion: diagnostics.ClientVersion,
                 GodotVersion: diagnostics.GodotVersion,
                 RosterCount: 0,
-                HumanMainItemId: string.Empty,
-                BotMainItemId: string.Empty,
+                HumanCharacterId: string.Empty,
+                BotCharacterId: string.Empty,
                 InitialMatchCreated: false,
                 HoverAnimationInterruptionTestPassed: false,
                 HumanTurnExecuted: false,
@@ -3401,8 +3391,8 @@ public partial class Main : Node2D
                 RematchSessionDisposedCleanly: false,
                 ScreenshotWidth: 0,
                 ScreenshotHeight: 0,
-                LoadoutSelectScreenshotWidth: 0,
-                LoadoutSelectScreenshotHeight: 0,
+                CharacterSelectScreenshotWidth: 0,
+                CharacterSelectScreenshotHeight: 0,
                 LocalSetupScreenshotWidth: 0,
                 LocalSetupScreenshotHeight: 0,
                 MapsCompleted: string.Empty,
@@ -3676,16 +3666,15 @@ public partial class Main : Node2D
 
     private void ClickPickerItem(string itemId)
     {
-        if (_roster is null || _picker is null)
+        if (_roster is null)
         {
-            throw new InvalidOperationException("The picker catalog is not loaded.");
+            throw new InvalidOperationException("The character catalog is not loaded.");
         }
 
-        var visible = _picker.VisibleCatalogIndices();
         var visibleIndex = -1;
-        for (var i = 0; i < visible.Count; i++)
+        for (var i = 0; i < _roster.Count; i++)
         {
-            if (_roster[visible[i]].Id == itemId)
+            if (_roster[i].Id == itemId)
             {
                 visibleIndex = i;
                 break;
@@ -3695,7 +3684,7 @@ public partial class Main : Node2D
         if (visibleIndex < 0)
         {
             throw new InvalidOperationException(
-                $"The current loadout page does not show {itemId}.");
+                $"Character select does not show {itemId}.");
         }
 
         using var click = new InputEventMouseButton
@@ -3718,117 +3707,31 @@ public partial class Main : Node2D
         HandleLoadoutSelectInput(click);
     }
 
-    private void DrawArenaLegend(ClientMatchSnapshot snapshot)
-    {
-        var font = ThemeDB.FallbackFont;
-        var viewport = GetViewportRect().Size;
-        var x = viewport.X - 244f;
-        var y = 72f;
-        DrawRect(new Rect2(x - 8, y - 18, 240, 268), new Color(0.05f, 0.06f, 0.09f, 0.88f));
-        DrawString(font, new Vector2(x, y), "WHAT YOU ARE LOOKING AT", fontSize: 13, modulate: Colors.Gold);
-        y += 20;
-        DrawString(font, new Vector2(x, y), "Gold box = the arena. Shots that", fontSize: 12, modulate: MenuTextColor);
-        y += 16;
-        DrawString(font, new Vector2(x, y), "leave it miss — they do not wrap.", fontSize: 12, modulate: MenuTextColor);
-        y += 18;
-        DrawString(font, new Vector2(x, y), "Grey slab = MAIN STAGE (stone).", fontSize: 12, modulate: MenuTextColor);
-        y += 16;
-        DrawString(font, new Vector2(x, y), "Falling off a perch lands here.", fontSize: 12, modulate: MenuTextColor);
-        y += 16;
-        DrawString(font, new Vector2(x, y), "Brown masonry = a tower. Damage", fontSize: 12, modulate: MenuTextColor);
-        y += 16;
-        DrawString(font, new Vector2(x, y), "fades it (max 45% see-through).", fontSize: 12, modulate: MenuTextColor);
-        y += 16;
-        DrawString(font, new Vector2(x, y), "Red + 45% fade = one shot left.", fontSize: 12, modulate: MenuTextColor);
-        y += 18;
-        DrawString(font, new Vector2(x, y), "Crows stand on the top face.", fontSize: 12, modulate: MenuTextColor);
-        y += 16;
-        DrawString(font, new Vector2(x, y), "Space hops; gravity lands them.", fontSize: 12, modulate: MenuTextColor);
-        y += 22;
-        DrawString(font, new Vector2(x, y), "LAST HITS", fontSize: 13, modulate: Colors.Gold);
-        y += 18;
-        if (_combatLog.Count == 0)
-        {
-            DrawString(font, new Vector2(x, y), "Fire to crack a tower.", fontSize: 12, modulate: LockedHintColor);
-        }
-        else
-        {
-            for (var i = 0; i < _combatLog.Count; i++)
-            {
-                DrawString(font, new Vector2(x, y), _combatLog[i], fontSize: 12, modulate: Colors.LightYellow);
-                y += 16;
-            }
-        }
-
-        _ = snapshot;
-    }
-
-    private void RecordCombatNotes(ClientMatchTransition transition)
+    private void SpawnTransitionEffects(ClientMatchTransition transition)
     {
         for (var i = 0; i < transition.Events.Count; i++)
         {
-            switch (transition.Events[i])
+            if (transition.Events[i] is ClientBlockChangedEvent block)
             {
-                case ClientBlockChangedEvent block:
-                    var bounds = block.PreviousSurvivingBounds ?? block.NewSurvivingBounds;
-                    if (bounds is not null && (block.NewHealth is 0 || (block.PreviousSurvivingBounds is { } pb && block.NewSurvivingBounds is { } nb && nb.Y > pb.Y)))
-                    {
-                        var blockWorldX = (bounds.X + (bounds.Width / 2f)) * _cellSize;
-                        var blockWorldY = (bounds.Y + (bounds.Height / 2f)) * _cellSize;
-                        var blockScreen = new Vector2(
-                            _worldOrigin.X + blockWorldX + EffectiveCameraOffset.X,
-                            _worldOrigin.Y + blockWorldY + EffectiveCameraOffset.Y);
-                        _effects.SpawnTerrainDebris(
-                            new PresentationPoint(blockScreen.X, blockScreen.Y),
-                            _cellSize * 1.5f,
-                            _settings.Performance.Tier,
-                            _settings.Accessibility.ReduceMotion);
-                    }
-
-                    if (block.PreviousSurvivingBounds is { } previous &&
-                        block.NewSurvivingBounds is { } next &&
-                        next.Y > previous.Y)
-                    {
-                        PushNote($"Tower {block.BlockId} collapsed");
-                    }
-                    else if (block.NewHealth is 0)
-                    {
-                        PushNote($"Tower {block.BlockId} destroyed");
-                    }
-                    else if (block.NewHealth is { } hp &&
-                             block.PreviousHealth is { } old &&
-                             hp < old)
-                    {
-                        PushNote($"Tower {block.BlockId} cracked");
-                    }
-
-                    break;
-                case ClientImpactEvent impact:
-                    PushNote(impact.Impact.Cause switch
-                    {
-                        ClientImpactCause.OutOfBounds => "Shot left the arena",
-                        ClientImpactCause.Terrain => "Shot hit a tower",
-                        ClientImpactCause.Character => "Direct hit",
-                        ClientImpactCause.Expired => "Shot fizzled",
-                        _ => "Shot ended",
-                    });
-                    break;
-                case ClientHealthChangedEvent health when health.NewHealth < health.PreviousHealth:
-                    PushNote($"{health.PlayerId} {health.PreviousHealth}→{health.NewHealth} HP");
-                    break;
-                case ClientTerrainChangedEvent:
-                    PushNote("Blast carved the ground");
-                    break;
+                var bounds = block.PreviousSurvivingBounds ?? block.NewSurvivingBounds;
+                if (bounds is not null &&
+                    (block.NewHealth is 0 ||
+                     (block.PreviousSurvivingBounds is { } previous &&
+                      block.NewSurvivingBounds is { } next &&
+                      next.Y > previous.Y)))
+                {
+                    var blockWorldX = (bounds.X + (bounds.Width / 2f)) * _cellSize;
+                    var blockWorldY = (bounds.Y + (bounds.Height / 2f)) * _cellSize;
+                    var blockScreen = new Vector2(
+                        _worldOrigin.X + blockWorldX + EffectiveCameraOffset.X,
+                        _worldOrigin.Y + blockWorldY + EffectiveCameraOffset.Y);
+                    _effects.SpawnTerrainDebris(
+                        new PresentationPoint(blockScreen.X, blockScreen.Y),
+                        _cellSize * 1.5f,
+                        _settings.Performance.Tier,
+                        _settings.Accessibility.ReduceMotion);
+                }
             }
-        }
-    }
-
-    private void PushNote(string note)
-    {
-        _combatLog.Insert(0, note);
-        while (_combatLog.Count > 6)
-        {
-            _combatLog.RemoveAt(_combatLog.Count - 1);
         }
     }
 
@@ -3856,21 +3759,21 @@ public partial class Main : Node2D
             {
                 var charge = snapshot.Players[i].TrinketCharge;
                 return charge >= 10_000
-                    ? "crown/anklet READY (4)"
-                    : $"crown/anklet {charge}/10000";
+                    ? "SS READY (3)"
+                    : $"SS {charge / 100}%";
             }
         }
 
-        return "crown/anklet --";
+        return "SS --";
     }
 
-    private static string LoadoutMainOf(ClientMatchSnapshot snapshot, string playerId)
+    private static string CharacterIdOf(ClientMatchSnapshot snapshot, string playerId)
     {
         for (var i = 0; i < snapshot.Players.Count; i++)
         {
             if (snapshot.Players[i].PlayerId == playerId)
             {
-                return snapshot.Players[i].Loadout.Main;
+                return snapshot.Players[i].CharacterId;
             }
         }
 
@@ -3995,22 +3898,28 @@ public partial class Main : Node2D
     private static readonly ClientAbilitySlot[] WeaponSlotOrder =
     [
         ClientAbilitySlot.Main,
-        ClientAbilitySlot.MeleeTool,
         ClientAbilitySlot.Secondary,
         ClientAbilitySlot.Trinket,
     ];
 
     private static readonly string[] WeaponSlotBadges =
     [
-        "[1] RANGED",
-        "[2] MELEE",
-        "[3] SECONDARY",
-        "[4] TRINKET",
+        "[1] SHOT 1",
+        "[2] SHOT 2 / MELEE",
+        "[3] SPECIAL (SS)",
     ];
+
+    private static int ActionKey(ClientAbilitySlot slot) => slot switch
+    {
+        ClientAbilitySlot.Main => 1,
+        ClientAbilitySlot.Secondary => 2,
+        ClientAbilitySlot.Trinket => 3,
+        _ => 0,
+    };
 
     private static Rect2 WeaponSlotRect(int slotIndex, Vector2 viewportSize)
     {
-        const int count = 4;
+        const int count = 3;
         var totalWidth = (count * WeaponBarSlotWidth) + ((count - 1) * WeaponBarSlotGap);
         var startX = (viewportSize.X - totalWidth) * 0.5f;
         var y = viewportSize.Y - WeaponBarSlotHeight - 24f;
@@ -4034,7 +3943,6 @@ public partial class Main : Node2D
         {
             ClientAbilitySlot.Main => 0,
             ClientAbilitySlot.Secondary => 1,
-            ClientAbilitySlot.MeleeTool => 2,
             _ => 0,
         };
 
@@ -4042,18 +3950,10 @@ public partial class Main : Node2D
         {
             ClientAbilitySlot.Main => ItemDisplayName(player.Loadout.Main),
             ClientAbilitySlot.Secondary => ItemDisplayName(player.Loadout.Secondary),
-            ClientAbilitySlot.MeleeTool => ItemDisplayName(player.Loadout.MeleeTool),
             _ => string.Empty,
         };
 
-        if (index < player.Ammo.Count)
-        {
-            var counter = player.Ammo[index];
-            var canUse = counter.Policy == ClientAmmoPolicy.Unlimited || counter.Remaining > 0;
-            return (counter.Remaining, counter.Maximum, canUse, itemName);
-        }
-
-        return (0, 0, false, itemName);
+        return (0, 0, true, itemName);
     }
 
     private void AutoSelectAvailableWeapon(ClientPlayerSnapshot? player)
@@ -4072,7 +3972,6 @@ public partial class Main : Node2D
         ReadOnlySpan<ClientAbilitySlot> candidates =
         [
             ClientAbilitySlot.Main,
-            ClientAbilitySlot.MeleeTool,
             ClientAbilitySlot.Secondary,
             ClientAbilitySlot.Trinket,
         ];
@@ -4145,7 +4044,7 @@ public partial class Main : Node2D
             {
                 if (info.canUse)
                 {
-                    statusText = "READY (4)";
+                    statusText = "SS READY · FREE ACTION";
                     statusColor = Colors.Cyan;
                 }
                 else
@@ -4154,20 +4053,10 @@ public partial class Main : Node2D
                     statusColor = Colors.DarkGray;
                 }
             }
-            else if (!info.canUse)
-            {
-                statusText = "0 AMMO [EMPTY]";
-                statusColor = Colors.OrangeRed;
-            }
-            else if (info.max == 0)
-            {
-                statusText = "∞ AMMO";
-                statusColor = Colors.LightGreen;
-            }
             else
             {
-                statusText = $"{info.remaining}/{info.max} AMMO";
-                statusColor = info.remaining == 1 ? Colors.Khaki : Colors.LightGreen;
+                statusText = "READY";
+                statusColor = Colors.LightGreen;
             }
 
             DrawString(font, rect.Position + new Vector2(8, 41), statusText, fontSize: 10, modulate: statusColor);

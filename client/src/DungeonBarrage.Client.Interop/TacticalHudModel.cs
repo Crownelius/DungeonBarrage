@@ -144,8 +144,6 @@ public sealed record WindDisplayModel(
 /// <param name="TrinketCharge">Current charges accumulated on the trinket.</param>
 /// <param name="TrinketMaxCharge">Required charge count to fire the trinket (typically 2).</param>
 /// <param name="TrinketReady">True when trinket charge has met or exceeded the threshold.</param>
-/// <param name="AmmoRemaining">Rounds remaining for the active combat item.</param>
-/// <param name="ActiveItemName">Display name of the currently active equipment item.</param>
 /// <param name="CueLabel">Active combat presentation cue label, if any.</param>
 public sealed record PlayerStatusPlateModel(
     string PlayerId,
@@ -156,24 +154,21 @@ public sealed record PlayerStatusPlateModel(
     int TrinketCharge,
     int TrinketMaxCharge,
     bool TrinketReady,
-    int AmmoRemaining,
-    string ActiveItemName,
     string? CueLabel)
 {
-    /// <summary>Standard trinket charge requirement.</summary>
+    /// <summary>Number of compact pips used to present the authoritative 10,000-point charge.</summary>
     public const int DefaultTrinketMaxCharge = 2;
+
+    /// <summary>Authoritative full-charge value published by the simulation.</summary>
+    public const int AuthoritativeTrinketMaxCharge = 10_000;
 
     /// <summary>
     /// Builds a status plate presentation model from a player snapshot and optional combat cue.
     /// </summary>
     /// <param name="player">Authoritative player snapshot.</param>
     /// <param name="cue">Active presentation cue, or null.</param>
-    /// <param name="activeItemName">Currently active loadout item name, or null to default to Main.</param>
     /// <returns>A fully resolved player status plate presentation model.</returns>
-    public static PlayerStatusPlateModel Create(
-        ClientPlayerSnapshot player,
-        ActorPresentationCue? cue = null,
-        string? activeItemName = null)
+    public static PlayerStatusPlateModel Create(ClientPlayerSnapshot player, ActorPresentationCue? cue = null)
     {
         ArgumentNullException.ThrowIfNull(player);
 
@@ -182,11 +177,16 @@ public sealed record PlayerStatusPlateModel(
         var fraction = (float)curHp / maxHp;
         var isLow = fraction <= 0.25f && curHp > 0;
 
-        var charge = Math.Clamp((int)player.TrinketCharge, 0, DefaultTrinketMaxCharge);
-        var ready = charge >= DefaultTrinketMaxCharge;
-
-        var ammo = player.Ammo.Count > 0 ? player.Ammo[0].Remaining : 0;
-        var activeItem = !string.IsNullOrWhiteSpace(activeItemName) ? activeItemName : player.Loadout.Main;
+        var authoritativeCharge = Math.Clamp(
+            (int)player.TrinketCharge,
+            0,
+            AuthoritativeTrinketMaxCharge);
+        var charge = authoritativeCharge >= AuthoritativeTrinketMaxCharge
+            ? DefaultTrinketMaxCharge
+            : authoritativeCharge >= AuthoritativeTrinketMaxCharge / 2
+                ? 1
+                : 0;
+        var ready = authoritativeCharge >= AuthoritativeTrinketMaxCharge;
 
         var cueText = cue?.Kind switch
         {
@@ -205,8 +205,6 @@ public sealed record PlayerStatusPlateModel(
             charge,
             DefaultTrinketMaxCharge,
             ready,
-            ammo,
-            activeItem,
             cueText);
     }
 }

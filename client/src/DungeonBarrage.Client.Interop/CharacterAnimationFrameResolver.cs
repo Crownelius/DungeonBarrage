@@ -77,23 +77,22 @@ public static class CharacterAnimationFrameResolver
         // Priority 5: Firing / Strike Cue
         if (cue is { Kind: ActorPresentationCueKind.Fire } fireCue)
         {
-            var fireCol = Math.Clamp((int)(fireCue.Age01 * 5f), 0, 4);
-            return new CharacterAnimationFrame(model.SpriteSheetKey, 3, fireCol);
+            return ResolveFireFrame(model.SpriteSheetKey, fireCue.Age01);
         }
 
         // Priority 6: Aiming stance
         if (isAiming || aimAngleRadians.HasValue)
         {
-            int aimCol;
-            if (aimAngleRadians.HasValue)
+            if (string.Equals(model.SpriteSheetKey, "crow_ramshot_cannon", StringComparison.Ordinal))
             {
-                var normalizedAngle = Math.Clamp((aimAngleRadians.Value + 0.6f) / 1.8f, 0f, 1f);
-                aimCol = Math.Clamp((int)(normalizedAngle * 5f), 0, 4);
+                // The remaining cells on this row are cannon blast/ammunition art. They are
+                // projectile sources, never valid replacements for the crow while aiming.
+                return new CharacterAnimationFrame(model.SpriteSheetKey, 2, 0);
             }
-            else
-            {
-                aimCol = (int)((visualTimeMsec / 200uL) % 2uL);
-            }
+
+            var aimCol = aimAngleRadians.HasValue
+                ? Math.Clamp((int)(Math.Clamp((aimAngleRadians.Value + 0.6f) / 1.8f, 0f, 1f) * 5f), 0, 4)
+                : (int)((visualTimeMsec / 200uL) % 2uL);
 
             return new CharacterAnimationFrame(model.SpriteSheetKey, 2, aimCol);
         }
@@ -108,5 +107,45 @@ public static class CharacterAnimationFrameResolver
         // Priority 8: Idle Ambient Breathing
         var idleCol = (int)((visualTimeMsec / 220uL) % 5uL);
         return new CharacterAnimationFrame(model.SpriteSheetKey, 0, idleCol);
+    }
+
+    private static CharacterAnimationFrame ResolveFireFrame(string sheetKey, float age01)
+    {
+        var age = Math.Clamp(age01, 0f, 1f);
+        if (string.Equals(sheetKey, "crow_ramshot_cannon", StringComparison.Ordinal))
+        {
+            if (age < 0.4f)
+            {
+                return new CharacterAnimationFrame(sheetKey, 2, 1);
+            }
+
+            var recoveryCol = Math.Clamp((int)(((age - 0.4f) / 0.6f) * 2f), 0, 1);
+            return new CharacterAnimationFrame(sheetKey, 3, recoveryCol);
+        }
+
+        if (string.Equals(sheetKey, "crow_cinder", StringComparison.Ordinal))
+        {
+            return new CharacterAnimationFrame(sheetKey, 3, age < 0.5f ? 0 : 1);
+        }
+
+        if (string.Equals(sheetKey, "crow_bow", StringComparison.Ordinal))
+        {
+            ReadOnlySpan<int> validColumns = [0, 1, 2, 4];
+            return new CharacterAnimationFrame(sheetKey, 3, SelectColumn(validColumns, age));
+        }
+
+        if (string.Equals(sheetKey, "crow_boomerang", StringComparison.Ordinal))
+        {
+            ReadOnlySpan<int> validColumns = [0, 1, 4];
+            return new CharacterAnimationFrame(sheetKey, 3, SelectColumn(validColumns, age));
+        }
+
+        return new CharacterAnimationFrame(sheetKey, 3, Math.Clamp((int)(age * 5f), 0, 4));
+    }
+
+    private static int SelectColumn(ReadOnlySpan<int> columns, float age01)
+    {
+        var index = Math.Clamp((int)(age01 * columns.Length), 0, columns.Length - 1);
+        return columns[index];
     }
 }

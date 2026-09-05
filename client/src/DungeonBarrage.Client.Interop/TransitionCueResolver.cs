@@ -100,7 +100,7 @@ public sealed record TransitionPresentationFrame(
 public static class TransitionCueResolver
 {
     /// <summary>How long a projectile-release cue remains visible.</summary>
-    public const uint FireDurationMsec = 225;
+    public const uint FireDurationMsec = 650;
 
     /// <summary>How long a health-decrease cue remains visible.</summary>
     public const uint HitDurationMsec = 300;

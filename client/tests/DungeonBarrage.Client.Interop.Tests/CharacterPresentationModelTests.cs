@@ -16,6 +16,7 @@ public sealed class CharacterPresentationModelTests
             Position: new ClientPosition(x, y),
             CollisionCenter: new ClientPosition(x, y - (2 * 1024)),
             CollisionRadius: 2 * 1024,
+            CharacterId: "crow",
             Loadout: new ClientLoadout(main, "shell", "spade", trinket),
             Ammo: Array.Empty<ClientAmmoCounter>(),
             TrinketCharge: 0,
@@ -119,6 +120,7 @@ public sealed class CharacterPresentationModelTests
             Position: new ClientPosition(0, 0),
             CollisionCenter: new ClientPosition(0, -2048),
             CollisionRadius: 2048,
+            CharacterId: "crow",
             Loadout: new ClientLoadout(
                 Main: "ramshot-cannon",
                 Secondary: "frostfall-shell",
@@ -257,6 +259,7 @@ public sealed class CharacterPresentationModelTests
             Position: new ClientPosition(0, 0),
             CollisionCenter: new ClientPosition(0, -2048),
             CollisionRadius: 2048,
+            CharacterId: "crow",
             Loadout: new ClientLoadout("recurve-bow", "service-pistol", "heavy-flail", "ember-crown"),
             Ammo: Array.Empty<ClientAmmoCounter>(),
             TrinketCharge: 0,

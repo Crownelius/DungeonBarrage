@@ -338,7 +338,7 @@ public sealed class CharacterPresentationModel
             return "crow_flail";
         }
 
-        if (lower.Contains("pick"))
+        if (lower.Contains("pick") || lower.Contains("spade") || lower.Contains("shovel"))
         {
             return "crow_pickaxe";
         }

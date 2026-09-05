@@ -3952,4 +3952,52 @@ Integrated the complete 13-sheet illustrated crow arsenal and reaction sheets in
 
 
 
+## 2026-09-04 — four-character kit restoration (schema 2 / simulation 10 / content 7)
 
+The product direction returned from the interim one-Crow ammunition catalog to fixed character
+kits. The working slice introduces Leslie, Crow, Erus, and Kreena as Rust-owned profiles with fixed
+health, movement, and three actions. Match creation now accepts `characterId`; Rust derives the
+transitional loadout fields. Normal actions are unlimited, SS is gauge-gated and preserves the
+normal action, and the client replaces the four-page item wizard with one character screen and a
+three-action bar.
+
+Aim presentation now selects one dotted line from the authoritative preview, gold for a character
+hit and red otherwise. Rust-published body geometry remains the only hitbox/presentation anchor.
+The shared fixture now covers Crow's Precision .57 visibly hitting Erus, with hashes
+`d50eee09afceaaf7` (initial), `3f2e5267b7164eaf` (after move), and `06fa4183bbd03425`
+(after ability).
+
+Durable guidance is split intentionally: `CLIENT_SPEC.md` defines the boundary,
+`CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md` defines phased mechanics and honest approximations,
+`PLAY.md` defines controls/build, and `HANDOFF.md` is the resume checkpoint. The legacy item catalog
+is retained only for deterministic replay and low-level resolver compatibility; new clients cannot
+select it.
+
+### Final verification and movement-authority correction
+
+Final renderer review exposed a legacy-authority leak: the scheduler and launch-power cap still
+refreshed every selected character with the old shared movement class. Both paths now resolve the
+active Rust roster profile. A focused scheduler regression proves a Crow Fast turn handing off to
+a Leslie Slow turn. The sanctioned production C-ABI fixture writer regenerated only the affected
+responses; hashes are now `5e95a1dd6ba37637` (initial), `d3681302b21ba8ef` (after Crow moves),
+and `06fa4183bbd03425` (after the unchanged direct-hit outcome). Three intentional match golden
+vectors were regenerated in their dedicated test file with old/new provenance comments.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --all-targets --locked` | 514 passed, 0 failed, 1 ignored fixture writer |
+| `cargo test -p db-sim-ffi --release --locked` | 23 passed, 0 failed, 1 ignored fixture writer |
+| `cargo deny check` | pass; only pre-existing unused license-allow warnings |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-restore` | 12 contract + 152 interop = 164 passed |
+| Godot 4.7.1 Windows Desktop release export | pass |
+| Visible C5 smoke, 1280x720 | pass; Crow, one dotted gold body-hit guide, 34 damage, playback and handoff |
+| Visible C6 smoke, 1280x720 | pass; roster 4, 3/3 maps, terminal match, collapse, rematch/disposal |
+| Visible C6-timeout smoke, 1280x720 | pass; countdown and automatic authority timeout |
+| Visible C7 smoke, 1280x720 | pass; all six release-quality checks |
+
+Renderer evidence was inspected, not inferred from report booleans. The local evidence bundle is
+`C:\tmp\DungeonBarrage-character-smoke-20260904`; the C6 terminal hash is
+`6b28cd9b5e7c4f3c`.

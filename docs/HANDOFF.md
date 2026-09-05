@@ -1,29 +1,34 @@
 # Dungeon Barrage operational handoff
 
-**Checkpoint date:** 2026-09-03
+**Checkpoint date:** 2026-09-04
 
-**Audience:** the next implementation agent
+**Audience:** the next implementation agent, including an Opus agent resuming this branch
 
-**State:** Playable cut on `SIMULATION_VERSION` 9 / `CONTENT_VERSION` 6. The
-match-create/command envelope no longer carries `characterId` or character kits. Every
-fighter is the one crow. Equipped items are ammunition. Loadout is a four-page wizard
-(ranged, melee, one-shot secondary, crown/anklet) with eight items per page. Crowns and
-anklets charge on two damaging hits. Leftover C1 realignment is complete (0 ignored tests
-in `db-sim-core`, 485 unit/integration tests passing). Smooth walking/hopping movement visual
-interpolation (`MovementPlayback`) is active during transition playback. Centered bottom interactive
-weapon action bar (`1`–`4`) with ammo counters, out-of-ammo aiming prevention, and automatic weapon
-fallback is live. Character hit reactions (decaying sine flinch, white hit flash, wincing eyes, floating damage text)
-and crumbling terrain debris with downward gravity physics and smooth falling towers are implemented.
+**Branch:** `feat/c1-outcome-provenance`
 
-Steam page work is **after C5 only** and is not part of this checkpoint.
+## Current product truth
 
-This is the mutable resume document. `docs/CLIENT_SPEC.md` is the historical client
-contract. Accepted ADRs retain architectural history (ADR 0002 kits are **not** restored
-for this cut; do not rewrite ADR history). `PLAY.md` is how to build and play.
+Dungeon Barrage has returned to fixed character kits. The 32-item ammunition wizard is retired.
+The launch roster is Leslie, Crow, Erus, and Kreena. A player selects one character on one screen
+and always retains two unlimited normal actions plus a charge-gated SS. A normal action ends the
+turn; SS is a free action usable before or after the normal action.
 
----
+The two tactical routes must remain available throughout a match:
 
-## 1. Start here
+- damage through direct and area attacks;
+- ring-outs through displacement, terrain destruction, and positioning.
+
+The client presents one dotted authoritative aim preview. Gold means the preview hits a character;
+red means it does not. Do not restore the old solid rubber-band plus separate impact line/arc stack.
+The Rust-published body center/radius is the collision and drawing contract, so a visible hit and
+an authoritative hit refer to the same body.
+
+## Repository and ownership
+
+The canonical repository is `C:\Users\rsfit\DungeonBarrage`. The similarly named OneDrive
+workspace is not the implementation repository.
+
+Start every resumed session with:
 
 ```powershell
 Set-Location -LiteralPath 'C:\Users\rsfit\DungeonBarrage'
@@ -31,147 +36,131 @@ git status --short --branch
 git rev-parse HEAD
 ```
 
-Canonical repository: `C:\Users\rsfit\DungeonBarrage`.
+Do not reset, clean, or blanket-stage a shared worktree. The untracked
+`character assets-unused/` directory predates this slice and is not owned by it. Do not stage it.
+Do not touch `.github-token` or paste credentials into commands, logs, commits, or documentation.
 
-Do not copy work into `C:\Users\rsfit\OneDrive\Documents\DungeonBarrage`.
+## Architecture decision
 
-Do not run `git reset --hard`, `git checkout --`, or `git clean`. Do not touch
-`.github-token`.
+Keep the existing language boundary:
 
----
+- Rust `db-sim-core` is the only authority for roster, legal actions, action economy, collision,
+  ballistics, terrain, damage, displacement, gauge, elimination, hashes, and replay.
+- `db-sim-ffi` exposes a coarse versioned C ABI for the local client.
+- Godot 4.7.1 .NET/C# owns input, animation, effects, camera, audio, and UI.
+- A future server links the Rust core directly.
 
-## 2. Product truth for this cut
+Moving Godot presentation to Rust would discard the established UI/editor integration without
+improving authority. Moving simulation rules into C# would duplicate them. New mechanics belong in
+Rust first and reach C# only through versioned DTOs, snapshots, previews, and transitions.
 
-| Claim | Status |
-|---|---|
-| Envelope: no `characterId`/kits; one crow; items as ammo | **implemented** (`SIMULATION_VERSION` 9, `CONTENT_VERSION` 6). Melee-style stages, crow 280 HP, 2–3 cell craters. Eight ranged, eight one-shot secondaries, eight melee skins, eight charge-gated crowns/anklets. Ramshot knockback is two cells. |
-| Visible fighter body equals the authoritative hitbox | **implemented**: `BODY_WIDTH` is a diameter; Rust publishes a half-body-width collision radius centered one radius above the ground pivot. Preview, apply, bot aim, projectile muzzle/playback, and Godot drawing all consume that geometry. Frozen preview/apply impacts are asserted inside the displayed target. |
-| Event-derived combat feedback | **implemented**: `TransitionCueResolver` is a Godot-free, visual-clock projection of transition events. `projectileTrace` gives a fire cue, decreasing `healthChanged` gives hit feedback, `impact` draws at the exact reported fixed-point position and can add a draw-only camera impulse, and `playerEliminated` gives a defeat accent. It never changes the projected collision circle, authority state, or manual camera pan. Reduced motion retains tactical cues but suppresses shake. |
-| Camera director & paper-doll model | **implemented**: `CameraDirector` provides arena-clamped pan, impulse composition, and dynamic playback framing. `CharacterPresentationModel` anchors eye, beak, crown/trinket, and weapon sockets to the authoritative `CharacterBodyGeometry` circle, resolving dynamic facing relative to the opponent, slot-aware weapon/tool silhouettes (`Cannon`, `Blade`, `Bow`, `Ordnance`), dynamic aim elevation orientation, and accessibility-safe idle breathing. |
-| Tiered, disposal-safe combat effects | **implemented**: `CombatEffectSystem` provides bounded, pool-recycled shockwaves, sparks, and particles scaled across graphics tiers (`Low`, `Medium`, `High`) and `ReduceMotion`, while guaranteeing persistent tactical visibility for target and hit markers. |
-| Tactical match HUD & floating status plates | **implemented**: `TacticalHudModel` provides a pure C# wind anemometer gauge (directional vane arrow, normalized velocity, weapon wind-sensitivity badge) and floating character status plates (segmented health bars, low-health alerting, trinket charge pips, ammo indicators) anchored to the bobbing paper-doll body. |
-| FFI `create`/`apply`/`snapshot` hashes equal direct Rust | **implemented** (`ffi_create_apply_snapshot_matches_direct_rust_on_the_duel_blocks_path`) |
-| 3 stacked maps + bot reaches win/lose | **implemented**: bot-to-terminal on all three maps (`maps_bot_outcome`); Godot C6 `mapsCompleted: crow-perch,broken-battlements,twin-spires` |
-| Stacked structures fall in sim state when support is destroyed | **implemented**: `destroying_support_on_each_stacked_map_drops_the_crown`; C6 `stackedBlocksFell: true` |
-| C3 C# `SafeHandle` vs release FFI | **implemented** on the Godot-free interop tests; recopy `target/release/db_sim_ffi.dll` to `client/native/win-x64/` |
-| C4 Godot loadout picker, aim, falling structures, local match | **implemented**: sequential 8-tile pages. Slingshot aim: drag **away** from the opponent; gold line is first impact; dotted arc is the flight. `A`/`D` walk, Space jump, arrows pan camera. Walking cuts this turn's max power (10% floor). Returning Boomerang bounces and craters. |
-| C5 human-finishable match + `PLAY.md` | **implemented**: C5 now starts through the picker on `crow-perch`, not the embedded fixture. Windowed C5 shows MATCH COMPLETE. Not a live human sitting at the keyboard. |
-| C7 desktop quality & planning clock | **implemented**: Settings recovery, audio clamping, accessibility scaling, localization infrastructure, performance tier switching, and multiplatform export presets verified (`c7-report.json`, `c7-windowed-report.json`). Real wall-clock planning countdown and automatic timeout verified (`c6-timeout-report.json`, `c6-timeout-windowed-report.json`). |
-| Leftover C1 realignment & movement interpolation | **implemented**: all 41 leftover C1 tests realigned or pruned against the crow + 32-item catalog. Core has 0 ignored tests (485 unit/integration tests passing). Smooth walking/hopping movement visual interpolation (`MovementPlayback`) smoothly lerps ground pivots between `EntityMoved.Start` and `EntityMoved.End` during transition playback while preserving `CharacterBodyGeometry` collision circles (127 interop unit tests, C5/C6/C6t/C7 smoke suites green). |
-| Weapon action bar, ammo UX & combat reactions | **implemented**: Interactive 4-slot weapon action bar (`1`–`4`), ammo status badges, out-of-ammo aiming prevention, automatic weapon fallback, decaying sine hit flinch, white hit flash, wincing eye squint, floating damage text (`-XX`), crumbling terrain debris with downward gravity, and smooth falling tower blocks. |
-| Steam page | **not started** (after C5 only) |
-| `broken-battlements` spawn ledges | **open owner call**: bot-vs-bot can still end 0hp vs 200hp by a fall. Remedy is floor/wider ledges, not another knockback cut. |
+## Version boundary
 
-Language boundary (ADR 0006) is unchanged: Godot/C# presents; Rust is the only authority.
+| Boundary | Current value |
+|---|---:|
+| Native ABI | 4 |
+| Client contract | 2 |
+| Simulation | 10 |
+| Content | 7 |
 
-`docs/OPENBOUND_CLEAN_ROOM_AUDIT.md` records the external-reference review and the explicit
-clean-room/no-port boundary. Its next safe presentation work is original paper-doll/effect/camera
-composition; movement interpolation remains blocked until Rust retains an actual movement path.
+ABI remains 4 because the exported function set/signatures did not change. Schema 2 replaces
+client-authored loadouts with `characterId`, publishes `characterId` in snapshots, and exposes the
+four fixed kits through `db_sim_roster`.
 
-**Adding an item with a displacement effect:** `magnitude_secondary` on a `Knockback` or `Push` is
-a falloff radius, and `displacement.rs` reads `<= 0` as *no radius test at all* — full magnitude
-against every living opponent anywhere on the map, not "the primary target only" as an earlier
-comment claimed. The Ramshot shipped that way and ended every duel on turn 1. `validate_roster()`
-now rejects a non-positive radius, so the catalog will refuse it rather than shipping it.
+`PlayerState.loadout` and ammo counters still exist internally as a deliberate replay-migration
+bridge. Rust derives them from the selected character, all current counters are unlimited, and new
+match creation cannot select legacy item IDs. `character.rs` retains the old catalog only for old
+replay/low-level resolver coverage. Do not expose it in the UI.
 
----
+## Implemented in the current working slice
 
-## 3. Envelope
+- Four authoritative character profiles with fixed HP, movement, and three actions.
+- Schema-2 `characterId` match creation and snapshot identity.
+- One four-card character selection screen.
+- Three-slot action bar and keyboard shortcuts `1`, `2`, `3`.
+- Unlimited normal actions; gauge-gated free-action SS.
+- Exactly one dotted preview chosen from the Rust preview result, gold for character hit and red
+  otherwise.
+- Visible-body hitbox alignment using Rust-published collision geometry.
+- Presentation registry/animation coverage for all four character IDs.
+- Updated shared C-ABI fixtures and Rust golden vectors.
+- Frozen fixture hashes: initial `5e95a1dd6ba37637`, move `d3681302b21ba8ef`, ability
+  `06fa4183bbd03425`.
 
-Create request player object:
+The detailed governing plan is `docs/CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md`. `PLAY.md` is the
+current build and control guide. `docs/CLIENT_SPEC.md` is the client contract.
 
-```json
-{
-  "playerId": "a-local-player",
-  "team": 0,
-  "loadout": {
-    "main": "ramshot-cannon",
-    "secondary": "ramshot-shell",
-    "meleeTool": "trench-spade",
-    "trinket": "ember-crown"
-  },
-  "appearance": { "skinId": "default", "abilitySkinIds": ["default", "default", "default"], "victoryPoseId": "default" }
-}
-```
+## Honest gaps
 
-Ability commands use `"slot": "main" | "secondary" | "meleeTool" | "trinket"`.
+Phase 1 is accepted. A real Windows Desktop export rendered the character screen, three-action
+bar, a single dotted gold hit guide terminating on the visible body, and terminal results at
+1280x720. C6 completed all three maps, exercised human and bot turns, dropped stacked blocks, and
+created/disposed a rematch. C6-timeout and C7 also passed. The reports and screenshots are in
+`C:\tmp\DungeonBarrage-character-smoke-20260904` on the verification machine; the exact durable
+results are recorded below and in `docs/BUILD_LOG.md`.
 
-Shared-fixture hashes at `SIMULATION_VERSION` 9 / `CONTENT_VERSION` 6:
+The Phase 1 abilities use the existing closed resolver vocabulary. These intended mechanics remain
+approximations and must not be reported as finished:
 
-| Vector | Hash |
-|---|---|
-| Initial | `1028333c8a2e9f0f` |
-| After move | `b0e9ba84389a6797` |
-| After ability / final | `682f0e2a57b7debd` |
+| Character | Intended mechanic | Current implementation |
+|---|---|---|
+| Leslie | Ant Glob rolls along ground before cluster detonation | cluster projectile on impact |
+| Leslie | persistent Corrosive Vomit Ooze hazard | target-bound Embers status |
+| Crow | flight/aerial positioning identity | fast ground movement |
+| Erus | Celestial Staff attacks all enemies and has seeded 5% self-hit | single turret spawn |
+| Kreena | Global Magic Arrow reaches any valid enemy | ordinary long-range projectile |
 
-**Read these from the fixture files, not from this table.** Every content bump moves all three,
-because `content_version` is part of the hashed state. This table has already been stale once: it
-carried the `CONTENT_VERSION` 2 values (`864c1ec2512a0327` / `57dc7133b8667daf` /
-`03388514a9108085`) after content moved to 4. The source of truth is
-`tests/fixtures/matches/horizontal-test-duel-v1/responses/*.json`, and
-`shared_match_fixtures` is what enforces it.
+Each authoritative mechanic needs scenario tests and playback evidence. Any state or RNG change
+requires canonical encoding review, a simulation-version bump, fixture regeneration, and golden
+vector regeneration.
 
-### Bumping `CONTENT_VERSION`
+## Next task
 
-Any change to an item, ability, effect, or map is a content change. It is a six-step edit, and
-missing any one of them fails somewhere far from the cause:
+Implement Leslie's Ant Glob ground roll as the first Phase 2 mechanic. It should establish an
+authority-owned, deterministic ground-travel path reusable by later unusual projectiles. Specify
+collision, slope/step behavior, stopping, detonation, terrain mutation, trace events, preview, and
+bot parity before adding presentation.
 
-1. `crates/db-sim-core/src/lib.rs` — `CONTENT_VERSION`.
-2. `client/src/DungeonBarrage.Client/Settings/presentation-manifest-v1.json` — `contentVersion`.
-   `PresentationManifestTests` now fails in `dotnet test` if you forget; before that gate existed
-   this only surfaced as "Presentation content N, request content M ... must match" at Confirm, in
-   an exported build.
-3. Fixture inputs: `create-request.json` and `fixture.json` — `contentVersion`.
-4. Regenerate the frozen corpus:
-   `cargo test -p db-sim-ffi --lib -- --ignored regenerate_shared_response_fixtures_from_production_abi`.
-   That writer is the only sanctioned one; it goes through the production ABI.
-5. Sync every pinned hash: `fixture.json`, `crates/db-sim-ffi/src/tests.rs`,
-   `FrozenResponseFixtureTests.cs`, `CommandRoundTripTests.cs`.
-6. Regenerate all five golden vectors, recording the old value and the reason beside each
-   constant — `crates/db-sim-core/tests/golden_vectors.rs` documents the rule.
+## Verified checkpoint
 
----
+- Rust workspace: 514 passed, 0 failed, 1 explicitly ignored fixture writer.
+- Release FFI: 23 passed, 0 failed, 1 explicitly ignored fixture writer.
+- .NET: 12 contract + 152 interop = 164 passed, 0 failed.
+- Strict Clippy, rustfmt check, `cargo deny`, .NET format, release export, and diff checks passed.
+- C5: Crow selected through Character Select; one-cell move and direct Precision .57 hit; one
+  dotted gold guide; 34 real damage; fire/hit/impact cues; input lock/unlock; turn handoff.
+- C6: roster 4; Kreena vs Erus; human/bot turns; all three maps; stacked blocks fell; terminal at
+  turn 16; state hash `6b28cd9b5e7c4f3c`; rematch created and disposed cleanly.
+- C6-timeout: visible countdown and automatic authority timeout passed.
+- C7: settings recovery, audio clamping, UI scaling, localization, performance-tier switching,
+  and multi-platform export presets passed.
 
-## 4. Next dependency-driven step
+## Required gates
 
-After a human finishes a match from `PLAY.md`, Steam page work may start. Do not author
-store copy during this cut.
-
-Leftover C1 realignment and smooth movement playback are complete.
-Remaining deferred items:
-- Interactive human match playthrough from `PLAY.md`.
-- Steam store page work (after human finishes match per `PLAY.md`).
-- `broken-battlements` spawn ledges owner call (deferred until owner requests map content bump).
-
----
-
-## 5. Gates
-
-From the repo root, every slice:
-
-- `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked`
-- `cargo test --release -p db-sim-ffi --locked`
-- `cargo build --release -p db-sim-ffi --locked`
-- `cargo deny check`
-
-Then recopy the release FFI next to the C# RID dir and run `dotnet test client/DungeonBarrage.sln -c Release`.
-CI repeats the Godot-free C# gate on Linux against a freshly built `libdb_sim_ffi.so`.
-
-Unit tests are not sufficient on their own for anything that touches content, the manifest, or the
-Godot screens. Export and run the C6 smoke as well:
+Run from the canonical repository:
 
 ```powershell
-& $env:DUNGEON_BARRAGE_GODOT --headless --path client/src/DungeonBarrage.Client `
-    --export-release "Windows Desktop" <out>/DungeonBarrage.exe
-<out>/DungeonBarrage.exe --headless -- --c6-smoke-report <out>/report.json --c6-screenshot <out>/shot.png
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo test --release -p db-sim-ffi --locked
+cargo build --release -p db-sim-ffi --locked
+cargo deny check
+Copy-Item -Force .\target\release\db_sim_ffi.dll .\client\native\win-x64\db_sim_ffi.dll
+dotnet format .\client\DungeonBarrage.sln --verify-no-changes --no-restore
+dotnet test .\client\DungeonBarrage.sln -c Release --no-restore
+git diff --check
 ```
 
-`success: true` is not the whole check — read the report. `allPlayableMapsCompleted`,
-`stackedBlocksFell`, clean rematch disposal, and non-zero dimensions from the renderer-backed
-(non-headless) run are required. `turnsPlayed` is diagnostic rather than a fixed threshold after
-the simulation-9 hitbox correction; the smaller visible target can make bot-only matches reach
-the hard turn limit. This smoke proves the complete client flow, not the still-required human
-playthrough. `humanMainItemId` and `botMainItemId` must differ, since both once read from the same
-field and hid that the bot mirrored the player's loadout.
+For renderer evidence, use the pinned Godot path verified by `scripts/verify-toolchain.ps1`, export
+the Windows Desktop build outside the source tree, and run the C5/C6/timeout/C7 smoke entry points.
+Inspect the reports and non-zero screenshots. Specifically confirm terminal bot play, results,
+rematch, controller flow, clean handle disposal, all playable maps, falling stacked blocks, and the
+new character/aim presentation. Do not accept `success: true` without checking those fields and
+images.
+
+## Commit discipline
+
+Before committing, inspect `git diff --check`, `git diff --stat`, and `git status --short`. Stage
+only owned files. Keep regenerated `crates/db-sim-core/tests/golden_vectors.rs` in a separate test
+commit from the feature migration. Push the current branch only after every automated gate is green.

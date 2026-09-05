@@ -41,6 +41,7 @@ pub mod blocks;
 pub mod bot;
 pub mod canonical;
 pub mod character;
+pub mod character_roster;
 pub mod client_contract;
 pub mod command;
 pub mod error;
@@ -70,12 +71,14 @@ pub use fixed::{
 /// a change to the canonical encoding. Every match records the version it ran under so
 /// old replays stay interpretable (`PLATFORM_STRATEGY.md` §6).
 ///
+/// Version 10 restores character-owned fixed kits, derives compatibility loadouts from
+/// `characterId`, and makes SS a charge-gated free action around one normal attack.
 /// Version 9 makes `BODY_WIDTH` the player-collider diameter, centres that collider above
 /// the standing pivot, and uses the same centre for projectile launch, preview, and bot aim.
 /// Version 8 adds a crown/anklet trinket to the loadout and a charge-gated special.
 /// Version 7 dropped kits: every fighter is the crow; items are ammunition; stacked
 /// structures collapse when their support is destroyed.
-pub const SIMULATION_VERSION: u32 = 9;
+pub const SIMULATION_VERSION: u32 = 10;
 
 /// Version of the gameplay content tables (items, maps, modes).
 ///
@@ -88,7 +91,9 @@ pub const SIMULATION_VERSION: u32 = 9;
 /// Version 6 is Melee-style stages (durable main platform plus stacked perches), crow
 /// health 280, and smaller craters so one throw cannot delete a tower and the void in
 /// the same shot.
-pub const CONTENT_VERSION: u32 = 6;
+/// Version 7 restores character-owned fixed kits with Leslie, Crow, Erus, and Kreena and
+/// removes ammunition from the playable decision surface.
+pub const CONTENT_VERSION: u32 = 7;
 
 /// Version of the wire protocol.
 pub const PROTOCOL_VERSION: u32 = 1;

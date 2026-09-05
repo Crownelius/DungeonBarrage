@@ -238,7 +238,8 @@ impl MatchHost {
     /// 3. Raise the passive-selection interrupt if the surviving actor's gauge just filled
     ///    for the first time, so the choice cannot be skipped. An eliminated actor cannot
     ///    owe an unfulfillable choice.
-    /// 4. Otherwise run the turn to completion and hand over.
+    /// 4. A non-terminal trinket action leaves the same turn open; every normal attack
+    ///    runs the turn to completion and hands over.
     /// 5. Replace the command-layer hash with the hash after all host-owned mutations, so
     ///    the returned outcome describes the same state [`Self::state`] exposes.
     ///
@@ -272,9 +273,16 @@ impl MatchHost {
 
         movement::settle(&mut self.state)?;
 
+        let trinket_bonus = ability.slot == crate::types::AbilitySlot::Trinket;
+        let actor_eliminated = self
+            .state
+            .player(&ability.player_id)
+            .is_none_or(crate::types::PlayerState::is_eliminated);
+        let match_decided = !matches!(victory::evaluate(&self.state), MatchOutcome::InProgress);
+
         if self.raise_passive_selection_if_due(&ability.player_id) {
             // Hold the turn open. The scheduler resumes the cycle once the choice lands.
-        } else {
+        } else if !trinket_bonus || actor_eliminated || match_decided {
             self.finish_turn(TurnEndReason::Attacked)?;
         }
 
@@ -534,6 +542,43 @@ mod tests {
             first,
             "the turn must move to the other player",
         );
+    }
+
+    #[test]
+    fn charged_trinket_then_main_are_legal_in_the_same_turn() {
+        let Ok(mut host) = MatchHost::start(duel()) else {
+            panic!("a match must be startable");
+        };
+        let actor = host.active_player().to_owned();
+        let turn = host.state.turn_number;
+        let movement = host.state.movement_remaining;
+        let Some(actor_state) = host.state.player_mut(&actor) else {
+            panic!("the active player must exist");
+        };
+        actor_state.trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+
+        let mut trinket = basic_command(&host, "trinket-bonus");
+        trinket.slot = AbilitySlot::Trinket;
+        let Ok(CommandResult::Accepted(_)) = host.submit_ability(&trinket) else {
+            panic!("a fully charged trinket must be accepted");
+        };
+
+        assert_eq!(host.active_player(), actor);
+        assert_eq!(host.state.turn_number, turn);
+        assert_eq!(host.state.movement_remaining, movement);
+        assert!(!host.state.has_attacked_this_turn);
+        assert_eq!(
+            host.state
+                .player(&actor)
+                .map(|player| player.trinket_charge),
+            Some(0)
+        );
+
+        let main = basic_command(&host, "normal-attack");
+        let Ok(CommandResult::Accepted(_)) = host.submit_ability(&main) else {
+            panic!("the normal attack must remain available after the trinket bonus");
+        };
+        assert_ne!(host.active_player(), actor);
     }
 
     #[test]

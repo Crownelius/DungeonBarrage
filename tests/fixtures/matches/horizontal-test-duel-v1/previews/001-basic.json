@@ -1,1 +1,1 @@
-{"schemaVersion":1,"expectedSnapshotGeneration":0,"playerId":"a-local-player","kind":"ability","slot":"main","angleMillidegrees":45000,"powerBasisPoints":2500,"targetPlayerId":null,"secondaryTargetPlayerId":null}
+{"schemaVersion":2,"expectedSnapshotGeneration":0,"playerId":"a-local-player","kind":"ability","slot":"main","angleMillidegrees":0,"powerBasisPoints":2500,"targetPlayerId":null,"secondaryTargetPlayerId":null}

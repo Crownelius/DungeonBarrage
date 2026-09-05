@@ -46,7 +46,7 @@ public sealed class CommandContractTests
             expectedTurnNumber: 1,
             expectedSnapshotGeneration: 1,
             slot: ClientAbilitySlot.Main,
-            angleMillidegrees: 45_000,
+            angleMillidegrees: 0,
             powerBasisPoints: 2_500,
             targetPlayerId: null,
             secondaryTargetPlayerId: null);

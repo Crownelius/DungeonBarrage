@@ -1,12 +1,12 @@
 {
   "fixtureSchemaVersion": 1,
   "id": "horizontal-test-duel-v1",
-  "purpose": "Real map and loadout: nonzero movement, one projectile that deals damage and hands the turn over. CONTENT_VERSION 6 craters no longer dump the shooter into the void on this 15% lob.",
+  "purpose": "Schema-2 fixed-character duel: Crow moves, then Precision .57 hits Erus's visible authoritative body and hands the turn over.",
   "versions": {
     "abiVersion": 1,
-    "clientContractVersion": 1,
-    "simulationVersion": 9,
-    "contentVersion": 6
+    "clientContractVersion": 2,
+    "simulationVersion": 10,
+    "contentVersion": 7
   },
   "createRequestFile": "create-request.json",
   "createResponseFile": "responses/create.json",
@@ -25,7 +25,7 @@
     "activePlayerId": "a-local-player",
     "playerCount": 2,
     "blockCount": 8,
-    "stateHash": "1028333c8a2e9f0f"
+    "stateHash": "5e95a1dd6ba37637"
   },
   "steps": [
     {
@@ -37,7 +37,7 @@
         "postGeneration": 1,
         "postTurnNumber": 1,
         "postActivePlayerId": "a-local-player",
-        "postStateHash": "b0e9ba84389a6797",
+        "postStateHash": "d3681302b21ba8ef",
         "minimumActorDistanceMoved": 1,
         "minimumProjectileTraces": 0,
         "minimumProjectileSamples": 0,
@@ -54,7 +54,7 @@
         "postGeneration": 2,
         "postTurnNumber": 2,
         "postActivePlayerId": "b-local-bot",
-        "postStateHash": "682f0e2a57b7debd",
+        "postStateHash": "06fa4183bbd03425",
         "minimumActorDistanceMoved": 0,
         "minimumProjectileTraces": 1,
         "minimumProjectileSamples": 2,
@@ -67,7 +67,7 @@
     "snapshotGeneration": 2,
     "turnNumber": 2,
     "activePlayerId": "b-local-bot",
-    "stateHash": "682f0e2a57b7debd",
+    "stateHash": "06fa4183bbd03425",
     "stateChangedFromInitial": true
   }
 }

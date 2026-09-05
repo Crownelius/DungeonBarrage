@@ -5,11 +5,11 @@
 //! types; they do not define their own. Changing a type here is a cross-cutting change
 //! and must be coordinated, not made locally.
 //!
-//! Playable cut (SIMULATION_VERSION 7): every fighter is the one crow. Expression is the
-//! three-slot item loadout; equipped items are ammunition. ADR 0002's nine-kit roster is
-//! historical and is not restored for this envelope. Attack *shape* is unchanged — a
-//! projectile is still a projectile — so terrain, ballistics, damage, and knockback carry
-//! over. The owner of an attack is the equipped item, not a character kit.
+//! Playable cut (SIMULATION_VERSION 10): match creation selects one of four launch
+//! characters and Rust derives that character's fixed kit. The old loadout/ammunition
+//! fields remain temporarily for replay migration; clients neither choose nor display them.
+//! Attack shape is unchanged, so terrain, ballistics, damage, and knockback continue
+//! through the same deterministic resolver.
 
 use crate::blocks::TerrainBlock;
 use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
@@ -20,12 +20,11 @@ use crate::fixed::{BODY_WIDTH, FixedPoint, POSITION_SCALE};
 /// comparable scale.
 pub const BASE_ATTACK: i32 = 100;
 
-/// Shared fighter identity for this envelope. The create/command wire does not carry a
-/// character id; every player is this crow.
+/// Crow's stable character identifier.
 pub const CROW_ID: &str = "crow";
 
-/// Shared crow maximum health (`PRODUCT_SPEC.md` §2 / `ARSENAL.md`).
-pub const CROW_MAX_HEALTH: u16 = 280;
+/// Crow's launch maximum health.
+pub const CROW_MAX_HEALTH: u16 = 250;
 
 /// Special-gauge scale. The gauge is stored in hundredths so the fractional per-damage
 /// gains in `CHARACTERS.md` §2 (+0.40 dealt, +0.25 taken, +0.30 healed) stay exact
@@ -116,27 +115,28 @@ impl MovementClass {
     }
 }
 
-/// Which equipped item slot is being used.
+/// Which character action slot is being used.
 ///
-/// Combat slots stay `main` / `secondary` / `meleeTool`. `Trinket` is a crown or anklet
-/// whose special fires only when [`PlayerState::trinket_charge`] is full.
+/// Stable internal names predate schema 2. Launch kits expose `Basic` as Shot 1,
+/// `BasicAlt` as Shot 2/Melee, and `Trinket` as SS. `Special` is retained only as a
+/// fourth replay-compatibility storage slot.
 ///
 /// Variant names keep the historical `Basic` / `BasicAlt` / `Special` discriminants so
 /// canonical tags stay stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AbilitySlot {
-    /// Main ranged item.
+    /// Character-owned Shot 1.
     Basic,
-    /// Secondary: a single-use round of a main weapon.
+    /// Character-owned Shot 2 or melee action.
     BasicAlt,
-    /// Melee item. Visual only; every melee shares one strike.
+    /// Retired compatibility slot; schema-2 character kits never expose it.
     Special,
-    /// Crown or anklet. Charge-gated unique special.
+    /// Charge-gated SS.
     Trinket,
 }
 
 impl AbilitySlot {
-    /// Combat slots that spend ammunition. Iteration order is fixed for hashing.
+    /// Legacy loadout slots retained in canonical replay storage order.
     pub const COMBAT: [Self; 3] = [Self::Basic, Self::BasicAlt, Self::Special];
 
     /// All slots including the trinket, in canonical order.
@@ -164,10 +164,10 @@ impl AbilitySlot {
         }
     }
 
-    /// Historical gauge gate. Always false: items spend ammo, not a special gauge.
+    /// Whether this action spends the character's full SS gauge.
     #[must_use]
     pub const fn consumes_gauge(self) -> bool {
-        false
+        matches!(self, Self::Trinket)
     }
 }
 
@@ -176,7 +176,8 @@ impl AbilitySlot {
 pub enum AmmoPolicy {
     /// Decrement once after the authority accepts the attack.
     Finite,
-    /// Never decrements. Crowns and anklets are unlimited; they spend charge instead.
+    /// Never decrements. Secondary and melee/tool items are always available; crowns and
+    /// anklets use this policy because they spend trinket charge instead.
     Unlimited,
 }
 
@@ -217,28 +218,30 @@ impl AmmoCounter {
     }
 }
 
-/// Equipped item identifiers in slot order. Validated against the item catalog at match create.
+/// Authority-derived compatibility layout for a character's fixed kit.
+///
+/// Schema-2 clients select only `characterId`; they never construct this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loadout {
     /// Main ranged item identifier.
     pub main: String,
-    /// Secondary: a single-use round.
+    /// Unlimited low-damage secondary.
     pub secondary: String,
-    /// Melee item identifier. Visual only.
+    /// Unlimited short-range displacement tool.
     pub melee_tool: String,
     /// Crown or anklet identifier.
     pub trinket: String,
 }
 
 impl Loadout {
-    /// Launch-default: Ramshot, one Ramshot shell, Trench Spade, Ember Crown.
+    /// Launch-default transitional layout for Crow's fixed kit.
     #[must_use]
     pub fn launch_default() -> Self {
         Self {
-            main: "ramshot-cannon".to_owned(),
-            secondary: "ramshot-shell".to_owned(),
+            main: "crow-precision-57".to_owned(),
+            secondary: "crow-heavy-revolver".to_owned(),
             melee_tool: "trench-spade".to_owned(),
-            trinket: "ember-crown".to_owned(),
+            trinket: "crow-aerial-barrage".to_owned(),
         }
     }
 
@@ -257,22 +260,28 @@ impl Loadout {
 /// Full trinket charge. One special per fill.
 pub const TRINKET_CHARGE_FULL: u16 = 10_000;
 
-/// Default ammo matching [`Loadout::launch_default`] combat slots.
-pub const DEFAULT_AMMO: [AmmoCounter; 3] = [
+/// Default counters matching the fixed character action model.
+pub const DEFAULT_AMMO: [AmmoCounter; 3] = CHARACTER_KIT_AMMO;
+
+/// Transitional counters for a fixed character kit.
+///
+/// Character actions never run out. These counters only occupy the legacy replay-state
+/// layout until the next schema migration removes ammunition from snapshots entirely.
+pub const CHARACTER_KIT_AMMO: [AmmoCounter; 3] = [
     AmmoCounter {
-        remaining: 3,
-        maximum: 3,
-        policy: AmmoPolicy::Finite,
+        remaining: 0,
+        maximum: 0,
+        policy: AmmoPolicy::Unlimited,
     },
     AmmoCounter {
-        remaining: 1,
-        maximum: 1,
-        policy: AmmoPolicy::Finite,
+        remaining: 0,
+        maximum: 0,
+        policy: AmmoPolicy::Unlimited,
     },
     AmmoCounter {
-        remaining: 4,
-        maximum: 4,
-        policy: AmmoPolicy::Finite,
+        remaining: 0,
+        maximum: 0,
+        policy: AmmoPolicy::Unlimited,
     },
 ];
 

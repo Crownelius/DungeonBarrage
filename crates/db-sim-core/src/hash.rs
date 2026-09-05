@@ -798,8 +798,17 @@ mod tests {
 
     #[test]
     fn spending_ammo_changes_hash() {
-        let baseline = sample_state();
-        let mut changed = sample_state();
+        let mut baseline = sample_state();
+        if let Some(player) = baseline.players.get_mut(0)
+            && let Some(counter) = player.ammo.get_mut(AbilitySlot::Basic.index())
+        {
+            *counter = crate::types::AmmoCounter {
+                remaining: 3,
+                maximum: 3,
+                policy: crate::types::AmmoPolicy::Finite,
+            };
+        }
+        let mut changed = baseline.clone();
         if let Some(player) = changed.players.get_mut(0) {
             player.spend_ammo(AbilitySlot::Basic);
         }
@@ -1167,11 +1176,7 @@ mod tests {
 
     #[test]
     fn known_answer_vector_sample_state() {
-        // REGENERATED 2026-08-31 for SIMULATION_VERSION 8: loadout.trinket + trinket_charge.
-        // Previous value at version 7 was "7bf6b69b7302408e".
-        // REGENERATED 2026-09-01 for CONTENT_VERSION 6: crow health 280 and hashed content
-        // version. Previous value at version 5 was "cc84d64348b65a1e".
-        assert_eq!(hash_state(&sample_state()), "7452ad5c5c9ebe2e");
+        assert_eq!(hash_state(&sample_state()), "3e1036c2ca7d7db8");
     }
 
     #[test]
@@ -1179,11 +1184,7 @@ mod tests {
         let player = sample_player("known-answer-player");
         let mut hasher = CanonicalHasher::new();
         player.write_canonical(&mut hasher);
-        // REGENERATED 2026-08-31 for SIMULATION_VERSION 8 trinket encoding.
-        // Previous value at version 7 was "e76a2cbc302f1017".
-        // REGENERATED 2026-09-01 for CONTENT_VERSION 6 crow health 280.
-        // Previous value at version 5 was "790ddaea118d9c11".
-        assert_eq!(hasher.finish_hex(), "0c3493d895a34281");
+        assert_eq!(hasher.finish_hex(), "d207db0e1fb3e99e");
     }
 
     // -----------------------------------------------------------------------------------

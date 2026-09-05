@@ -4,7 +4,8 @@
 //! one place untrusted client input meets authoritative state. Every field on every
 //! command is treated as adversarial input until the checks below have passed. Nothing
 //! here trusts a client-declared identity, range, or ammo state — every fact is
-//! re-derived from `SimulationState` and the frozen item catalog.
+//! re-derived from `SimulationState` and the fixed character roster. A frozen item-catalog
+//! fallback exists only for versioned replay compatibility.
 //!
 //! # Validation is total before any mutation
 //!
@@ -88,7 +89,6 @@
 //! end-to-end until those land, which is expected, not a defect here
 //! (`docs/MODULE_OWNERSHIP.md` rule 4).
 
-use crate::character;
 use crate::fixed::{self, FixedPoint, PLAYER_COLLISION_RADIUS};
 use crate::hash;
 use crate::resolve;
@@ -141,7 +141,7 @@ pub fn validate_ability(
     command: &AbilityCommand,
 ) -> Result<
     (
-        &'static crate::types::ItemDefinition,
+        &'static crate::character_roster::CharacterProfile,
         &'static AbilityDefinition,
     ),
     CommandRejection,
@@ -178,27 +178,25 @@ pub fn validate_ability(
         return Err(CommandRejection::TurnVersionMismatch);
     }
 
-    // 6. Item lookup against the frozen catalog. A missing or wrong-slot item is a
-    // forged or corrupted claim — a security event.
-    let Some(item) = character::item(player.loadout.item_id(command.slot)) else {
+    // 6. Fixed-kit lookup, with a narrow legacy replay fallback. A missing or wrong-slot
+    // ability is rejected; clients cannot author an ability identifier.
+    let profile = crate::character_roster::for_player(player)
+        .or_else(|| crate::character_roster::find(crate::types::CROW_ID))
+        .ok_or(CommandRejection::AbilityNotAvailable)?;
+    let Some(ability) = crate::character::equipped_ability(player, command.slot) else {
         return Err(CommandRejection::AbilityNotAvailable);
     };
-    if item.slot != command.slot {
-        return Err(CommandRejection::AbilityNotAvailable);
-    }
-    let ability = &item.ability;
 
-    // 8. Combat items spend ammo. Crowns and anklets spend a full trinket charge.
-    if command.slot == AbilitySlot::Trinket {
-        if player.trinket_charge < crate::types::TRINKET_CHARGE_FULL {
-            return Err(CommandRejection::GaugeNotReady);
-        }
-    } else if !player.ammo_for(command.slot).can_spend() {
-        return Err(CommandRejection::OutOfAmmo);
+    // 8. SS spends a full gauge; normal character actions are unlimited.
+    if command.slot == AbilitySlot::Trinket
+        && player.trinket_charge < crate::types::TRINKET_CHARGE_FULL
+    {
+        return Err(CommandRejection::GaugeNotReady);
     }
 
-    // 9. One attack per turn.
-    if state.has_attacked_this_turn {
+    // 9. One normal attack per turn. A charged SS is a free action and may be
+    // used before the normal attack without consuming it.
+    if command.slot != AbilitySlot::Trinket && state.has_attacked_this_turn {
         return Err(CommandRejection::AlreadyAttacked);
     }
 
@@ -219,7 +217,7 @@ pub fn validate_ability(
     // abilities) be distinct from the other target.
     validate_targets(state, command)?;
 
-    Ok((item, ability))
+    Ok((profile, ability))
 }
 
 /// Validates the targets named on an [`AbilityCommand`], if any.
@@ -308,7 +306,9 @@ fn resolve_ability(
             actor.spend_ammo(command.slot);
         }
     }
-    state.has_attacked_this_turn = true;
+    if command.slot != AbilitySlot::Trinket {
+        state.has_attacked_this_turn = true;
+    }
 
     // Historical gauge field on CommandOutcome still exists; this envelope does not
     // award special gauge. Report zero earned.
@@ -577,7 +577,11 @@ fn resolve_ability(
     award_gauge(
         state,
         &command.player_id,
-        dealt_to_others,
+        if command.slot == AbilitySlot::Trinket {
+            0
+        } else {
+            dealt_to_others
+        },
         backlash_total,
         healed_total,
     );
@@ -658,7 +662,13 @@ fn resolve_crit_for_target(
 /// value. Floored at 10% so a full-move turn can still take a weak shot.
 #[must_use]
 pub fn max_launch_power(state: &SimulationState) -> i32 {
-    let allowance = crate::character::fighter().movement.per_turn();
+    let allowance = state
+        .player(&state.active_player_id)
+        .and_then(crate::character_roster::for_player)
+        .map_or_else(
+            || crate::character::fighter().movement.per_turn(),
+            |profile| profile.movement_allowance,
+        );
     if allowance <= 0 {
         return 10_000;
     }
@@ -1306,37 +1316,19 @@ mod tests {
     }
 
     #[test]
-    fn special_with_empty_gauge_is_rejected() {
+    fn melee_tool_remains_available_without_finite_ammo() {
         let mut state = base_state();
         if let Some(attacker) = state.player_mut("attacker")
             && let Some(ammo) = attacker.ammo.get_mut(AbilitySlot::Special.index())
         {
             ammo.remaining = 0;
+            ammo.maximum = 0;
+            ammo.policy = AmmoPolicy::Unlimited;
         }
         let mut command = ability_command("cmd-1", Some("defender"));
         command.slot = AbilitySlot::Special;
 
-        assert_eq!(
-            validate_ability(&state, &command),
-            Err(CommandRejection::OutOfAmmo)
-        );
-    }
-
-    #[test]
-    fn special_with_partial_gauge_is_rejected() {
-        let mut state = base_state();
-        if let Some(attacker) = state.player_mut("attacker")
-            && let Some(ammo) = attacker.ammo.get_mut(AbilitySlot::Special.index())
-        {
-            ammo.remaining = 0;
-        }
-        let mut command = ability_command("cmd-1", Some("defender"));
-        command.slot = AbilitySlot::Special;
-
-        assert_eq!(
-            validate_ability(&state, &command),
-            Err(CommandRejection::OutOfAmmo)
-        );
+        assert!(validate_ability(&state, &command).is_ok());
     }
 
     #[test]
@@ -1349,6 +1341,51 @@ mod tests {
             validate_ability(&state, &command),
             Err(CommandRejection::AlreadyAttacked)
         );
+    }
+
+    #[test]
+    fn charged_trinket_is_allowed_without_consuming_the_normal_attack() {
+        let mut state = base_state();
+        state.has_attacked_this_turn = true;
+        if let Some(attacker) = state.player_mut("attacker") {
+            attacker.trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+        }
+        let mut command = ability_command("trinket-bonus", Some("defender"));
+        command.slot = AbilitySlot::Trinket;
+
+        assert!(validate_ability(&state, &command).is_ok());
+
+        state.has_attacked_this_turn = false;
+        let CommandResult::Accepted(_) = apply_ability(&mut state, &command) else {
+            panic!("a fully charged trinket must resolve");
+        };
+        assert!(!state.has_attacked_this_turn);
+        assert_eq!(
+            state.player("attacker").map(|player| player.trinket_charge),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn unlimited_secondary_does_not_decrement_and_still_spends_the_attack() {
+        let mut state = base_state();
+        let before = state
+            .player("attacker")
+            .map(|player| player.ammo_for(AbilitySlot::BasicAlt));
+        let mut command = ability_command("secondary-fallback", None);
+        command.slot = AbilitySlot::BasicAlt;
+
+        let CommandResult::Accepted(_) = apply_ability(&mut state, &command) else {
+            panic!("the unlimited secondary must resolve");
+        };
+
+        assert_eq!(
+            state
+                .player("attacker")
+                .map(|player| player.ammo_for(AbilitySlot::BasicAlt)),
+            before
+        );
+        assert!(state.has_attacked_this_turn);
     }
 
     #[test]
@@ -1390,7 +1427,8 @@ mod tests {
 
     #[test]
     fn power_boundary_values_are_accepted() {
-        let state = base_state();
+        let mut state = base_state();
+        state.movement_remaining = crate::types::MovementClass::Fast.per_turn();
         let mut low = ability_command("cmd-lo", Some("defender"));
         low.power_basis_points = 0;
         let mut high = ability_command("cmd-hi", Some("defender"));
@@ -1460,15 +1498,14 @@ mod tests {
         let Ok((character, ability)) = validate_ability(&state, &command) else {
             panic!("expected a valid command to resolve");
         };
-        assert_eq!(character.id, "ramshot-cannon");
-        assert_eq!(ability.id, "ramshot-cannon");
+        assert_eq!(character.id.wire_name(), "crow");
+        assert_eq!(ability.id, "crow-precision-57");
     }
 
     #[test]
     fn multi_projectile_command_preserves_each_trace_and_impact() {
         let mut attacker = player("attacker", "crow", FixedPoint::new(0, 0));
         attacker.loadout.main = "line-repeater".to_owned();
-        attacker.ammo = crate::character::ammo_for_loadout(&attacker.loadout).expect("ammo");
         let defender = player("defender", "crow", FixedPoint::new(1024, 0));
         let mut state = state_with_players("attacker", vec![attacker, defender]);
         let command = AbilityCommand {
@@ -1798,7 +1835,6 @@ mod tests {
     fn push_effect_actually_displaces_the_target_through_apply_ability() {
         let mut actor = player("actor", "crow", FixedPoint::new(0, 0));
         actor.loadout.main = "tide-sprayer".to_owned();
-        actor.ammo = crate::character::ammo_for_loadout(&actor.loadout).expect("ammo");
         let target = player("target", "crow", FixedPoint::new(512, 0));
         let mut state = state_with_players("actor", vec![actor, target]);
         let before = state.player("target").map(|p| p.position);
@@ -1828,6 +1864,7 @@ mod tests {
     #[test]
     fn terrain_destroying_ability_reports_nonzero_terrain_cells_removed() {
         let mut state = base_state();
+        state.player_mut("attacker").expect("attacker").loadout.main = "ramshot-cannon".to_owned();
         for y in 0..5i32 {
             for x in 0..5i32 {
                 let _ = terrain::set_material(&mut state.terrain, x, y, Material::Soil);

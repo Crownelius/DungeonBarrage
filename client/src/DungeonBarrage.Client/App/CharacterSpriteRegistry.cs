@@ -36,6 +36,8 @@ public sealed class CharacterSpriteRegistry
 
     private readonly Dictionary<string, Texture2D?> _textures = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly record struct ProjectileFrame(string SheetKey, int Row, int Col);
+
     /// <summary>
     /// Preloads all known spritesheets into memory.
     /// </summary>
@@ -173,5 +175,76 @@ public sealed class CharacterSpriteRegistry
         canvas.DrawSetTransform(Vector2.Zero, 0f, Vector2.One);
 
         return true;
+    }
+
+    /// <summary>
+    /// Draws an ammunition-only spritesheet cell at an authoritative projectile position.
+    /// </summary>
+    /// <remarks>
+    /// Frame selection is presentation-only. Position and direction are derived from the Rust
+    /// trace by the caller; this method never integrates ballistics or performs collision tests.
+    /// </remarks>
+    public bool TryDrawProjectile(
+        CanvasItem canvas,
+        string abilityId,
+        Vector2 position,
+        Vector2 direction,
+        float radius,
+        uint visualTick)
+    {
+        ArgumentNullException.ThrowIfNull(canvas);
+        ArgumentException.ThrowIfNullOrWhiteSpace(abilityId);
+
+        var frame = ResolveProjectileFrame(abilityId, visualTick);
+        if (frame is not { } projectileFrame || GetTexture(projectileFrame.SheetKey) is not { } texture)
+        {
+            return false;
+        }
+
+        var rotation = direction.LengthSquared() > 0.001f ? direction.Angle() : 0f;
+        var targetHeight = Math.Max(radius * 2.2f, 10f);
+        var scale = targetHeight / CellHeight;
+        var source = new Rect2(
+            projectileFrame.Col * CellWidth,
+            projectileFrame.Row * CellHeight,
+            CellWidth,
+            CellHeight);
+        var destination = new Rect2(
+            -CellWidth * 0.5f,
+            -CellHeight * 0.5f,
+            CellWidth,
+            CellHeight);
+
+        canvas.DrawSetTransform(position, rotation, new Vector2(scale, scale));
+        canvas.DrawTextureRectRegion(texture, destination, source, Colors.White);
+        canvas.DrawSetTransform(Vector2.Zero, 0f, Vector2.One);
+        return true;
+    }
+
+    private static ProjectileFrame? ResolveProjectileFrame(string abilityId, uint visualTick)
+    {
+        if (abilityId.Contains("ramshot", StringComparison.OrdinalIgnoreCase) ||
+            abilityId.Contains("cannon", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ProjectileFrame("crow_ramshot_cannon", 2, 2 + (int)(visualTick % 2));
+        }
+
+        if (abilityId.Contains("bow", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ProjectileFrame("crow_bow", 3, 3);
+        }
+
+        if (abilityId.Contains("boomerang", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ProjectileFrame("crow_boomerang", 3, 2);
+        }
+
+        if (abilityId.Contains("cinder", StringComparison.OrdinalIgnoreCase) ||
+            abilityId.Contains("repeater", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ProjectileFrame("crow_cinder", 3, 2);
+        }
+
+        return null;
     }
 }

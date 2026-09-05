@@ -288,7 +288,11 @@ public sealed class LiveMatch : IDisposable, IAsyncDisposable
     {
         var activePlayerId = CurrentSnapshot.ActivePlayerId
             ?? throw new InvalidOperationException("No active player.");
-        var request = new ClientBotDecisionRequest(1, activePlayerId, difficulty, decisionSeed);
+        var request = new ClientBotDecisionRequest(
+            ClientContract.CurrentSchemaVersion,
+            activePlayerId,
+            difficulty,
+            decisionSeed);
         var requestBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
         var responseBytes = await _session.DecideBotActionAsync(requestBytes).ConfigureAwait(true);
         var decision = JsonSerializer.Deserialize<ClientBotDecision>(responseBytes, ClientEnvelope.Options)

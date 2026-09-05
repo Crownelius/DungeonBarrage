@@ -26,8 +26,8 @@ public sealed class ContractStrictnessTests
         Assert.Equal("fixture-horizontal-duel-v1", request.MatchId);
         Assert.Equal("horizontal-test-array", request.Match.MapId);
         Assert.Equal(2, request.Match.Players.Count);
-        Assert.Equal("ramshot-cannon", request.Match.Players[0].Loadout.Main);
-        Assert.Equal("ramshot-cannon", request.Match.Players[1].Loadout.Main);
+        Assert.Equal("crow", request.Match.Players[0].CharacterId);
+        Assert.Equal("erus", request.Match.Players[1].CharacterId);
 
         // Re-serializing must reproduce the original bytes exactly. Anything less means the DTO
         // is lossy, and a lossy DTO cannot be used to author a request.
@@ -58,7 +58,7 @@ public sealed class ContractStrictnessTests
     public void An_unknown_field_is_refused_rather_than_ignored()
     {
         var text = Encoding.UTF8.GetString(Fixtures.Read("create-request.json").Span)
-            .Replace("{\"schemaVersion\":1", "{\"unexpectedField\":true,\"schemaVersion\":1", StringComparison.Ordinal);
+            .Replace("{\"schemaVersion\":2", "{\"unexpectedField\":true,\"schemaVersion\":2", StringComparison.Ordinal);
 
         // The core is the only authority on envelope shape. A field the managed layer does not
         // model means the two disagree, and that must be loud.

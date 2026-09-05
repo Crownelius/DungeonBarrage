@@ -9,7 +9,7 @@
 use db_sim_core::block_ops;
 use db_sim_core::blocks;
 use db_sim_core::bot::{self, BotDifficulty};
-use db_sim_core::character;
+use db_sim_core::character_roster;
 use db_sim_core::client_contract::CLIENT_CONTRACT_VERSION;
 use db_sim_core::map;
 use db_sim_core::match_host::MatchHost;
@@ -19,15 +19,19 @@ use db_sim_core::match_session::{
 };
 use db_sim_core::match_setup::{MatchConfig, MatchMode, MatchPlayerConfig, create_match};
 use db_sim_core::types::{
-    AbilityCommand, AbilitySlot, Appearance, CommandRejection, CommandResult, Loadout,
-    MatchOutcome, MatchPhase,
+    AbilityCommand, AbilitySlot, Appearance, CommandRejection, CommandResult, MatchOutcome,
+    MatchPhase,
 };
 
 fn crow_player(id: &str, team: u8) -> MatchPlayerConfig {
+    character_player(id, team, "crow")
+}
+
+fn character_player(id: &str, team: u8, character_id: &str) -> MatchPlayerConfig {
     MatchPlayerConfig {
         player_id: id.to_owned(),
         team,
-        loadout: Loadout::launch_default(),
+        character_id: character_id.to_owned(),
         appearance: Appearance::default(),
     }
 }
@@ -210,71 +214,57 @@ fn stacked_pair(blocks: &[db_sim_core::blocks::TerrainBlock]) -> Option<(u32, u3
     None
 }
 
-fn loadout_equipping(item: &db_sim_core::types::ItemDefinition) -> Loadout {
-    let mut loadout = Loadout::launch_default();
-    match item.slot {
-        AbilitySlot::Basic => loadout.main = item.id.to_owned(),
-        AbilitySlot::BasicAlt => loadout.secondary = item.id.to_owned(),
-        AbilitySlot::Special => loadout.melee_tool = item.id.to_owned(),
-        AbilitySlot::Trinket => loadout.trinket = item.id.to_owned(),
-    }
-    loadout
-}
-
-fn crow_player_with(id: &str, team: u8, loadout: Loadout) -> MatchPlayerConfig {
-    MatchPlayerConfig {
-        player_id: id.to_owned(),
-        team,
-        loadout,
-        appearance: Appearance::default(),
-    }
-}
-
 #[test]
-fn every_catalog_item_fires_with_no_named_target_on_the_aim_path() {
-    for item in character::LAUNCH_ITEMS {
-        let loadout = loadout_equipping(item);
-        let config = MatchConfig {
-            seed: 12345,
-            map_id: "crow-perch".to_owned(),
-            mode: MatchMode::TurnBased,
-            players: vec![
-                crow_player_with("human", 0, loadout.clone()),
-                crow_player_with("bot", 1, loadout),
-            ],
-        };
-        let mut host = create_match(&config)
-            .unwrap_or_else(|_| panic!("crow-perch with {} must start", item.id));
-        let player_id = host.active_player().to_owned();
-        let command = AbilityCommand {
-            command_id: format!("aim-{}", item.id),
-            player_id,
-            expected_turn_number: host.state().turn_number,
-            slot: item.slot,
-            angle_millidegrees: 45_000,
-            power_basis_points: 1_500,
-            target_player_id: None,
-            secondary_target_player_id: None,
-        };
-        let result = host
-            .submit_ability(&command)
-            .unwrap_or_else(|_| panic!("{} submit must not fault the host", item.id));
-        if item.slot == AbilitySlot::Trinket {
+fn every_character_action_resolves_on_the_aim_path() {
+    for profile in character_roster::LAUNCH_CHARACTERS {
+        for slot in [
+            AbilitySlot::Basic,
+            AbilitySlot::BasicAlt,
+            AbilitySlot::Trinket,
+        ] {
+            let config = MatchConfig {
+                seed: 12345,
+                map_id: "crow-perch".to_owned(),
+                mode: MatchMode::TurnBased,
+                players: vec![
+                    character_player("human", 0, profile.id.wire_name()),
+                    character_player("bot", 1, "crow"),
+                ],
+            };
+            let mut host = create_match(&config)
+                .unwrap_or_else(|_| panic!("crow-perch with {} must start", profile.name));
+            let player_id = host.active_player().to_owned();
+            let command = AbilityCommand {
+                command_id: format!("aim-{}-{}", profile.id.wire_name(), slot.wire_name()),
+                player_id,
+                expected_turn_number: host.state().turn_number,
+                slot,
+                angle_millidegrees: 45_000,
+                power_basis_points: 1_500,
+                target_player_id: None,
+                secondary_target_player_id: None,
+            };
+            let result = host
+                .submit_ability(&command)
+                .unwrap_or_else(|_| panic!("{} submit must not fault the host", profile.name));
+            if slot == AbilitySlot::Trinket {
+                assert!(
+                    matches!(
+                        result,
+                        CommandResult::Rejected(CommandRejection::GaugeNotReady)
+                    ),
+                    "{} must refuse an uncharged SS; got {result:?}",
+                    profile.name
+                );
+                continue;
+            }
             assert!(
-                matches!(
-                    result,
-                    CommandResult::Rejected(CommandRejection::GaugeNotReady)
-                ),
-                "{} must refuse an uncharged crown/anklet; got {result:?}",
-                item.id
+                matches!(result, CommandResult::Accepted(_)),
+                "{} {} with target_player_id=None was {result:?}",
+                profile.name,
+                slot.wire_name()
             );
-            continue;
         }
-        assert!(
-            matches!(result, CommandResult::Accepted(_)),
-            "{} with target_player_id=None was {result:?}; Godot aim always sends a null target",
-            item.id
-        );
     }
 }
 

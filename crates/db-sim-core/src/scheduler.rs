@@ -366,10 +366,13 @@ fn lowest_living_id(state: &SimulationState) -> Option<String> {
 /// Returns [`SimError::UnknownDefinition`] if `player_id` does not name a player in
 /// `state.players`.
 fn movement_allowance_for(state: &SimulationState, player_id: &str) -> SimResult<i32> {
-    let Some(_player) = state.player(player_id) else {
+    let Some(player) = state.player(player_id) else {
         return Err(SimError::UnknownDefinition);
     };
-    Ok(character::fighter().movement.per_turn())
+    Ok(crate::character_roster::for_player(player).map_or_else(
+        || character::fighter().movement.per_turn(),
+        |profile| profile.movement_allowance,
+    ))
 }
 
 #[cfg(test)]
@@ -380,7 +383,7 @@ fn movement_allowance_for(state: &SimulationState, player_id: &str) -> SimResult
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    use crate::fixed::{BODY_WIDTH, FixedPoint};
+    use crate::fixed::FixedPoint;
     use crate::types::{Appearance, EffectKind, Material, PlayerState, StatusEffect, TerrainMask};
 
     /// Advances one phase, discarding any status expiries.
@@ -395,19 +398,22 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------------------------
 
-    /// `character_id` defaults to "arzum" (Fast) unless overridden with [`player_as`].
+    /// `character_id` defaults to Crow (Fast) unless overridden with [`player_as`].
     fn player(id: &str, team: u8) -> PlayerState {
-        player_as(id, team, "arzum")
+        player_as(id, team, "crow")
     }
 
-    fn player_as(id: &str, team: u8, _character_id: &str) -> PlayerState {
+    fn player_as(id: &str, team: u8, character_id: &str) -> PlayerState {
+        let Some(profile) = crate::character_roster::find(character_id) else {
+            panic!("scheduler test character must exist in the launch roster");
+        };
         PlayerState {
             id: id.to_string(),
             team,
-            health: 200,
-            max_health: 200,
+            health: profile.max_health,
+            max_health: profile.max_health,
             position: FixedPoint::ZERO,
-            loadout: crate::types::Loadout::launch_default(),
+            loadout: profile.derived_loadout(),
             ammo: crate::types::DEFAULT_AMMO,
             trinket_charge: 0,
             statuses: Vec::new(),
@@ -475,7 +481,10 @@ mod tests {
 
         assert_eq!(begin_match(&mut state), Ok(()));
 
-        assert_eq!(state.movement_remaining, 4 * BODY_WIDTH);
+        assert_eq!(
+            state.movement_remaining,
+            crate::types::MovementClass::Fast.per_turn()
+        );
     }
 
     #[test]
@@ -681,7 +690,7 @@ mod tests {
     fn end_turn_refreshes_movement_for_the_incoming_players_own_class() {
         let mut state = base_state(vec![
             player_as("a-p", 0, "crow"),
-            player_as("b-p", 1, "crow"),
+            player_as("b-p", 1, "leslie"),
         ]);
         state.active_player_id = "a-p".to_string();
         state.movement_remaining = 999;
@@ -691,13 +700,19 @@ mod tests {
         assert_eq!(end_turn(&mut state, TurnEndReason::Attacked), Ok(()));
 
         assert_eq!(state.active_player_id, "b-p");
-        assert_eq!(state.movement_remaining, 4 * BODY_WIDTH);
+        assert_eq!(
+            state.movement_remaining,
+            crate::types::MovementClass::Slow.per_turn()
+        );
         assert!(!state.has_attacked_this_turn);
         assert_eq!(state.turn_number, turn_before.saturating_add(1));
 
         assert_eq!(end_turn(&mut state, TurnEndReason::Passed), Ok(()));
         assert_eq!(state.active_player_id, "a-p");
-        assert_eq!(state.movement_remaining, 4 * BODY_WIDTH);
+        assert_eq!(
+            state.movement_remaining,
+            crate::types::MovementClass::Fast.per_turn()
+        );
     }
 
     #[test]

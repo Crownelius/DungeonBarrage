@@ -75,5 +75,5 @@ public sealed class PresentationManifestTests
             seed: 12345,
             matchId: "manifest-gate",
             mapId: "crow-perch",
-            humanLoadout: LocalMatchEnvelope.LaunchDefaultLoadout);
+            humanCharacterId: LocalMatchEnvelope.LaunchDefaultCharacterId);
 }

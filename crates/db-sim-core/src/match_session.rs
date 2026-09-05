@@ -4091,7 +4091,7 @@ mod tests {
         MatchPlayerConfig {
             player_id: player_id.to_owned(),
             team,
-            loadout: crate::types::Loadout::launch_default(),
+            character_id: "crow".to_owned(),
             appearance: Appearance::default(),
         }
     }
@@ -4793,16 +4793,13 @@ mod strike_provenance_tests {
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    loadout: crate::types::Loadout {
-                        main: "line-repeater".to_owned(),
-                        ..crate::types::Loadout::launch_default()
-                    },
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: TARGET.to_owned(),
                     team: 1,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -4812,6 +4809,10 @@ mod strike_provenance_tests {
     fn low_health_repeater_session() -> MatchSessionHost {
         let mut state = build_initial_state(&repeater_duel()).expect("fixture state must build");
         state
+            .player_mut("a-local-player")
+            .expect("fixture actor must exist")
+            .trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+        state
             .player_mut(TARGET)
             .expect("fixture target must exist")
             .health = 1;
@@ -4819,7 +4820,16 @@ mod strike_provenance_tests {
         MatchSessionHost::from_new_host(host)
     }
 
-    /// Flat shot empirically verified to land every one of Line Repeater's four strikes.
+    fn repeater_session() -> MatchSessionHost {
+        let mut state = build_initial_state(&repeater_duel()).expect("fixture state must build");
+        state
+            .player_mut("a-local-player")
+            .expect("fixture actor must exist")
+            .trinket_charge = crate::types::TRINKET_CHARGE_FULL;
+        MatchSessionHost::from_new_host(MatchHost::start(state).expect("fixture match must start"))
+    }
+
+    /// Flat shot empirically verified to land every one of Crow's four barrage strikes.
     fn landing_volley(session: &MatchSessionHost) -> MatchCommand {
         MatchCommand {
             schema_version: CLIENT_CONTRACT_VERSION,
@@ -4828,7 +4838,7 @@ mod strike_provenance_tests {
             expected_turn_number: session.host().state().turn_number,
             expected_snapshot_generation: session.generation(),
             kind: MatchCommandKind::Ability {
-                slot: AbilitySlot::Basic,
+                slot: AbilitySlot::Trinket,
                 angle_millidegrees: 0,
                 power_basis_points: 4_600,
                 target_player_id: None,
@@ -4859,7 +4869,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn a_multi_strike_projectile_emits_one_record_per_strike_it_actually_landed() {
-        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
@@ -4867,7 +4877,7 @@ mod strike_provenance_tests {
         assert_eq!(
             landed.len(),
             4,
-            "Line Repeater must land four strikes in this fixture",
+            "Crow's Aerial Barrage must land four strikes in this fixture",
         );
 
         let indices: Vec<u16> = landed.iter().map(|s| s.strike_index).collect();
@@ -4884,7 +4894,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn every_strike_cites_a_projectile_trace_the_outcome_actually_contains() {
-        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
@@ -4910,7 +4920,7 @@ mod strike_provenance_tests {
                     cited.push(trace_sequence);
                 }
                 StrikeDelivery::Melee | StrikeDelivery::Effect { .. } => {
-                    panic!("Line Repeater delivers every strike by projectile")
+                    panic!("Aerial Barrage delivers every strike by projectile")
                 }
             }
         }
@@ -4927,7 +4937,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn each_strike_records_its_own_independent_crit_draw() {
-        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
         let landed = strikes(&transition);
@@ -4945,7 +4955,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn per_strike_damage_reconciles_exactly_with_the_authoritative_health_change() {
-        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let before = health_of(&session, TARGET);
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
@@ -4965,7 +4975,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn a_strike_is_presented_at_its_own_projectiles_impact_tick() {
-        let mut session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
+        let mut session = repeater_session();
         let command = landing_volley(&session);
         let transition = session.apply(command).expect("volley must be accepted");
 
@@ -4997,7 +5007,7 @@ mod strike_provenance_tests {
 
     #[test]
     fn omitted_or_tampered_strike_records_fail_before_session_publication() {
-        let session = MatchSessionHost::create(&repeater_duel()).expect("fixture session");
+        let session = repeater_session();
         let command = landing_volley(&session);
         let pre_state = session.host().state().clone();
         let mut working = session.host().clone();
@@ -5010,7 +5020,7 @@ mod strike_provenance_tests {
         };
         let player = pre_state.player(&command.player_id).expect("fixture actor");
         let ability =
-            character::equipped_ability(player, AbilitySlot::Basic).expect("fixture main item");
+            character::equipped_ability(player, AbilitySlot::Trinket).expect("fixture special");
         assert_eq!(
             reconcile_strikes(&command, ability, &pre_state, working.state(), &outcome),
             Ok(())
@@ -5076,7 +5086,7 @@ mod strike_provenance_tests {
         };
         let player = pre_state.player(&command.player_id).expect("fixture actor");
         let ability =
-            character::equipped_ability(player, AbilitySlot::Basic).expect("fixture main item");
+            character::equipped_ability(player, AbilitySlot::Trinket).expect("fixture special");
         let mut omitted = outcome.as_ref().clone();
         let killing_strike = omitted
             .strikes
@@ -5109,7 +5119,7 @@ mod strike_provenance_tests {
         };
         let player = pre_state.player(&command.player_id).expect("fixture actor");
         let ability =
-            character::equipped_ability(player, AbilitySlot::Basic).expect("fixture main item");
+            character::equipped_ability(player, AbilitySlot::Trinket).expect("fixture special");
         let mut omitted = outcome.as_ref().clone();
         let miss_index = omitted
             .projectile_traces
@@ -5152,7 +5162,7 @@ mod direct_transition_scenario_tests {
         MatchPlayerConfig {
             player_id: player_id.to_owned(),
             team,
-            loadout: crate::types::Loadout::launch_default(),
+            character_id: "crow".to_owned(),
             appearance: Appearance::default(),
         }
     }
@@ -5418,13 +5428,13 @@ mod preview_tests {
                 MatchPlayerConfig {
                     player_id: "a-actor".to_owned(),
                     team: 0,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: "b-target".to_owned(),
                     team: 1,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -5531,11 +5541,11 @@ mod preview_tests {
         let empty_ammo = empty_ammo_session
             .preview(&request(&empty_ammo_session, AbilitySlot::Basic))
             .expect("ammo refusal is normal");
-        assert!(!empty_ammo.legal);
-        assert_eq!(
-            empty_ammo.rejection_reason,
-            Some(PreviewRejection::Core(CommandRejection::OutOfAmmo))
+        assert!(
+            empty_ammo.legal,
+            "fixed character actions never run out of ammo"
         );
+        assert_eq!(empty_ammo.rejection_reason, None);
         assert_session_unchanged(&session, &before, 0, 0, 0);
     }
 
@@ -5580,13 +5590,13 @@ mod status_lifecycle_tests {
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: "b-local-bot".to_owned(),
                     team: 1,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -6028,13 +6038,13 @@ mod object_lifecycle_tests {
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: "b-local-bot".to_owned(),
                     team: 1,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -6123,13 +6133,13 @@ mod authority_timeout_tests {
                 MatchPlayerConfig {
                     player_id: "a-local-player".to_owned(),
                     team: 0,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
                 MatchPlayerConfig {
                     player_id: "b-local-bot".to_owned(),
                     team: 1,
-                    loadout: crate::types::Loadout::launch_default(),
+                    character_id: "crow".to_owned(),
                     appearance: Appearance::default(),
                 },
             ],
@@ -6400,7 +6410,7 @@ mod authority_timeout_tests {
         // `a_timeout_and_a_command_with_identical_fields_never_share_a_digest` does not: that
         // test passes even with a colliding tag, because a `MatchCommand` additionally
         // encodes its `kind`. Only a frozen value catches a change to the tag itself.
-        assert_eq!(timeout.canonical_digest(), "8cac07183828cf43");
+        assert_eq!(timeout.canonical_digest(), "c38c3f790f8dfdf0");
     }
 
     #[test]

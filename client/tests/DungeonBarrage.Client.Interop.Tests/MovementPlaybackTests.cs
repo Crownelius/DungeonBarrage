@@ -20,6 +20,7 @@ public sealed class MovementPlaybackTests
             Position: new ClientPosition(posX, posY),
             CollisionCenter: new ClientPosition(posX, posY - radius),
             CollisionRadius: radius,
+            CharacterId: "crow",
             Loadout: new ClientLoadout("recurve-bow", "shell", "spade", "roost-crown"),
             Ammo: Array.Empty<ClientAmmoCounter>(),
             TrinketCharge: 0,

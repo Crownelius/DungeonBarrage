@@ -7,7 +7,6 @@
 
 use core::fmt;
 use db_sim_core::bot::BotDifficulty;
-use db_sim_core::character;
 use db_sim_core::client_contract::{
     AppearanceSnapshot, BlockSnapshot, ClientErosionAxis, ClientMatchOutcome, ClientMatchPhase,
     ClientMaterial, ClientObjectKind, ClientStatusKind, ClientTurnEndReason, MatchSnapshot,
@@ -125,17 +124,8 @@ enum MatchModeDto {
 struct MatchPlayerDto {
     player_id: String,
     team: u8,
-    loadout: LoadoutDto,
+    character_id: String,
     appearance: AppearanceDto,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LoadoutDto {
-    main: String,
-    secondary: String,
-    melee_tool: String,
-    trinket: String,
 }
 
 impl MatchPlayerDto {
@@ -143,12 +133,7 @@ impl MatchPlayerDto {
         MatchPlayerConfig {
             player_id: self.player_id,
             team: self.team,
-            loadout: db_sim_core::types::Loadout {
-                main: self.loadout.main,
-                secondary: self.loadout.secondary,
-                melee_tool: self.loadout.melee_tool,
-                trinket: self.loadout.trinket,
-            },
+            character_id: self.character_id,
             appearance: self.appearance.into_core(),
         }
     }
@@ -749,6 +734,7 @@ struct WirePlayer {
     position: WirePosition,
     collision_center: WirePosition,
     collision_radius: i32,
+    character_id: &'static str,
     loadout: WireLoadout,
     ammo: [WireAmmo; 3],
     trinket_charge: u16,
@@ -775,6 +761,12 @@ struct WireAmmo {
 
 impl WirePlayer {
     fn from_core(player: &PlayerSnapshot) -> Self {
+        let character_id = db_sim_core::character_roster::find_by_kit(
+            &player.loadout.main,
+            &player.loadout.secondary,
+            &player.loadout.trinket,
+        )
+        .map_or("unknown", |profile| profile.id.wire_name());
         Self {
             player_id: player.id.clone(),
             team: player.team,
@@ -784,6 +776,7 @@ impl WirePlayer {
             position: WirePosition::from_core(player.position),
             collision_center: WirePosition::from_core(player.collision_center),
             collision_radius: player.collision_radius,
+            character_id,
             loadout: WireLoadout {
                 main: player.loadout.main.clone(),
                 secondary: player.loadout.secondary.clone(),
@@ -1674,35 +1667,27 @@ impl WireBotAction {
     }
 }
 
-/// The one fighter plus the item catalog, for the loadout picker. Static content, not
+/// The four launch characters and their fixed kits, for character selection. Static content, not
 /// match state — callable without a live handle.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WireRoster {
     schema_version: u32,
-    fighter: WireFighter,
-    items: Vec<WireItem>,
+    characters: Vec<WireCharacter>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WireFighter {
+struct WireCharacter {
     id: &'static str,
     display_name: &'static str,
+    role: &'static str,
     max_health: u16,
-    range_tier: &'static str,
     movement_class: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WireItem {
-    id: &'static str,
-    display_name: &'static str,
-    slot: &'static str,
-    ammo_policy: &'static str,
-    starting_ammo: u16,
-    ability: WireAbility,
+    movement_allowance: i32,
+    shot1: WireAbility,
+    shot2_or_melee: WireAbility,
+    special: WireAbility,
 }
 
 /// An ability's selection-relevant shape. Deliberately excludes resolution internals
@@ -1746,25 +1731,20 @@ impl WireAbility {
 }
 
 pub(crate) fn serialize_roster() -> Result<Vec<u8>, serde_json::Error> {
-    let fighter = character::fighter();
     let roster = WireRoster {
         schema_version: db_sim_core::client_contract::CLIENT_CONTRACT_VERSION,
-        fighter: WireFighter {
-            id: fighter.id,
-            display_name: fighter.display_name,
-            max_health: fighter.max_health,
-            range_tier: fighter.range_tier.wire_name(),
-            movement_class: fighter.movement.wire_name(),
-        },
-        items: character::LAUNCH_ITEMS
+        characters: db_sim_core::character_roster::LAUNCH_CHARACTERS
             .iter()
-            .map(|item| WireItem {
-                id: item.id,
-                display_name: item.display_name,
-                slot: item.slot.wire_name(),
-                ammo_policy: item.ammo_policy.wire_name(),
-                starting_ammo: item.starting_ammo,
-                ability: WireAbility::from_core(&item.ability),
+            .map(|profile| WireCharacter {
+                id: profile.id.wire_name(),
+                display_name: profile.name,
+                role: profile.role,
+                max_health: profile.max_health,
+                movement_class: profile.movement_class.wire_name(),
+                movement_allowance: profile.movement_allowance,
+                shot1: WireAbility::from_core(&profile.shot1),
+                shot2_or_melee: WireAbility::from_core(&profile.shot2_or_melee),
+                special: WireAbility::from_core(&profile.special),
             })
             .collect(),
     };

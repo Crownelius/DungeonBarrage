@@ -43,7 +43,7 @@ public sealed class LiveMatchTests
         Assert.Single(move.Events);
         Assert.IsType<ClientEntityMovedEvent>(move.Events[0]);
 
-        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 45_000, 2_500, null);
+        var ability = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 0, 2_500, null);
         Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
 
         // The concrete gameplay facts a live-generated command id cannot change: real damage
@@ -140,47 +140,38 @@ public sealed class LiveMatchTests
     }
 
     [Fact]
-    public async Task Every_projectile_weapon_emits_a_trace_that_reaches_its_impact()
+    public async Task Every_normal_projectile_action_emits_a_trace_that_reaches_its_impact()
     {
         var roster = RosterCatalog.Get();
-        var projectileItems = roster.Items
-            .Where(item =>
-                item.Ability.AttackShape == ClientAttackShape.Projectile
-                && item.Slot is ClientAbilitySlot.Main or ClientAbilitySlot.Secondary)
+        var projectileItems = roster.Characters
+            .SelectMany(character => new[]
+            {
+                (CharacterId: character.Id, Ability: character.Shot1),
+                (CharacterId: character.Id, Ability: character.Shot2OrMelee),
+            })
+            .Where(entry => entry.Ability.AttackShape == ClientAttackShape.Projectile)
             .ToList();
-        Assert.True(projectileItems.Count >= 8, "launch roster must include the eight ranged items plus their one-shot copies");
+        Assert.True(projectileItems.Count >= 5, "launch roster must expose its normal projectile actions");
 
         foreach (var item in projectileItems)
         {
-            var slot = item.Slot switch
-            {
-                ClientAbilitySlot.Secondary => ClientAbilitySlot.Secondary,
-                ClientAbilitySlot.Trinket => ClientAbilitySlot.Trinket,
-                _ => ClientAbilitySlot.Main,
-            };
-            var loadout = slot switch
-            {
-                ClientAbilitySlot.Secondary => LocalMatchEnvelope.LaunchDefaultLoadout with { Secondary = item.Id },
-                ClientAbilitySlot.Trinket => LocalMatchEnvelope.LaunchDefaultLoadout with { Trinket = item.Id },
-                _ => LocalMatchEnvelope.LaunchDefaultLoadout with { Main = item.Id },
-            };
-
-            await using var live = await CreateLiveOnAsync("crow-perch", loadout);
+            var slot = item.Ability.Slot;
+            await using var live = await CreateLiveOnAsync("crow-perch", item.CharacterId);
             _ = await live.SubmitMoveAsync(1024);
             var ability = await live.SubmitAbilityAsync(slot, 45_000, 5_000, null);
             Assert.Equal(ClientTransitionDisposition.Accepted, ability.Disposition);
 
             var traces = ability.Events.OfType<ClientProjectileTraceEvent>().Select(e => e.Trace).ToList();
-            Assert.True(traces.Count > 0, $"{item.Id} must publish at least one projectile trace");
+            Assert.True(traces.Count > 0, $"{item.Ability.Id} must publish at least one projectile trace");
             foreach (var trace in traces)
             {
-                Assert.True(trace.Samples.Count >= 2, $"{item.Id} must sample more than the origin");
+                Assert.True(trace.Samples.Count >= 2, $"{item.Ability.Id} must sample more than the origin");
                 Assert.Equal(0u, trace.Samples[0].Tick);
                 var last = trace.Samples[trace.Samples.Count - 1];
                 Assert.Equal(trace.TerminalImpact.Tick, last.Tick);
                 Assert.True(
                     ProjectilePlayback.LastSampleTick(trace) > 0,
-                    $"{item.Id} flight must last more than a single tick so playback can show the hit");
+                    $"{item.Ability.Id} flight must last more than a single tick so playback can show the hit");
             }
         }
     }
@@ -226,7 +217,7 @@ public sealed class LiveMatchTests
             "Ownership transfers to the returned LiveMatch, which every caller disposes via " +
             "'await using'.")]
     private static Task<LiveMatch> CreateLiveOnAsync(string mapId) =>
-        CreateLiveOnAsync(mapId, LocalMatchEnvelope.LaunchDefaultLoadout);
+        CreateLiveOnAsync(mapId, LocalMatchEnvelope.LaunchDefaultCharacterId);
 
     [SuppressMessage(
         "Reliability",
@@ -234,7 +225,7 @@ public sealed class LiveMatchTests
         Justification =
             "Ownership transfers to the returned LiveMatch, which every caller disposes via " +
             "'await using'.")]
-    private static async Task<LiveMatch> CreateLiveOnAsync(string mapId, ClientLoadout humanLoadout)
+    private static async Task<LiveMatch> CreateLiveOnAsync(string mapId, string humanCharacterId)
     {
         var request = LocalMatchEnvelope.HumanVsBot(
             LocalMatchSession.SimulationVersion,
@@ -242,7 +233,7 @@ public sealed class LiveMatchTests
             seed: 12345,
             matchId: "test-match",
             mapId: mapId,
-            humanLoadout: humanLoadout);
+            humanCharacterId: humanCharacterId);
         var session = LocalMatchSession.Create(
             System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options));
         var createResponse = System.Text.Json.JsonSerializer.Deserialize<ClientCreateResponse>(
@@ -252,13 +243,13 @@ public sealed class LiveMatchTests
     }
 
     [Fact]
-    public async Task A_ramshot_with_correct_elevation_and_power_hits_the_opponent_on_crow_perch()
+    public async Task Crows_precision_shot_hits_the_opponent_on_crow_perch()
     {
         await using var live = await CreateLiveOnAsync("crow-perch");
         _ = await live.SubmitMoveAsync(1024);
         var defenderId = live.CurrentSnapshot.Players.First(p => p.PlayerId != live.CurrentSnapshot.ActivePlayerId).PlayerId;
         var hpBefore = live.CurrentSnapshot.Players.First(p => p.PlayerId == defenderId).Health;
-        var transition = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 27_500, 7_800, null);
+        var transition = await live.SubmitAbilityAsync(ClientAbilitySlot.Main, 0, 2_500, null);
         var hpAfter = live.CurrentSnapshot.Players.First(p => p.PlayerId == defenderId).Health;
         Assert.Equal(ClientTransitionDisposition.Accepted, transition.Disposition);
         Assert.True(hpAfter < hpBefore, $"Expected damage, before={hpBefore}, after={hpAfter}");

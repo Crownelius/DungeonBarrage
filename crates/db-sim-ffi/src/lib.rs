@@ -209,9 +209,7 @@ fn is_appearance_id(value: &str) -> bool {
 fn validate_config_adapter_fields(config: &db_sim_core::match_setup::MatchConfig) -> bool {
     is_definition_id(&config.map_id)
         && config.players.iter().all(|player| {
-            is_definition_id(&player.loadout.main)
-                && is_definition_id(&player.loadout.secondary)
-                && is_definition_id(&player.loadout.melee_tool)
+            is_definition_id(&player.character_id)
                 && is_appearance_id(&player.appearance.skin_id)
                 && player
                     .appearance

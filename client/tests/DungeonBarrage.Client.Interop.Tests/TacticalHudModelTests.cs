@@ -16,6 +16,7 @@ public sealed class TacticalHudModelTests
             Position: new ClientPosition(0, 0),
             CollisionCenter: new ClientPosition(0, -2048),
             CollisionRadius: 2048,
+            CharacterId: "crow",
             Loadout: new ClientLoadout("ramshot-cannon", "ramshot-shell", "trench-spade", "ember-crown"),
             Ammo: new[] { new ClientAmmoCounter(ammo, ammo, ClientAmmoPolicy.Finite) },
             TrinketCharge: charge,
@@ -74,18 +75,21 @@ public sealed class TacticalHudModelTests
         Assert.False(fullPlate.IsLowHealth);
         Assert.False(fullPlate.TrinketReady);
         Assert.Equal(0, fullPlate.TrinketCharge);
-        Assert.Equal(3, fullPlate.AmmoRemaining);
-        Assert.Equal("ramshot-cannon", fullPlate.ActiveItemName);
 
-        var lowHp = MakePlayer(50, 280, charge: 2);
+        var halfCharge = MakePlayer(50, 280, charge: 5_000);
+        var halfPlate = PlayerStatusPlateModel.Create(halfCharge);
+        Assert.True(halfPlate.HealthFraction < 0.25f);
+        Assert.True(halfPlate.IsLowHealth);
+        Assert.False(halfPlate.TrinketReady);
+        Assert.Equal(1, halfPlate.TrinketCharge);
+
+        var lowHp = MakePlayer(50, 280, charge: 10_000);
         var lowPlate = PlayerStatusPlateModel.Create(lowHp);
         Assert.True(lowPlate.HealthFraction < 0.25f);
         Assert.True(lowPlate.IsLowHealth);
         Assert.True(lowPlate.TrinketReady);
         Assert.Equal(2, lowPlate.TrinketCharge);
 
-        var customItemPlate = PlayerStatusPlateModel.Create(fullHp, activeItemName: "frostfall-shell");
-        Assert.Equal("frostfall-shell", customItemPlate.ActiveItemName);
     }
 
     [Fact]

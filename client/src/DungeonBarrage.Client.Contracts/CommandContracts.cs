@@ -47,7 +47,7 @@ public abstract record ClientMatchCommand(
         uint expectedTurnNumber,
         ulong expectedSnapshotGeneration,
         int dx) =>
-        new ClientMoveCommand(1, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration, dx);
+        new ClientMoveCommand(ClientContract.CurrentSchemaVersion, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration, dx);
 
     /// <summary>Builds an ability command.</summary>
     /// <param name="commandId">Deterministic match-unique idempotency key.</param>
@@ -71,7 +71,7 @@ public abstract record ClientMatchCommand(
         string? targetPlayerId,
         string? secondaryTargetPlayerId) =>
         new ClientAbilityCommand(
-            1,
+            ClientContract.CurrentSchemaVersion,
             commandId,
             playerId,
             expectedTurnNumber,
@@ -96,7 +96,7 @@ public abstract record ClientMatchCommand(
         ulong expectedSnapshotGeneration,
         string passiveId) =>
         new ClientPassiveChoiceCommand(
-            1,
+            ClientContract.CurrentSchemaVersion,
             commandId,
             playerId,
             expectedTurnNumber,
@@ -114,7 +114,7 @@ public abstract record ClientMatchCommand(
         string playerId,
         uint expectedTurnNumber,
         ulong expectedSnapshotGeneration) =>
-        new ClientPassCommand(1, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
+        new ClientPassCommand(ClientContract.CurrentSchemaVersion, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
 
     /// <summary>Builds a jump command.</summary>
     /// <param name="commandId">Deterministic match-unique idempotency key.</param>
@@ -127,7 +127,7 @@ public abstract record ClientMatchCommand(
         string playerId,
         uint expectedTurnNumber,
         ulong expectedSnapshotGeneration) =>
-        new ClientJumpCommand(1, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
+        new ClientJumpCommand(ClientContract.CurrentSchemaVersion, commandId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
 }
 
 /// <summary>Move horizontally by a fixed-point delta, bounded by authoritative allowance.</summary>
@@ -252,7 +252,7 @@ public sealed record ClientAbilityPreviewRequest(
         int angleMillidegrees,
         int powerBasisPoints) =>
         new(
-            SchemaVersion: 1,
+            SchemaVersion: ClientContract.CurrentSchemaVersion,
             ExpectedSnapshotGeneration: expectedSnapshotGeneration,
             PlayerId: playerId,
             Kind: "ability",

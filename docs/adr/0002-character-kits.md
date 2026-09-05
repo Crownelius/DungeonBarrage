@@ -104,3 +104,19 @@ Arzum is recommended but not applied.
   of a single expression axis was judged worth more.
 - **Cancel the in-flight core work** — would have discarded terrain, RNG, hashing, and
   ballistics, none of which depend on who owns an attack.
+
+## 2026-09-04 implementation amendment
+
+The product owner reaffirmed this ADR after the interim one-Crow, 32-item ammunition cut reduced
+meaningful choice. Character kits are again the active product model. The first shippable roster is
+deliberately narrowed from the earlier 24-character vision to four characters: Leslie, Crow, Erus,
+and Kreena. This changes release scope, not the architectural decision that characters own their
+complete movesets.
+
+The schema-2 client selects only `characterId` and presents Shot 1, Shot 2/Melee, and SS. Both normal
+actions are unlimited. SS is gauge-gated and does not consume the normal action, allowing it before
+or after the turn's normal attack. The old item catalog and loadout/ammo state remain temporarily as
+a Rust-only replay-migration bridge; they are not player-selectable content.
+
+See `docs/CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md` for the phased mechanics plan and its explicit
+list of current special-ability approximations.

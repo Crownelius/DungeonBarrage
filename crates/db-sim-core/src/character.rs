@@ -1,8 +1,9 @@
-//! The one crow fighter and the item catalog that supplies its ammunition.
+//! Legacy ability catalog and compatibility helpers.
 //!
-//! Playable cut: kits are not in the envelope. Every player is [`CROW`]; equipped items
-//! are ammo. Attack resolution still consumes [`crate::types::AbilityDefinition`] so
-//! ballistics, terrain, and damage stay on one path.
+//! Schema-2 match creation uses [`crate::character_roster`] and derives a fixed character
+//! kit. This catalog remains for deterministic replay migration and low-level resolver
+//! coverage; it is not player-selectable. Attack resolution still consumes
+//! [`crate::types::AbilityDefinition`] so all abilities share one rules path.
 
 use crate::error::{CharacterRejection, SimError, SimResult};
 use crate::fixed::{BODY_WIDTH, POSITION_SCALE};
@@ -23,6 +24,20 @@ const PROJECTILE_TIER2_MAX_TICKS: u16 = 200;
 const PROJECTILE_TIER3_SPEED: i32 = 1_500;
 const PROJECTILE_TIER3_GRAVITY: i32 = 12;
 const PROJECTILE_TIER3_MAX_TICKS: u16 = 300;
+
+/// Unlimited secondary fallback damage. It is deliberately below every finite main's
+/// per-command value and carries no terrain, displacement, or status effect.
+const SECONDARY_DAMAGE_PERCENT: u16 = 16;
+
+/// All melee/tools provide the loadout-independent ring-out route. The short reach is the
+/// positional cost; the action itself cannot disappear because a durability counter ran out.
+const MELEE_TOOL_SHOVE: SpecialEffect = SpecialEffect {
+    trigger: EffectTrigger::OnImpact,
+    kind: EffectKind::Push,
+    magnitude: 2 * POSITION_SCALE,
+    magnitude_secondary: 5 * POSITION_SCALE,
+    duration_turns: 0,
+};
 
 /// Ramshot's shove, scoped to the blast it actually makes.
 ///
@@ -191,7 +206,7 @@ const fn melee_ability(id: &'static str, display_name: &'static str) -> AbilityD
             },
             self_damage: 0,
         }),
-        effects: &[],
+        effects: &[MELEE_TOOL_SHOVE],
     }
 }
 
@@ -200,8 +215,8 @@ const fn melee_item(id: &'static str, display_name: &'static str) -> ItemDefinit
         id,
         display_name,
         slot: AbilitySlot::Special,
-        ammo_policy: AmmoPolicy::Finite,
-        starting_ammo: 4,
+        ammo_policy: AmmoPolicy::Unlimited,
+        starting_ammo: 0,
         ability: melee_ability(id, display_name),
     }
 }
@@ -259,8 +274,8 @@ const BREACH_PICK: ItemDefinition = ItemDefinition {
     id: "breach-pick",
     display_name: "Breach Pick",
     slot: AbilitySlot::Special,
-    ammo_policy: AmmoPolicy::Finite,
-    starting_ammo: 4,
+    ammo_policy: AmmoPolicy::Unlimited,
+    starting_ammo: 0,
     ability: melee_ability("breach-pick", "Breach Pick"),
 };
 
@@ -362,7 +377,7 @@ const IRON_FAN: ItemDefinition = melee_item("iron-fan", "Iron Fan");
 const HOOK_BILL: ItemDefinition = melee_item("hook-bill", "Hook Bill");
 const RUST_CLEAVER: ItemDefinition = melee_item("rust-cleaver", "Rust Cleaver");
 
-const fn shell_of(
+const fn secondary_of(
     main: AbilityDefinition,
     id: &'static str,
     display_name: &'static str,
@@ -371,34 +386,52 @@ const fn shell_of(
     ability.id = id;
     ability.display_name = display_name;
     ability.slot = AbilitySlot::BasicAlt;
+    ability.damage_percent = SECONDARY_DAMAGE_PERCENT;
+    ability.crit_damage_percent = SECONDARY_DAMAGE_PERCENT;
+    ability.crit_chance_basis_points = 0;
+    ability.strikes_per_turn = 1;
+    ability.effects = &[];
+    ability.attack = match ability.attack {
+        Attack::Projectile(mut projectile) => {
+            projectile.terrain = TerrainProfile::None;
+            Attack::Projectile(projectile)
+        }
+        Attack::Strike(mut strike) => {
+            strike.terrain = TerrainProfile::None;
+            strike.self_damage = 0;
+            Attack::Strike(strike)
+        }
+    };
     ItemDefinition {
         id,
         display_name,
         slot: AbilitySlot::BasicAlt,
-        ammo_policy: AmmoPolicy::Finite,
-        starting_ammo: 1,
+        ammo_policy: AmmoPolicy::Unlimited,
+        starting_ammo: 0,
         ability,
     }
 }
 
 const RAMSHOT_SHELL: ItemDefinition =
-    shell_of(RAMSHOT_CANNON_ABILITY, "ramshot-shell", "Ramshot Shell");
-const FROSTFALL_SHELL: ItemDefinition = shell_of(
+    secondary_of(RAMSHOT_CANNON_ABILITY, "ramshot-shell", "Ramshot Sidearm");
+const FROSTFALL_SHELL: ItemDefinition = secondary_of(
     FROSTFALL_MORTAR_ABILITY,
     "frostfall-shell",
-    "Frostfall Shell",
+    "Frostfall Sidearm",
 );
-const MOLE_CHARGE: ItemDefinition = shell_of(MOLE_DRILL_ABILITY, "mole-charge", "Mole Charge");
-const BOW_BODKIN: ItemDefinition = shell_of(RECURVE_BOW_ABILITY, "bow-bodkin", "Bow Bodkin");
-const PISTOL_MAG: ItemDefinition = shell_of(SERVICE_PISTOL_ABILITY, "pistol-mag", "Pistol Mag");
+const MOLE_CHARGE: ItemDefinition = secondary_of(MOLE_DRILL_ABILITY, "mole-charge", "Mole Sidearm");
+const BOW_BODKIN: ItemDefinition = secondary_of(RECURVE_BOW_ABILITY, "bow-bodkin", "Bow Sidearm");
+const PISTOL_MAG: ItemDefinition =
+    secondary_of(SERVICE_PISTOL_ABILITY, "pistol-mag", "Pistol Sidearm");
 const REPEATER_BELT: ItemDefinition =
-    shell_of(LINE_REPEATER_ABILITY, "repeater-belt", "Repeater Belt");
-const BOOMERANG_FINISHER: ItemDefinition = shell_of(
+    secondary_of(LINE_REPEATER_ABILITY, "repeater-belt", "Repeater Sidearm");
+const BOOMERANG_FINISHER: ItemDefinition = secondary_of(
     RETURNING_BOOMERANG_ABILITY,
     "boomerang-finisher",
-    "Boomerang Finisher",
+    "Boomerang Sidearm",
 );
-const TIDE_BLADDER: ItemDefinition = shell_of(TIDE_SPRAYER_ABILITY, "tide-bladder", "Tide Bladder");
+const TIDE_BLADDER: ItemDefinition =
+    secondary_of(TIDE_SPRAYER_ABILITY, "tide-bladder", "Tide Sidearm");
 
 const EMBER_CROWN_EFFECT: SpecialEffect = SpecialEffect {
     trigger: EffectTrigger::OnImpact,
@@ -593,17 +626,24 @@ pub fn items_in_slot(slot: AbilitySlot) -> impl Iterator<Item = &'static ItemDef
         .filter(move |candidate| candidate.slot == slot)
 }
 
-/// Equipped attack for `player` in `slot`, if the loadout item exists and belongs there.
+/// Fixed character action for `player` in `slot`.
+///
+/// The player layout still carries an authority-derived loadout while replay migration is
+/// in progress, but no client chooses those identifiers and the item catalog is not consulted.
 pub fn equipped_ability(
     player: &PlayerState,
     slot: AbilitySlot,
 ) -> Option<&'static AbilityDefinition> {
-    let equipped = item(player.loadout.item_id(slot))?;
-    if equipped.slot == slot {
-        Some(&equipped.ability)
-    } else {
-        None
-    }
+    crate::character_roster::for_player(player)
+        .and_then(|profile| profile.ability(slot))
+        .or_else(|| {
+            // Versioned replays may still contain the retired item layout. New match
+            // creation cannot reach this fallback: it accepts a launch character id and
+            // derives the fixed kit.
+            item(player.loadout.item_id(slot))
+                .filter(|definition| definition.slot == slot)
+                .map(|definition| &definition.ability)
+        })
 }
 
 /// Starting ammo counters for a validated loadout.
@@ -633,7 +673,7 @@ fn ammo_for_slot(loadout: &Loadout, slot: AbilitySlot) -> SimResult<AmmoCounter>
     })
 }
 
-/// Validates the crow fighter and the item catalog.
+/// Validates the retained legacy fighter and item catalog.
 ///
 /// # Errors
 ///
@@ -672,8 +712,28 @@ pub fn validate_roster() -> SimResult<()> {
                     });
                 }
             }
-            (AbilitySlot::BasicAlt, AmmoPolicy::Finite) => {
-                if definition.starting_ammo != 1 {
+            (AbilitySlot::BasicAlt, AmmoPolicy::Unlimited) => {
+                let terrain_free = match definition.ability.attack {
+                    Attack::Projectile(projectile) => projectile.terrain == TerrainProfile::None,
+                    Attack::Strike(strike) => strike.terrain == TerrainProfile::None,
+                };
+                if definition.starting_ammo != 0
+                    || definition.ability.damage_percent != SECONDARY_DAMAGE_PERCENT
+                    || definition.ability.strikes_per_turn != 1
+                    || !definition.ability.effects.is_empty()
+                    || !terrain_free
+                {
+                    return Err(SimError::InvalidCharacter {
+                        reason: CharacterRejection::StatOutOfRange,
+                    });
+                }
+            }
+            (AbilitySlot::Special, AmmoPolicy::Unlimited) => {
+                if definition.starting_ammo != 0
+                    || !definition.ability.effects.iter().any(|effect| {
+                        matches!(effect.kind, EffectKind::Knockback | EffectKind::Push)
+                    })
+                {
                     return Err(SimError::InvalidCharacter {
                         reason: CharacterRejection::StatOutOfRange,
                     });
@@ -751,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_crow_is_playable() {
+    fn legacy_catalog_exposes_only_its_retained_crow_definition() {
         assert_eq!(find(CROW_ID).map(|fighter| fighter.id), Some(CROW_ID));
         assert!(find("huck").is_none());
         assert!(find("arzum").is_none());
@@ -759,11 +819,22 @@ mod tests {
     }
 
     #[test]
-    fn default_ammo_matches_the_launch_loadout() {
-        let Ok(ammo) = ammo_for_loadout(&Loadout::launch_default()) else {
-            panic!("default loadout");
-        };
-        assert_eq!(ammo, DEFAULT_AMMO);
+    fn default_state_uses_crows_fixed_unlimited_kit() {
+        let loadout = Loadout::launch_default();
+        assert_eq!(
+            crate::character_roster::find_by_kit(
+                &loadout.main,
+                &loadout.secondary,
+                &loadout.trinket,
+            )
+            .map(|profile| profile.id.wire_name()),
+            Some("crow")
+        );
+        assert!(DEFAULT_AMMO.iter().all(|counter| {
+            counter.policy == AmmoPolicy::Unlimited
+                && counter.remaining == 0
+                && counter.maximum == 0
+        }));
         assert!(item("ramshot-cannon").is_some());
         assert!(item("ramshot-shell").is_some());
         assert!(item("trench-spade").is_some());
@@ -771,7 +842,28 @@ mod tests {
         let Some(shell) = item("ramshot-shell") else {
             panic!("ramshot-shell");
         };
-        assert_eq!(shell.starting_ammo, 1);
+        assert_eq!(shell.starting_ammo, 0);
+        assert_eq!(shell.ammo_policy, AmmoPolicy::Unlimited);
+        assert_eq!(shell.ability.damage_percent, SECONDARY_DAMAGE_PERCENT);
+        assert!(shell.ability.effects.is_empty());
+    }
+
+    #[test]
+    fn every_loadout_keeps_unlimited_damage_and_ring_out_routes() {
+        for secondary in items_in_slot(AbilitySlot::BasicAlt) {
+            assert_eq!(secondary.ammo_policy, AmmoPolicy::Unlimited);
+            assert_eq!(secondary.ability.damage_percent, SECONDARY_DAMAGE_PERCENT);
+            assert!(secondary.ability.effects.is_empty());
+        }
+
+        for tool in items_in_slot(AbilitySlot::Special) {
+            assert_eq!(tool.ammo_policy, AmmoPolicy::Unlimited);
+            assert!(tool.ability.effects.iter().any(|effect| {
+                matches!(effect.kind, EffectKind::Knockback | EffectKind::Push)
+                    && effect.magnitude > 0
+                    && effect.magnitude_secondary > 0
+            }));
+        }
     }
 
     #[test]

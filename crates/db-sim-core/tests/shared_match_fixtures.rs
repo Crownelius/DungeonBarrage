@@ -242,17 +242,8 @@ enum MatchModeDto {
 struct MatchPlayerConfigDto {
     player_id: String,
     team: u8,
-    loadout: LoadoutDto,
+    character_id: String,
     appearance: AppearanceDto,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LoadoutDto {
-    main: String,
-    secondary: String,
-    melee_tool: String,
-    trinket: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,12 +377,7 @@ impl From<MatchPlayerConfigDto> for MatchPlayerConfig {
         Self {
             player_id: value.player_id,
             team: value.team,
-            loadout: db_sim_core::types::Loadout {
-                main: value.loadout.main,
-                secondary: value.loadout.secondary,
-                melee_tool: value.loadout.melee_tool,
-                trinket: value.loadout.trinket,
-            },
+            character_id: value.character_id,
             appearance: Appearance {
                 skin_id: value.appearance.skin_id,
                 ability_skin_ids: value.appearance.ability_skin_ids,

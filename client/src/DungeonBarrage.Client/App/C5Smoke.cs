@@ -17,6 +17,9 @@ internal sealed record C5SmokeOptions(string ReportPath, string ScreenshotPath)
     /// <summary>Where the authoritative impact-cue frame is written, derived from <see cref="ScreenshotPath"/>.</summary>
     internal string ImpactScreenshotPath => DerivedScreenshotPath("-impact");
 
+    /// <summary>Where the live dotted authoritative aim guide is captured before firing.</summary>
+    internal string AimScreenshotPath => DerivedScreenshotPath("-aim");
+
     internal static C5SmokeOptions? Parse(IReadOnlyList<string> arguments)
     {
         string? report = null;
@@ -134,6 +137,8 @@ internal sealed record C5SmokeReport(
     bool HitCueObserved,
     bool ImpactCueObserved,
     bool CameraImpulseObserved,
+    bool AimGuideObserved,
+    bool AimGuidePredictedHit,
     string? DefenderPlayerId,
     ushort DefenderHealthBeforeAbility,
     ushort DefenderHealthAfterAbility,
@@ -146,11 +151,13 @@ internal sealed record C5SmokeReport(
     int FireScreenshotHeight,
     int ImpactScreenshotWidth,
     int ImpactScreenshotHeight,
+    int AimScreenshotWidth,
+    int AimScreenshotHeight,
     int ScreenshotWidth,
     int ScreenshotHeight,
     string MapId,
-    string LoadoutMain,
-    bool UsedLoadoutPicker,
+    string CharacterId,
+    bool UsedCharacterSelect,
     bool MatchReachedTerminalOutcome)
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerOptions.Default)

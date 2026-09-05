@@ -17,6 +17,7 @@ public sealed class CharacterAnimationFrameResolverTests
             Position: new ClientPosition(0, 0),
             CollisionCenter: new ClientPosition(0, -2048),
             CollisionRadius: 2048,
+            CharacterId: "crow",
             Loadout: new ClientLoadout(mainWeapon, "service-pistol", "heavy-flail", "ember-crown"),
             Ammo: Array.Empty<ClientAmmoCounter>(),
             TrinketCharge: 0,
@@ -88,6 +89,55 @@ public sealed class CharacterAnimationFrameResolverTests
         Assert.Equal("crow_drill", frame.SheetKey);
         Assert.Equal(3, frame.Row);
         Assert.Equal(2, frame.Col);
+    }
+
+    [Fact]
+    public void Cannon_aim_and_fire_never_select_ammunition_only_cells()
+    {
+        var model = CreateModel("ramshot-cannon");
+        foreach (var angle in new[] { -0.6f, 0f, 0.6f, 1.2f })
+        {
+            var aim = CharacterAnimationFrameResolver.Resolve(
+                model, false, null, 0, true, false, false, angle);
+            Assert.Equal((2, 0), (aim.Row, aim.Col));
+        }
+
+        var blast = CharacterAnimationFrameResolver.Resolve(
+            model, false, new ActorPresentationCue("p1", ActorPresentationCueKind.Fire, 0.2f, 1, "ramshot-cannon"), 0, false, false, false);
+        var recovery = CharacterAnimationFrameResolver.Resolve(
+            model, false, new ActorPresentationCue("p1", ActorPresentationCueKind.Fire, 0.8f, 1, "ramshot-cannon"), 0, false, false, false);
+        Assert.Equal((2, 1), (blast.Row, blast.Col));
+        Assert.Equal(3, recovery.Row);
+        Assert.InRange(recovery.Col, 0, 1);
+    }
+
+    [Theory]
+    [InlineData("line-repeater")]
+    [InlineData("recurve-bow")]
+    [InlineData("returning-boomerang")]
+    public void Firing_animation_avoids_known_ammunition_columns(string weapon)
+    {
+        var model = CreateModel(weapon);
+        var allowedColumns = weapon switch
+        {
+            "line-repeater" => new[] { 0, 1 },
+            "recurve-bow" => new[] { 0, 1, 2, 4 },
+            "returning-boomerang" => new[] { 0, 1, 4 },
+            _ => throw new ArgumentOutOfRangeException(nameof(weapon), weapon, null),
+        };
+        for (var frameIndex = 0; frameIndex < 20; frameIndex++)
+        {
+            var cue = new ActorPresentationCue(
+                "p1",
+                ActorPresentationCueKind.Fire,
+                frameIndex / 20f,
+                1,
+                weapon);
+            var frame = CharacterAnimationFrameResolver.Resolve(
+                model, false, cue, 0, false, false, false);
+            Assert.Equal(3, frame.Row);
+            Assert.Contains(frame.Col, allowedColumns);
+        }
     }
 
     [Fact]

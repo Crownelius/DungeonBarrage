@@ -33,5 +33,5 @@ public sealed record ClientAuthorityTimeout(
         string playerId,
         uint expectedTurnNumber,
         ulong expectedSnapshotGeneration) =>
-        new(1, actionId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
+        new(ClientContract.CurrentSchemaVersion, actionId, playerId, expectedTurnNumber, expectedSnapshotGeneration);
 }

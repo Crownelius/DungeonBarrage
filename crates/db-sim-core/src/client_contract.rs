@@ -26,7 +26,7 @@ use crate::types::{
 ///
 /// Increment this when a field, enum meaning, ordering rule, or normalization rule changes.
 /// It is independent of simulation, content, protocol, and any future C ABI versions.
-pub const CLIENT_CONTRACT_VERSION: u32 = 1;
+pub const CLIENT_CONTRACT_VERSION: u32 = 2;
 
 /// An integer position in authoritative fixed-point simulation units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,13 +614,13 @@ mod tests {
     fn player_config(
         player_id: &str,
         team: u8,
-        _character_id: &str,
+        character_id: &str,
         skin_id: &str,
     ) -> MatchPlayerConfig {
         MatchPlayerConfig {
             player_id: player_id.to_owned(),
             team,
-            loadout: crate::types::Loadout::launch_default(),
+            character_id: character_id.to_owned(),
             appearance: Appearance {
                 skin_id: skin_id.to_owned(),
                 ability_skin_ids: [
@@ -811,8 +811,8 @@ mod tests {
             alpha.position,
             snapshot_position(authoritative_alpha.position)
         );
-        assert_eq!(alpha.loadout.main, "ramshot-cannon");
-        assert_eq!(alpha.ammo.first().map(|ammo| ammo.remaining), Some(2));
+        assert_eq!(alpha.loadout.main, "crow-precision-57");
+        assert_eq!(alpha.ammo.first().map(|ammo| ammo.remaining), Some(0));
         assert_eq!(alpha.statuses.len(), 2);
         assert!(
             alpha
@@ -897,10 +897,10 @@ mod tests {
             map_id: "horizontal-test-array".to_owned(),
             mode: MatchMode::TurnBased,
             players: vec![
-                player_config("delta", 4, "huck", "skin-delta"),
-                player_config("bravo", 2, "huck", "skin-bravo"),
-                player_config("alpha", 1, "huck", "skin-alpha"),
-                player_config("charlie", 3, "huck", "skin-charlie"),
+                player_config("delta", 4, "leslie", "skin-delta"),
+                player_config("bravo", 2, "crow", "skin-bravo"),
+                player_config("alpha", 1, "erus", "skin-alpha"),
+                player_config("charlie", 3, "kreena", "skin-charlie"),
             ],
         };
         let Ok(mut state) = build_initial_state(&config) else {

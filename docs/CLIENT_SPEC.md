@@ -2,7 +2,7 @@
 
 **Status:** Version 2 implementation specification
 
-**Updated:** 2026-08-26
+**Updated:** 2026-09-04
 
 **Launch client:** Godot 4.7.1 .NET, C# targeting `net10.0`
 
@@ -12,7 +12,7 @@
 
 **Online boundary:** authoritative server protocol; no client prediction initially
 
-**Related:** [ADR 0006](./adr/0006-client-and-server-language-boundaries.md) · [ADR 0004](./adr/0004-native-desktop-rust-csharp.md) · [ADR 0002](./adr/0002-character-kits.md) · [ADR 0005](./adr/0005-destructible-blocks-with-health.md) · [SECURITY_BASELINE.md](./SECURITY_BASELINE.md) · [CHARACTERS.md](./CHARACTERS.md) · [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PROGRAM_PLAN.md](./PROGRAM_PLAN.md)
+**Related:** [Character implementation plan](./CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md) · [ADR 0006](./adr/0006-client-and-server-language-boundaries.md) · [ADR 0004](./adr/0004-native-desktop-rust-csharp.md) · [ADR 0002](./adr/0002-character-kits.md) · [ADR 0005](./adr/0005-destructible-blocks-with-health.md) · [SECURITY_BASELINE.md](./SECURITY_BASELINE.md) · [CHARACTERS.md](./CHARACTERS.md) · [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) · [PROGRAM_PLAN.md](./PROGRAM_PLAN.md)
 
 This document defines an implementable native client, including the Rust contracts it requires.
 It deliberately separates what exists from what must be built. A milestone is complete only when
@@ -38,9 +38,10 @@ In particular:
 
 - ADR 0006 governs the current language boundaries: Godot/C# presentation, Rust simulation, and a
   future Rust-native server.
-- ADR 0002 replaces the old three-weapon loadout with fixed character kits. Ammunition and the
-  `main | secondary | meleeTool` equipment contract are retired. Client UI uses
-  `basic | basicAlt | special`.
+- ADR 0002 replaces player-authored equipment with fixed character kits. The schema-2 client sends
+  only `characterId` and presents Shot 1, Shot 2/Melee, and SS. Rust temporarily retains
+  `main | secondary | meleeTool | trinket` internal/wire names and unlimited ammo counters as a
+  replay-migration bridge; they are not player choices or HUD resources.
 - ADR 0004's web removal still stands, but its ASP.NET/C# server choice is superseded by ADR 0006.
 - ADR 0005 governs destructible block health and mask derivation.
 - `PLATFORM_STRATEGY.md` remains useful for general authority, networking, privacy, and performance
@@ -118,8 +119,9 @@ that platform, completes the smoke scenario in §20.5.
 
 ## 3. Truthful current state
 
-The committed baseline from which this v2 work began was `fa7f0af`. C1 and C2 are now implemented
-on `feat/c1-outcome-provenance`; a later capability remains incomplete until its gate in §20 passes:
+The committed baseline from which this v2 work began was `fa7f0af`. C1 and C2 are implemented on
+`feat/c1-outcome-provenance`; the schema-2 four-character migration is in verification and remains
+incomplete until its automated and renderer gates in §20 pass:
 
 - `db-sim-core` has real match orchestration, maps, movement, ability resolution, terrain blocks,
   passive interruption, status ticking, victory, and frozen versioned golden vectors in the
@@ -363,10 +365,10 @@ terminal LF. The shared C2 fixtures compare those bytes directly; no test-only s
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "matchId": "local-opaque-id",
-  "simulationVersion": 6,
-  "contentVersion": 1,
+  "simulationVersion": 10,
+  "contentVersion": 7,
   "match": {
     "seed": 12345,
     "mapId": "horizontal-test-array",
@@ -375,7 +377,7 @@ terminal LF. The shared C2 fixtures compare those bytes directly; no test-only s
       {
         "playerId": "local-player-1",
         "team": 0,
-        "characterId": "huck",
+        "characterId": "crow",
         "appearance": {
           "skinId": "default",
           "abilitySkinIds": ["default", "default", "default"],
@@ -385,7 +387,7 @@ terminal LF. The shared C2 fixtures compare those bytes directly; no test-only s
       {
         "playerId": "local-bot-1",
         "team": 1,
-        "characterId": "zeke",
+        "characterId": "erus",
         "appearance": {
           "skinId": "default",
           "abilitySkinIds": ["default", "default", "default"],
@@ -448,7 +450,7 @@ move:
 ability:
   { schemaVersion, commandId, playerId, expectedTurnNumber,
     expectedSnapshotGeneration, kind: "ability",
-    slot: "basic" | "basicAlt" | "special",
+    slot: "main" | "secondary" | "trinket",
     angleMillidegrees, powerBasisPoints,
     targetPlayerId: string | null,
     secondaryTargetPlayerId: string | null }
@@ -632,22 +634,22 @@ Exact Backlash cost and legal target sets come from a read-only Rust preview que
 - Is available locally for training. The initial remote client does not run the core for prediction;
   a future server endpoint/event supplies any remote guide.
 
-ABI schema version 1 has one closed preview request:
+Client schema version 2 has one closed preview request:
 
 ```text
 AbilityPreviewRequest
-  schemaVersion: 1
+  schemaVersion: 2
   expectedSnapshotGeneration
   playerId
   kind: "ability"
-  slot: "basic" | "basicAlt" | "special"
+  slot: "main" | "secondary" | "trinket"
   angleMillidegrees
   powerBasisPoints
   targetPlayerId: string | null
   secondaryTargetPlayerId: string | null
 
 AbilityPreviewResponse
-  schemaVersion: 1
+  schemaVersion: 2
   snapshotGeneration
   legal
   rejectionReason: PreviewRejection | null
@@ -675,7 +677,8 @@ not external aim assistance.
 
 ### 8.1 Export surface
 
-The initial gameplay ABI is intentionally small. It is ABI version 1 and replaces the unshipped,
+The gameplay ABI is intentionally small. Its current ABI version is 4; the schema-2 migration did
+not change exported function signatures. The original ABI replaced the unshipped,
 non-versioned scaffold: `db_sim_create`, `db_sim_destroy`, `db_sim_state_hash`, and
 `db_sim_string_free` are retired rather than supported in parallel.
 
@@ -737,8 +740,8 @@ struct. A `Vec` allocation with hidden spare capacity does not cross this two-fi
 
 ```text
 MatchCreateResponse =
-  { schemaVersion: 1, created: true, diagnostic: null, snapshot: MatchSnapshot }
-  | { schemaVersion: 1, created: false,
+  { schemaVersion: 2, created: true, diagnostic: null, snapshot: MatchSnapshot }
+  | { schemaVersion: 2, created: false,
       diagnostic: { code: "invalidConfig", message: string }, snapshot: null }
 ```
 
@@ -1141,7 +1144,7 @@ During an input window the HUD exposes:
 - Current and upcoming turn order.
 - Wind direction and numeric magnitude.
 - Quantized angle and power.
-- Selected Basic/Basic Alt/Special name, icon, availability, and concise rule.
+- Selected Shot 1/Shot 2-or-melee/SS name, icon, availability, and concise rule.
 - Special gauge as numeric percent and progress graphic.
 - Movement allowance remaining.
 - Health/max health and statuses for every player.

@@ -42,7 +42,7 @@ public sealed class StatusTranslationTests
     public void An_unsupported_schema_version_is_distinguished_from_malformed_input()
     {
         var text = Encoding.UTF8.GetString(Fixtures.Read("create-request.json").Span)
-            .Replace("\"schemaVersion\":1", "\"schemaVersion\":999", StringComparison.Ordinal);
+            .Replace("\"schemaVersion\":2", "\"schemaVersion\":999", StringComparison.Ordinal);
 
         var error = Assert.Throws<NativeSimulationException>(
             () => LocalMatchSession.Create(Encoding.UTF8.GetBytes(text)));

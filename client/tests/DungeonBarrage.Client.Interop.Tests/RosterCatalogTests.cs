@@ -8,47 +8,41 @@ namespace DungeonBarrage.Client.Interop.Tests;
 public sealed class RosterCatalogTests
 {
     [Fact]
-    public void Get_returns_the_crow_and_thirty_two_items_with_no_match_created()
+    public void Get_returns_the_four_complete_character_kits_without_a_match()
     {
-        // No LocalMatchSession anywhere in this test — the whole point is that a roster
-        // listing needs no live match to exist first.
         var roster = RosterCatalog.Get();
 
-        Assert.Equal(1u, roster.SchemaVersion);
-        Assert.Equal("crow", roster.Fighter.Id);
-        Assert.Equal((ushort)280, roster.Fighter.MaxHealth);
-        Assert.Equal(32, roster.Items.Count);
-
-        var ids = roster.Items.Select(item => item.Id).ToArray();
-        foreach (var expected in new[]
-                 {
-                     "ramshot-cannon", "recurve-bow", "line-repeater", "returning-boomerang",
-                     "ramshot-shell", "trench-spade", "longsword", "ember-crown", "gale-anklet",
-                 })
+        Assert.Equal(ClientContract.CurrentSchemaVersion, roster.SchemaVersion);
+        Assert.Equal(["leslie", "crow", "erus", "kreena"], roster.Characters.Select(c => c.Id));
+        Assert.All(roster.Characters, character =>
         {
-            Assert.Contains(expected, ids);
-        }
+            Assert.True(character.MaxHealth > 0);
+            Assert.True(character.MovementAllowance > 0);
+            Assert.Equal(ClientAbilitySlot.Main, character.Shot1.Slot);
+            Assert.Equal(ClientAbilitySlot.Secondary, character.Shot2OrMelee.Slot);
+            Assert.Equal(ClientAbilitySlot.Trinket, character.Special.Slot);
+        });
     }
 
     [Fact]
-    public void Get_reports_a_strike_item_with_its_range_and_a_projectile_without_one()
+    public void Get_exposes_each_character_tactical_shape()
     {
         var roster = RosterCatalog.Get();
 
-        var sword = Assert.Single(roster.Items, item => item.Id == "longsword");
-        Assert.Equal(ClientAttackShape.Strike, sword.Ability.AttackShape);
-        Assert.NotNull(sword.Ability.Range);
-        Assert.Equal(ClientAbilitySlot.MeleeTool, sword.Slot);
-        Assert.Equal(ClientAmmoPolicy.Finite, sword.AmmoPolicy);
+        var leslie = Assert.Single(roster.Characters, c => c.Id == "leslie");
+        Assert.Equal("Ant Glob", leslie.Shot1.DisplayName);
+        Assert.Equal(ClientAttackShape.Strike, leslie.Shot2OrMelee.AttackShape);
+        Assert.NotNull(leslie.Shot2OrMelee.Range);
 
-        var crown = Assert.Single(roster.Items, item => item.Id == "ember-crown");
-        Assert.Equal(ClientAbilitySlot.Trinket, crown.Slot);
-        Assert.Equal(ClientAmmoPolicy.Unlimited, crown.AmmoPolicy);
+        var crow = Assert.Single(roster.Characters, c => c.Id == "crow");
+        Assert.Equal("5.7 High-Velocity Precision", crow.Shot1.DisplayName);
+        Assert.Equal("Aerial Barrage", crow.Special.DisplayName);
 
-        var ramshot = Assert.Single(roster.Items, item => item.Id == "ramshot-cannon");
-        Assert.Equal(ClientAttackShape.Projectile, ramshot.Ability.AttackShape);
-        Assert.Null(ramshot.Ability.Range);
-        Assert.Equal(ClientAbilitySlot.Main, ramshot.Slot);
+        var erus = Assert.Single(roster.Characters, c => c.Id == "erus");
+        Assert.Equal("Celestial Staff Battery", erus.Special.DisplayName);
+
+        var kreena = Assert.Single(roster.Characters, c => c.Id == "kreena");
+        Assert.Equal("Global Magic Arrow", kreena.Special.DisplayName);
     }
 
     [Fact]
@@ -57,9 +51,6 @@ public sealed class RosterCatalogTests
         var first = RosterCatalog.Get();
         var second = RosterCatalog.Get();
 
-        Assert.Equal(first.Fighter.Id, second.Fighter.Id);
-        Assert.Equal(
-            first.Items.Select(item => item.Id),
-            second.Items.Select(item => item.Id));
+        Assert.Equal(first.Characters.Select(character => character.Id), second.Characters.Select(character => character.Id));
     }
 }

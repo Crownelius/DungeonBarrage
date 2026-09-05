@@ -18,13 +18,13 @@ public sealed class BotDecisionTests
     {
         using var session = LocalMatchSession.Create(Fixtures.Read("create-request.json").Span);
 
-        var request = new ClientBotDecisionRequest(1, "a-local-player", ClientBotDifficulty.Standard, 1);
+        var request = new ClientBotDecisionRequest(ClientContract.CurrentSchemaVersion, "a-local-player", ClientBotDifficulty.Standard, 1);
         var requestBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
         var responseBytes = await session.DecideBotActionAsync(requestBytes);
 
         var decision = JsonSerializer.Deserialize<ClientBotDecision>(responseBytes, ClientEnvelope.Options);
         Assert.NotNull(decision);
-        Assert.Equal(1u, decision.SchemaVersion);
+        Assert.Equal(ClientContract.CurrentSchemaVersion, decision.SchemaVersion);
         Assert.True(
             decision is ClientBotMoveDecision or ClientBotAbilityDecision or ClientBotPassiveChoiceDecision
                 or ClientBotPassDecision or ClientBotJumpDecision,
@@ -34,7 +34,7 @@ public sealed class BotDecisionTests
     [Fact]
     public void A_jump_decision_is_not_deserialized_as_a_pass()
     {
-        const string json = "{\"schemaVersion\":1,\"kind\":\"jump\"}";
+        const string json = "{\"schemaVersion\":2,\"kind\":\"jump\"}";
 
         var decision = JsonSerializer.Deserialize<ClientBotDecision>(json, ClientEnvelope.Options);
 
@@ -47,7 +47,7 @@ public sealed class BotDecisionTests
         using var session = LocalMatchSession.Create(Fixtures.Read("create-request.json").Span);
         var before = await session.SnapshotAsync();
 
-        var request = new ClientBotDecisionRequest(1, "a-local-player", ClientBotDifficulty.Casual, 1);
+        var request = new ClientBotDecisionRequest(ClientContract.CurrentSchemaVersion, "a-local-player", ClientBotDifficulty.Casual, 1);
         var requestBytes = JsonSerializer.SerializeToUtf8Bytes(request, ClientEnvelope.Options);
         for (var i = 0; i < 5; i++)
         {

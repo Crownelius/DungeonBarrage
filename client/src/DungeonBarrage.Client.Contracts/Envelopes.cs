@@ -3,6 +3,13 @@ using System.Text.Json.Serialization;
 
 namespace DungeonBarrage.Client.Contracts;
 
+/// <summary>Version of the strict native/client JSON contract.</summary>
+public static class ClientContract
+{
+    /// <summary>Character-id match creation and character identity in snapshots.</summary>
+    public const uint CurrentSchemaVersion = 2;
+}
+
 /// <summary>
 /// Serializer settings for every client envelope.
 /// </summary>
@@ -104,19 +111,19 @@ public enum ClientTransitionDisposition
     DuplicateReplay,
 }
 
-/// <summary>Equipped item slots. Wire names are main / secondary / meleeTool / trinket.</summary>
+/// <summary>Internal action slots. The character UI exposes Main, Secondary, and Trinket as SS.</summary>
 public enum ClientAbilitySlot
 {
-    /// <summary>Main ranged item.</summary>
+    /// <summary>Character-owned Shot 1.</summary>
     Main,
 
-    /// <summary>Secondary: a single-use round.</summary>
+    /// <summary>Character-owned Shot 2 or melee action.</summary>
     Secondary,
 
-    /// <summary>Melee item. Visual only.</summary>
+    /// <summary>Retired equipment slot. Character kits never expose it.</summary>
     MeleeTool,
 
-    /// <summary>Crown or anklet. Charge-gated special.</summary>
+    /// <summary>Character-owned, gauge-gated special (SS).</summary>
     Trinket,
 }
 
@@ -126,7 +133,7 @@ public enum ClientAmmoPolicy
     /// <summary>Decrements after an accepted attack.</summary>
     Finite,
 
-    /// <summary>Never decrements. Longsword only.</summary>
+    /// <summary>Never decrements. All schema-2 character actions use this compatibility policy.</summary>
     Unlimited,
 }
 
@@ -162,12 +169,12 @@ public sealed record ClientAppearance(
 /// <summary>One player in a creation request.</summary>
 /// <param name="PlayerId">Opaque match-local player identifier.</param>
 /// <param name="Team">Team number; equal values are allies.</param>
-/// <param name="Loadout">Equipped items; each slot is ammunition.</param>
+/// <param name="CharacterId">Selected fixed character kit.</param>
 /// <param name="Appearance">Cosmetic-only selection.</param>
 public sealed record ClientPlayerConfig(
     [property: JsonPropertyName("playerId")] string PlayerId,
     [property: JsonPropertyName("team")] byte Team,
-    [property: JsonPropertyName("loadout")] ClientLoadout Loadout,
+    [property: JsonPropertyName("characterId")] string CharacterId,
     [property: JsonPropertyName("appearance")] ClientAppearance Appearance);
 
 /// <summary>The match body of a creation request.</summary>

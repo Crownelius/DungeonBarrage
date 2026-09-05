@@ -36,7 +36,7 @@ public sealed class CommandRoundTripTests
         using var document = JsonDocument.Parse(response);
         var root = document.RootElement;
         Assert.Equal("accepted", root.GetProperty("disposition").GetString());
-        Assert.Equal("b0e9ba84389a6797", root.GetProperty("postStateHash").GetString());
+        Assert.Equal("d3681302b21ba8ef", root.GetProperty("postStateHash").GetString());
     }
 
     [Fact]
@@ -53,7 +53,7 @@ public sealed class CommandRoundTripTests
             expectedTurnNumber: 1,
             expectedSnapshotGeneration: 1,
             slot: ClientAbilitySlot.Main,
-            angleMillidegrees: 45_000,
+            angleMillidegrees: 0,
             powerBasisPoints: 2_500,
             targetPlayerId: null,
             secondaryTargetPlayerId: null);
@@ -62,7 +62,7 @@ public sealed class CommandRoundTripTests
         using var document = JsonDocument.Parse(response);
         var root = document.RootElement;
         Assert.Equal("accepted", root.GetProperty("disposition").GetString());
-        Assert.Equal("682f0e2a57b7debd", root.GetProperty("postStateHash").GetString());
+        Assert.Equal("06fa4183bbd03425", root.GetProperty("postStateHash").GetString());
     }
 
     [Fact]

@@ -11,12 +11,12 @@
 
 use std::collections::BTreeSet;
 
-use crate::character;
+use crate::character_roster;
 use crate::error::{SimError, SimResult};
 use crate::map::{self, MapDefinition};
 use crate::match_host::MatchHost;
 use crate::types::{
-    Appearance, CROW_MAX_HEALTH, Loadout, MatchPhase, PlayerState, SimulationState, TurnEndReason,
+    Appearance, CHARACTER_KIT_AMMO, MatchPhase, PlayerState, SimulationState, TurnEndReason,
 };
 use crate::{CONTENT_VERSION, SIMULATION_VERSION};
 
@@ -45,8 +45,8 @@ pub struct MatchPlayerConfig {
     pub player_id: String,
     /// Players with the same team value are allies.
     pub team: u8,
-    /// Equipped items; each slot is ammunition for this match.
-    pub loadout: Loadout,
+    /// Stable character identifier. The authority expands it into a fixed kit.
+    pub character_id: String,
     /// Cosmetic-only appearance selected before the match.
     pub appearance: Appearance,
 }
@@ -109,15 +109,16 @@ pub fn build_initial_state(config: &MatchConfig) -> SimResult<SimulationState> {
     let mut players = Vec::with_capacity(config.players.len());
 
     for (player_config, spawn) in config.players.iter().zip(definition.spawn_points.iter()) {
-        let ammo = character::ammo_for_loadout(&player_config.loadout)?;
+        let profile = character_roster::find(&player_config.character_id)
+            .ok_or(SimError::UnknownDefinition)?;
         players.push(PlayerState {
             id: player_config.player_id.clone(),
             team: player_config.team,
-            health: CROW_MAX_HEALTH,
-            max_health: CROW_MAX_HEALTH,
+            health: profile.max_health,
+            max_health: profile.max_health,
             position: *spawn,
-            loadout: player_config.loadout.clone(),
-            ammo,
+            loadout: profile.derived_loadout(),
+            ammo: CHARACTER_KIT_AMMO,
             trinket_charge: 0,
             statuses: Vec::new(),
             appearance: player_config.appearance.clone(),
@@ -158,10 +159,12 @@ fn validate_roster(players: &[MatchPlayerConfig]) -> SimResult<()> {
         {
             return Err(SimError::OutOfRange { field: "player id" });
         }
-        if !loadout_ids_are_legal(&player.loadout) {
-            return Err(SimError::OutOfRange { field: "loadout" });
+        if player.character_id.is_empty() || player.character_id.contains('\0') {
+            return Err(SimError::OutOfRange {
+                field: "character id",
+            });
         }
-        if character::ammo_for_loadout(&player.loadout).is_err() {
+        if character_roster::find(&player.character_id).is_none() {
             return Err(SimError::UnknownDefinition);
         }
         teams.insert(player.team);
@@ -188,17 +191,6 @@ pub(crate) fn is_valid_match_local_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
-fn loadout_ids_are_legal(loadout: &Loadout) -> bool {
-    [
-        &loadout.main,
-        &loadout.secondary,
-        &loadout.melee_tool,
-        &loadout.trinket,
-    ]
-    .into_iter()
-    .all(|id| !id.is_empty() && !id.contains('\0'))
-}
-
 fn find_map(id: &str) -> Option<MapDefinition> {
     map::find(id)
 }
@@ -213,7 +205,7 @@ mod tests {
         MatchPlayerConfig {
             player_id: id.to_owned(),
             team,
-            loadout: Loadout::launch_default(),
+            character_id: "crow".to_owned(),
             appearance: Appearance::default(),
         }
     }
@@ -251,10 +243,13 @@ mod tests {
         let Some(crow) = host.state().player("a_left") else {
             panic!("configured player must exist");
         };
-        assert_eq!(crow.health, CROW_MAX_HEALTH);
-        assert_eq!(crow.max_health, CROW_MAX_HEALTH);
-        assert_eq!(crow.loadout, Loadout::launch_default());
-        assert_eq!(crow.ammo_for(crate::types::AbilitySlot::Basic).remaining, 3);
+        assert_eq!(crow.health, 250);
+        assert_eq!(crow.max_health, 250);
+        assert_eq!(
+            crate::character_roster::for_player(crow).map(|profile| profile.id.wire_name()),
+            Some("crow")
+        );
+        assert!(crow.ammo_for(crate::types::AbilitySlot::Basic).can_spend());
     }
 
     #[test]
@@ -388,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_map_and_item_ids_fail_closed() {
+    fn unknown_map_and_character_ids_fail_closed() {
         let mut bad_map = duel();
         bad_map.map_id = "missing-map".to_owned();
         assert_eq!(
@@ -397,7 +392,7 @@ mod tests {
         );
 
         let mut bad_item = duel();
-        configured_player_mut(&mut bad_item, 0).loadout.main = "missing-item".to_owned();
+        configured_player_mut(&mut bad_item, 0).character_id = "missing-character".to_owned();
         assert_eq!(
             create_match(&bad_item).err(),
             Some(SimError::UnknownDefinition)

@@ -1,57 +1,27 @@
 namespace DungeonBarrage.Client.Contracts;
 
-/// <summary>The one fighter plus the item catalog, for the loadout picker.</summary>
+/// <summary>The fixed launch characters shown on the single-screen character picker.</summary>
 /// <remarks>
 /// Mirrors <c>db-sim-ffi/src/wire.rs</c>'s <c>WireRoster</c> field for field. Static content,
 /// not match state: fetched via <c>db_sim_roster</c>, which needs no live match handle.
 /// </remarks>
 /// <param name="SchemaVersion">Client-contract schema version.</param>
-/// <param name="Fighter">The one crow fighter.</param>
-/// <param name="Items">Equippable items. Each occupies exactly one slot.</param>
+/// <param name="Characters">Authority-owned fixed character kits.</param>
 public sealed record ClientRosterResponse(
     uint SchemaVersion,
-    ClientFighterDefinition Fighter,
-    IReadOnlyList<ClientItemDefinition> Items);
+    IReadOnlyList<ClientCharacterDefinition> Characters);
 
-/// <summary>The one playable fighter.</summary>
-/// <param name="Id">Always <c>crow</c>.</param>
-/// <param name="DisplayName">Player-facing name.</param>
-/// <param name="MaxHealth">Starting and maximum health.</param>
-/// <param name="RangeTier">Default reach class.</param>
-/// <param name="MovementClass">Movement allowance class.</param>
-public sealed record ClientFighterDefinition(
-    string Id,
-    string DisplayName,
-    ushort MaxHealth,
-    ClientRangeTier RangeTier,
-    ClientMovementClass MovementClass);
-
-/// <summary>One equippable item.</summary>
-/// <param name="Id">Stable identifier, e.g. <c>"ramshot-cannon"</c>.</param>
-/// <param name="DisplayName">Player-facing name.</param>
-/// <param name="Slot">Which loadout slot it occupies.</param>
-/// <param name="AmmoPolicy">Finite or unlimited.</param>
-/// <param name="StartingAmmo">Starting charges.</param>
-/// <param name="Ability">Attack used when the item is fired.</param>
-public sealed record ClientItemDefinition(
-    string Id,
-    string DisplayName,
-    ClientAbilitySlot Slot,
-    ClientAmmoPolicy AmmoPolicy,
-    ushort StartingAmmo,
-    ClientAbilityDefinition Ability);
-
-/// <summary>Legacy character-shaped view. Unused by the loadout picker.</summary>
+/// <summary>One fixed character kit.</summary>
 public sealed record ClientCharacterDefinition(
     string Id,
     string DisplayName,
+    string Role,
     ushort MaxHealth,
-    ClientRangeTier RangeTier,
     ClientMovementClass MovementClass,
-    ClientAbilityDefinition Basic,
-    ClientAbilityDefinition? BasicAlt,
-    ClientAbilityDefinition Special,
-    IReadOnlyList<ClientPassivePreview> Passives);
+    int MovementAllowance,
+    ClientAbilityDefinition Shot1,
+    ClientAbilityDefinition Shot2OrMelee,
+    ClientAbilityDefinition Special);
 
 /// <summary>Default reach class a character's abilities are tuned around.</summary>
 public enum ClientRangeTier

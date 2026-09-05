@@ -1,7 +1,13 @@
 {
   "schemaVersion": 1,
-  "contentVersion": 6,
+  "contentVersion": 7,
   "characters": [
+    {
+      "characterId": "leslie",
+      "skinIds": ["default"],
+      "abilitySkinIds": ["default"],
+      "victoryPoseIds": ["default"]
+    },
     {
       "characterId": "crow",
       "skinIds": ["default"],
@@ -9,55 +15,13 @@
       "victoryPoseIds": ["default"]
     },
     {
-      "characterId": "arzum",
+      "characterId": "erus",
       "skinIds": ["default"],
       "abilitySkinIds": ["default"],
       "victoryPoseIds": ["default"]
     },
     {
-      "characterId": "emi",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "karl",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "huck",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "numa",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "aleph",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "zeke",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "roberto",
-      "skinIds": ["default"],
-      "abilitySkinIds": ["default"],
-      "victoryPoseIds": ["default"]
-    },
-    {
-      "characterId": "natomica",
+      "characterId": "kreena",
       "skinIds": ["default"],
       "abilitySkinIds": ["default"],
       "victoryPoseIds": ["default"]

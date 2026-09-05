@@ -25,21 +25,21 @@ public sealed class TransitionCueResolverTests
         var fire = Assert.Single(fireFrame.ActorCues);
         Assert.Equal("a-local-player", fire.PlayerId);
         Assert.Equal(ActorPresentationCueKind.Fire, fire.Kind);
-        Assert.Equal("ramshot-cannon", fire.AbilityId);
+        Assert.Equal("crow-precision-57", fire.AbilityId);
         Assert.Equal(0f, fire.Age01);
         Assert.Empty(fireFrame.ImpactCues);
 
         var impactFrame = TransitionCueResolver.Resolve(
             transition.Events,
-            elapsedMsec: ImpactMsec(17, visualTickRate: 15),
+            elapsedMsec: ImpactMsec(9, visualTickRate: 15),
             visualTickRate: 15,
             reduceMotion: false);
 
-        var hit = Assert.Single(impactFrame.ActorCues);
+        var hit = Assert.Single(impactFrame.ActorCues, cue => cue.Kind == ActorPresentationCueKind.Hit);
         Assert.Equal("b-local-bot", hit.PlayerId);
         Assert.Equal(ActorPresentationCueKind.Hit, hit.Kind);
         var impact = Assert.Single(impactFrame.ImpactCues);
-        Assert.Equal(new ClientPosition(6676, 4732), impact.Position);
+        Assert.Equal(new ClientPosition(6447, 5888), impact.Position);
         Assert.Equal(ClientImpactCause.Character, impact.Cause);
         Assert.True(impactFrame.CameraImpulse.IsActive);
     }
@@ -58,7 +58,7 @@ public sealed class TransitionCueResolverTests
 
         var atImpact = TransitionCueResolver.Resolve(
             transition.Events,
-            elapsedMsec: ImpactMsec(17, visualTickRate: 15),
+            elapsedMsec: ImpactMsec(9, visualTickRate: 15),
             visualTickRate: 15,
             reduceMotion: false);
         Assert.Single(atImpact.ImpactCues);
@@ -115,11 +115,11 @@ public sealed class TransitionCueResolverTests
 
         var frame = TransitionCueResolver.Resolve(
             transition.Events,
-            elapsedMsec: ImpactMsec(17, visualTickRate: 15),
+            elapsedMsec: ImpactMsec(9, visualTickRate: 15),
             visualTickRate: 15,
             reduceMotion: true);
 
-        Assert.Equal(ActorPresentationCueKind.Hit, Assert.Single(frame.ActorCues).Kind);
+        Assert.Single(frame.ActorCues, cue => cue.Kind == ActorPresentationCueKind.Hit);
         Assert.Single(frame.ImpactCues);
         Assert.False(frame.CameraImpulse.IsActive);
     }
@@ -128,7 +128,7 @@ public sealed class TransitionCueResolverTests
     public void Cues_expire_before_the_next_input_window()
     {
         var transition = Deserialize<ClientMatchTransition>("responses/002-ability.json");
-        var afterImpactHold = ImpactMsec(17, visualTickRate: 15) + TransitionCueResolver.ImpactDurationMsec;
+        var afterImpactHold = ImpactMsec(9, visualTickRate: 15) + TransitionCueResolver.ImpactDurationMsec;
 
         var frame = TransitionCueResolver.Resolve(
             transition.Events,

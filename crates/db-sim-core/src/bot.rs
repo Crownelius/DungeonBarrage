@@ -181,11 +181,8 @@ fn plan_turn(
         let Some(ability) = character::equipped_ability(actor, slot) else {
             continue;
         };
-        if slot == AbilitySlot::Trinket {
-            if actor.trinket_charge < crate::types::TRINKET_CHARGE_FULL {
-                continue;
-            }
-        } else if !actor.ammo_for(slot).can_spend() {
+        if slot == AbilitySlot::Trinket && actor.trinket_charge < crate::types::TRINKET_CHARGE_FULL
+        {
             continue;
         }
 
@@ -589,18 +586,8 @@ mod tests {
     }
 
     #[test]
-    fn melee_decision_respects_the_walking_adjusted_power_cap() {
-        let mut actor = player("a", 0, "crow", FixedPoint::new(0, 0));
-        actor
-            .ammo
-            .get_mut(AbilitySlot::Basic.index())
-            .expect("basic ammo slot must exist")
-            .remaining = 0;
-        actor
-            .ammo
-            .get_mut(AbilitySlot::BasicAlt.index())
-            .expect("secondary ammo slot must exist")
-            .remaining = 0;
+    fn ability_decision_respects_the_walking_adjusted_power_cap() {
+        let actor = player("a", 0, "crow", FixedPoint::new(0, 0));
         let mut state = state_with(
             vec![actor, player("b", 1, "crow", FixedPoint::new(1_024, 0))],
             MatchPhase::AimingAndSelection,
@@ -616,8 +603,9 @@ mod tests {
                 power_basis_points,
                 ..
             } => {
-                assert_eq!(slot, AbilitySlot::Special);
-                assert_eq!(power_basis_points, crate::command::max_launch_power(&state));
+                assert!(matches!(slot, AbilitySlot::Basic | AbilitySlot::BasicAlt));
+                assert!(power_basis_points > 0);
+                assert!(power_basis_points <= crate::command::max_launch_power(&state));
             }
             other => panic!("expected a capped melee strike, got {other:?}"),
         }
