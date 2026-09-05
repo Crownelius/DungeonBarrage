@@ -99,11 +99,23 @@ replay/low-level resolver coverage. Do not expose it in the UI.
   labels, gold-hit/red-miss smoke captures, results routes, and a persisted settings shell.
 - Leslie renders as an original procedural frog in title, picker, and combat until the production
   animation sheet replaces that honest stand-in.
+- A clean-room OpenBound projectile audit and dormant Rust mechanics kernel are recorded in
+  `docs/OPENBOUND_PROJECTILE_MECHANICS_PLAN.md` and
+  `crates/db-sim-core/src/projectile_mechanics.rs`. It supplies 39 tested behavior families for
+  future characters but is intentionally unreachable from the roster, commands, canonical state,
+  FFI, and client.
 
 The detailed governing plan is `docs/CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md`. `PLAY.md` is the
 current build and control guide. `docs/CLIENT_SPEC.md` is the client contract.
 
 ## Honest gaps
+
+The dormant projectile kernel is a library of tested pure mechanics, not an active match feature.
+Do not assign a primitive to a character by editing C# or character data alone. Activation requires
+Rust resolver integration, bounded playback events, bot logic, a simulation-version decision,
+reviewed golden vectors, and visible exported-client evidence. The reference project is GPL; do not
+copy its code, constants, or assets into Dungeon Barrage. Use the clean-room audit and original Rust
+kernel already present here.
 
 The repository still lacks identity-specific production animation sheets. Leslie no longer uses the
 wrong species—an original procedural frog now appears in title, picker, and combat—but that is a
@@ -147,7 +159,8 @@ remains the first deferred Phase 2 gameplay task; do not mix authority changes i
 
 ## Verified checkpoint
 
-- Rust workspace: 514 passed, 0 failed, 1 explicitly ignored fixture writer.
+- Rust workspace: 539 passed, 0 failed, 1 explicitly ignored fixture writer. This includes 25
+  focused dormant-projectile tests.
 - Release FFI: 23 passed, 0 failed, 1 explicitly ignored fixture writer.
 - .NET: 12 contract + 152 interop = 164 passed, 0 failed.
 - Exact CI restore `dotnet restore client/DungeonBarrage.sln --locked-mode`: passed after

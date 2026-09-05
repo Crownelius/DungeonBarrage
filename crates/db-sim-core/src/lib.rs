@@ -52,6 +52,7 @@ pub mod match_host;
 pub mod match_session;
 pub mod match_setup;
 pub mod movement;
+pub mod projectile_mechanics;
 pub mod resolve;
 pub mod rng;
 pub mod scheduler;

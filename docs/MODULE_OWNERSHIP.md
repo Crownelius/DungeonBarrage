@@ -46,6 +46,7 @@ coordination.
 | `terrain.rs` | Occupancy mask, terrain operations | Implementation task |
 | `character.rs` | Character roster data + validation | Implementation task |
 | `ballistics.rs` | Trajectory integration + collision | Implementation task |
+| `projectile_mechanics.rs` | Dormant bounded projectile-pattern and environment-interaction kernel; no roster/command wiring | Integrator (OpenBound behavioral research slice complete) |
 | `hash.rs` | `Canonical` impls for state types | Implementation task |
 | `command.rs` | Command validation + application; ordered action records | Integrator during C1 contract slices |
 | `match_host.rs` | Authoritative orchestration; no transport/session policy | Integrator |

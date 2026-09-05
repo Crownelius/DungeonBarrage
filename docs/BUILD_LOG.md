@@ -4130,3 +4130,38 @@ the approved retro-arcade cabinet composition, palette, labels, and other three 
 | `cargo deny check` | pass; only pre-existing unused license-allow warnings |
 | Godot 4.7.1 Windows Desktop release export | pass |
 | Visible C5, C6, and C7 exported-client runs | pass; reports/logs/screenshots inspected |
+
+## 2026-09-05 - OpenBound projectile and terrain mechanics clean-room kernel
+
+Audited `WickedPeanuts/OpenBound` default branch `dev-2` at
+`d11e8127d4634e51e8c0519c1349ac9f512bb357`, then compared the scoped projectile, mine, weather,
+physics, and terrain paths against `master` and `dev-3`. Those mechanics are identical across the
+three branches; the only scoped `dev-3` difference is an unrelated font enum rename.
+
+OpenBound is GPL-3.0-or-later while this workspace is `UNLICENSED`, so no source, constants, assets,
+or C# class structure were copied. `docs/OPENBOUND_PROJECTILE_MECHANICS_PLAN.md` records an
+exhaustive source-to-behavior matrix. `db-sim-core::projectile_mechanics` is an original fixed-point
+kernel covering 39 behavior families: contact policies, radial damage, crater construction,
+staggered angle/power volleys, dependent-payload completion, double blasts, timed arming, orbit and
+convergence, mid-flight splitting, sequenced impact rings, bounded last-surface beams, target beam
+cascades, terrain-only deployment/teleport landing, walking and obstacle-reflecting mines, armor
+shred, shield purge, damage zones, mirror/tornado transforms, idempotent environment modifiers, and
+same-type zone merging.
+
+The kernel is deliberately dormant. It has no path from `character_roster`, command resolution,
+canonical state, FFI, or the client, so existing character behavior and frozen replay hashes do not
+change. Child payload count is capped at 32, beam work at 2,048 samples, and target cascades sort by
+stable authority ID. A focused test initially exposed an incorrect alternating-ring sequence; the
+algorithm was corrected to `0, +1, -1, +2, -2` rather than weakening the assertion.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| Focused projectile mechanics | pass; 25 passed, 0 failed |
+| Strict core Clippy | pass; `-D warnings` |
+| Dormancy search | pass; no roster, command, session, FFI, or C# consumer |
+| Full Rust workspace | pass; 539 passed, 0 failed, 1 ignored fixture writer |
+| Release FFI | pass; 23 passed, 0 failed, 1 ignored fixture writer |
+| rustfmt / strict workspace Clippy / `cargo deny` | pass; deny emitted only pre-existing unused-license warnings |
+| .NET/client | no client or contract changes |
