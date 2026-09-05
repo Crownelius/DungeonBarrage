@@ -1,10 +1,10 @@
 # Dungeon Barrage operational handoff
 
-**Checkpoint date:** 2026-09-04
+**Checkpoint date:** 2026-09-05
 
 **Audience:** the next implementation agent, including an Opus agent resuming this branch
 
-**Branch:** `feat/c1-outcome-provenance`
+**Branch:** `codex/retro-arcade-ui` (based on public `main` at `e218156`)
 
 ## Current product truth
 
@@ -22,6 +22,11 @@ The client presents one dotted authoritative aim preview. Gold means the preview
 red means it does not. Do not restore the old solid rubber-band plus separate impact line/arc stack.
 The Rust-published body center/radius is the collision and drawing contract, so a visible hit and
 an authoritative hit refer to the same body.
+
+The active product priority is now a start-to-finish retro-arcade UI overhaul. The first implemented
+slice replaces the title, arena setup, and character-select screens. `docs/UI_OVERHAUL_PLAN.md` is
+the governing visual plan and `docs/design/retro-arcade-menu-concept-v1.png` is the concept board.
+The ArtStation Gunbound Season 4 presentation is hierarchy inspiration only; do not copy its art.
 
 ## Repository and ownership
 
@@ -92,6 +97,16 @@ current build and control guide. `docs/CLIENT_SPEC.md` is the client contract.
 
 ## Honest gaps
 
+The retro-arcade opening-flow slice is implemented and renderer-verified, but the repository still
+contains Crow equipment sheets rather than four identity-specific production character portrait
+sets. The new roster and picker deliberately render those real shipped sheets instead of placeholder
+initials; consequently Leslie, Crow, and Erus currently share similar Crow silhouettes. Original
+Leslie, Crow, Erus, and Kreena portrait/idle sheets are the largest remaining franchise-art gap.
+
+The combat HUD, results overlay, settings/accessibility shell, and transitions have not yet moved to
+the new `RetroArcadeUi` system. Do not call the full UI overhaul complete until U2-U4 in
+`docs/UI_OVERHAUL_PLAN.md` are renderer-verified.
+
 Phase 1 is accepted. A real Windows Desktop export rendered the character screen, three-action
 bar, a single dotted gold hit guide terminating on the visible body, and terminal results at
 1280x720. C6 completed all three maps, exercised human and bot turns, dropped stacked blocks, and
@@ -116,10 +131,12 @@ vector regeneration.
 
 ## Next task
 
-Implement Leslie's Ant Glob ground roll as the first Phase 2 mechanic. It should establish an
-authority-owned, deterministic ground-travel path reusable by later unusual projectiles. Specify
-collision, slope/step behavior, stopping, detonation, terrain mutation, trace events, preview, and
-bot parity before adding presentation.
+Implement U2 combat readability from `docs/UI_OVERHAUL_PLAN.md`: migrate the live HUD and weapon
+rail onto `RetroArcadeUi`, remove debug-first labels from the primary hierarchy, keep exactly one
+authority-owned dotted guide, and add renderer evidence for both a gold character hit and a red
+miss. Preserve free switching between both unlimited normal actions and keep the charge-gated SS
+visually separate as a bonus action. After U2, migrate results and settings in U3. Leslie's Ant Glob
+ground-roll mechanic remains the first deferred Phase 2 gameplay task; do not mix it into UI work.
 
 ## Verified checkpoint
 

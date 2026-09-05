@@ -4023,3 +4023,46 @@ Windows `db_sim_ffi.dll` beside the test assembly. The absolute-path native reso
 failed closed, as designed. The test project now conditionally copies each advertised host
 artifact (`.dll`, `.so`, or `.dylib`) when it exists. This fixes Linux CI without enabling ambient
 library search or weakening the resolver's trust boundary.
+
+## 2026-09-05 - retro-arcade UI overhaul U1: opening flow
+
+The opening flow now presents Dungeon Barrage as a character-led retro-arcade franchise rather
+than a diagnostics shell. The title screen introduces the four-character launch roster, makes
+Local Duel the decisive primary action, and labels Arcade Run and Franchise Vault as future modes
+instead of implying that they are playable. Arena setup now previews the selected map and teaches
+both valid win routes: direct damage and dungeon destruction/ringout. Character select replaces
+initial placeholders with animated portraits drawn from the shipped sprite sheets and exposes each
+fighter's role, health, movement, weapon, two unlimited normal actions, and charge-gated SS.
+
+The clean-room direction is recorded in `docs/UI_OVERHAUL_PLAN.md`. The linked Gunbound Season 4
+work informed information hierarchy and screen rhythm only. The palette, procedural cabinet
+framing, typography treatment, dungeon staging, copy, and generated concept board are original to
+Dungeon Barrage. Shared presentation-only primitives live in `RetroArcadeUi`; authority, input,
+combat resolution, hit geometry, and screen-state transitions remain unchanged.
+
+The concept board was generated with the built-in image generator from a 16:9 prompt describing a
+dark-navy CRT arcade cabinet, ember-red and electric-cyan accents, coin-gold focus states, four
+silhouetted franchise heroes, Local Duel as the dominant action, and visibly locked future modes.
+It is stored at `docs/design/retro-arcade-menu-concept-v1.png` as direction, not runtime art.
+
+### Verification
+
+| Gate | Result |
+|---|---|
+| `dotnet build client/DungeonBarrage.sln -c Release --no-restore` | pass; 0 warnings, 0 errors |
+| `dotnet format client/DungeonBarrage.sln --verify-no-changes --no-restore` | pass |
+| `dotnet test client/DungeonBarrage.sln -c Release --no-build` | 12 contract + 152 interop = 164 passed |
+| `cargo fmt --all --check` | pass |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | pass |
+| `cargo test --workspace --locked` | 514 passed, 0 failed, 1 ignored fixture writer |
+| `cargo deny check` | pass; only pre-existing unused license-allow warnings |
+| Godot 4.7.1 Windows Desktop release export | pass |
+| Visible title/C7 smoke, 1280x720 | pass; title composition and all six settings checks |
+| Visible opening flow, 1280x720 | pass; title, arena setup, picker, and picker hover inspected |
+| Visible C5 smoke, 1280x720 | pass; move, one gold hit guide, damage, playback, handoff |
+| Visible C6 smoke, 1280x720 | pass; four fighters, 3/3 maps, terminal result, rematch/disposal |
+
+Evidence is preserved locally at `C:\tmp\DungeonBarrage-retro-ui-20260905\evidence`. The U1 slice
+does not finish the complete overhaul: U2 must migrate the combat HUD and weapon rail, U3 must
+migrate results/settings/accessibility, and U4 must replace shared Crow silhouettes with original
+identity-specific production portrait and idle sheets before release acceptance.
