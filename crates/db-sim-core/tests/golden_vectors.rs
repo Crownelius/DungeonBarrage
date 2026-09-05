@@ -64,18 +64,20 @@ enum Step {
 fn player(
     id: &str,
     team: u8,
-    _character_id: &str,
+    character_id: &str,
     position: FixedPoint,
     health: u16,
 ) -> PlayerState {
+    let profile = db_sim_core::character_roster::find(character_id)
+        .unwrap_or_else(|| panic!("unknown golden character {character_id}"));
     PlayerState {
         id: id.to_owned(),
         team,
         health,
         max_health: health,
         position,
-        loadout: db_sim_core::types::Loadout::launch_default(),
-        ammo: db_sim_core::types::DEFAULT_AMMO,
+        loadout: profile.derived_loadout(),
+        ammo: db_sim_core::types::CHARACTER_KIT_AMMO,
         trinket_charge: 0,
         statuses: Vec::new(),
         appearance: Appearance::default(),
@@ -243,7 +245,7 @@ fn golden_all_passes_terminates_identically() {
     // The longest-running vector: nothing but passes, so it exercises the hard turn limit
     // and the forced draw. This is the one that catches a change to match termination.
     let script = vec![Step::Pass; 64];
-    let actual = run(duel(1, "arzum", "emi", 300, 5), &script);
+    let actual = run(duel(1, "leslie", "erus", 300, 5), &script);
     // Was "b75ec70f007a7a7b" at SIMULATION_VERSION 5,
     // "876de8693b5b75a8" at SIMULATION_VERSION 4, and
     // "e828d490e955f3d7" at SIMULATION_VERSION 3.
@@ -264,7 +266,11 @@ fn golden_all_passes_terminates_identically() {
     // REGENERATED 2026-09-03 at SIMULATION_VERSION 9: BODY_WIDTH is now the player
     // collider diameter, and projectile origins/collision use the visible body's centre.
     // Previous value was "1d9f133f0916b2fb".
-    assert_vector("all_passes", &actual, "c37e748725499388");
+    // REGENERATED 2026-09-04 at SIMULATION_VERSION 10 / CONTENT_VERSION 7 for the
+    // four-character fixed-kit migration. Previous value was "3c375eea936aa24c".
+    // 2026-09-04: 370c9b00a275a5b2 -> 0909d60a903b242a when turn movement
+    // became authoritative per selected launch character instead of the legacy shared class.
+    assert_vector("all_passes", &actual, "0909d60a903b242a");
 }
 
 #[test]
@@ -278,7 +284,7 @@ fn golden_walking_duel() {
         Step::Walk(POSITION_SCALE),
         Step::Pass,
     ];
-    let actual = run(duel(7, "arzum", "natomica", 300, 5), &script);
+    let actual = run(duel(7, "erus", "kreena", 300, 5), &script);
     // Was "0038e5ddfabfec81" at SIMULATION_VERSION 5,
     // "b28768a38619df88" at SIMULATION_VERSION 4, and
     // "35636b623102bbed" at SIMULATION_VERSION 3.
@@ -298,7 +304,9 @@ fn golden_walking_duel() {
     // craters. Previous value was "c3727217929d598e".
     // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
     // collider correction. Previous value was "f687dc12c3e0e33f".
-    assert_vector("walking_duel", &actual, "030efa1266831350");
+    // REGENERATED 2026-09-04 for fixed Erus/Kreena kits and schema 2. Previous value was
+    // "50e91a7905ebcdf4".
+    assert_vector("walking_duel", &actual, "7a002a57d45da611");
 }
 
 #[test]
@@ -321,7 +329,7 @@ fn golden_firing_duel() {
             power_basis_points: 1_500,
         },
     ];
-    let (actual, outcome) = run_detailed(duel(99, "roberto", "emi", 300, 1), &script);
+    let (actual, outcome) = run_detailed(duel(99, "crow", "erus", 300, 1), &script);
     assert!(
         outcome.total_health_lost > 0,
         "a firing vector must actually deal damage, or it covers nothing: {outcome:?}",
@@ -349,7 +357,9 @@ fn golden_firing_duel() {
     // craters. Previous value was "6f5278d82e4f0cff".
     // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
     // collider correction. Previous value was "ee07dc04a8821e68".
-    assert_vector("firing_duel", &actual, "5db94ba8baa5a1e4");
+    // REGENERATED 2026-09-04 for Crow/Erus fixed actions with no ammunition. Previous value
+    // was "fe4243a898724148".
+    assert_vector("firing_duel", &actual, "3e88c0765412f549");
 }
 
 #[test]
@@ -370,7 +380,7 @@ fn golden_mixed_actions() {
         },
         Step::Pass,
     ];
-    let (actual, outcome) = run_detailed(duel(4_242, "karl", "numa", 300, 1), &script);
+    let (actual, outcome) = run_detailed(duel(4_242, "leslie", "kreena", 300, 1), &script);
     assert!(
         outcome.turns_elapsed >= 1,
         "a mixed script must apply: {outcome:?}",
@@ -395,7 +405,11 @@ fn golden_mixed_actions() {
     // craters. Previous value was "f9b14740c92e84a7".
     // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
     // collider correction. Previous value was "701f6a98d4adda2d".
-    assert_vector("mixed_actions", &actual, "d447474ad2fda386");
+    // REGENERATED 2026-09-04 for Leslie/Kreena fixed actions and schema 2. Previous value was
+    // "201d41976cf6dd4e".
+    // 2026-09-04: 4b276d55b2318613 -> f621281066a412d3 for character-specific
+    // movement refresh and the resulting launch-power budget.
+    assert_vector("mixed_actions", &actual, "f621281066a412d3");
 }
 
 #[test]
@@ -405,12 +419,12 @@ fn golden_low_health_duel_reaches_a_decision() {
     let script = vec![
         Step::Fire {
             slot: AbilitySlot::Basic,
-            angle_millidegrees: 45_000,
-            power_basis_points: 1_500,
+            angle_millidegrees: 0,
+            power_basis_points: 2_500,
         };
         24
     ];
-    let (actual, outcome) = run_detailed(duel(11, "roberto", "roberto", 60, 1), &script);
+    let (actual, outcome) = run_detailed(duel(11, "crow", "crow", 60, 1), &script);
     assert!(
         outcome.total_health_lost > 0,
         "the decision vector must actually damage somebody: {outcome:?}",
@@ -434,7 +448,11 @@ fn golden_low_health_duel_reaches_a_decision() {
     // craters. Previous value was "127a3ee345fbe462".
     // REGENERATED 2026-09-03 at SIMULATION_VERSION 9 for the authoritative visible-body
     // collider correction. Previous value was "6a673f45206d2d38".
-    assert_vector("low_health_duel", &actual, "59a874e1d6621f16");
+    // REGENERATED 2026-09-04 for Crow's straight precision shot and unlimited normal actions.
+    // Previous value was "3e1c744e7a62a0be".
+    // 2026-09-04: d9a65942e63d3726 -> 53a733d88e1b3be6 for character-specific
+    // movement refresh and the resulting launch-power budget.
+    assert_vector("low_health_duel", &actual, "53a733d88e1b3be6");
 }
 
 #[test]
@@ -442,8 +460,8 @@ fn a_vector_is_stable_across_repeated_runs_in_one_process() {
     // Guards against hidden per-run state: a vector that only holds on a cold process would
     // pass CI and fail a server that plays two matches.
     let script = vec![Step::Walk(POSITION_SCALE), Step::Pass, Step::Pass];
-    let first = run(duel(5, "arzum", "emi", 300, 2), &script);
-    let second = run(duel(5, "arzum", "emi", 300, 2), &script);
+    let first = run(duel(5, "leslie", "erus", 300, 2), &script);
+    let second = run(duel(5, "leslie", "erus", 300, 2), &script);
     assert_eq!(first, second, "the same script must hash identically twice");
 }
 
@@ -459,7 +477,7 @@ fn different_seeds_produce_different_matches() {
         };
         6
     ];
-    let a = run(duel(1, "karl", "karl", 300, 1), &script);
-    let b = run(duel(2, "karl", "karl", 300, 1), &script);
+    let a = run(duel(1, "crow", "crow", 300, 1), &script);
+    let b = run(duel(2, "crow", "crow", 300, 1), &script);
     assert_ne!(a, b, "the seed must affect the match");
 }
