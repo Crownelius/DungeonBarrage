@@ -104,6 +104,9 @@ replay/low-level resolver coverage. Do not expose it in the UI.
   `crates/db-sim-core/src/projectile_mechanics.rs`. It supplies 39 tested behavior families for
   future characters but is intentionally unreachable from the roster, commands, canonical state,
   FFI, and client.
+- 16-bit Kingdom-style map presentation: occupancy is still the Rust cell mask; C# paints
+  world-locked soil/grass/stone/wood tiles plus dusk/hill/forest parallax. Collapse, fall, and
+  one-shot-red remain authority-driven. Known defects live in `docs/ISSUES.md`.
 
 The detailed governing plan is `docs/CHARACTER_SYSTEM_IMPLEMENTATION_PLAN.md`. `PLAY.md` is the
 current build and control guide. `docs/CLIENT_SPEC.md` is the client contract.
@@ -151,18 +154,18 @@ vector regeneration.
 
 ## Next task
 
-Implement U4 production art and release QA from `docs/UI_OVERHAUL_PLAN.md`: create original,
-identity-specific character animation sheets beginning with Leslie's frog sheet; then apply global
-high-contrast/text-scale behavior and wire audio settings to real audio buses. Preserve the U2/U3
-screen hierarchy and rerun visible C5/C6/C7/timeout evidence. Leslie's Ant Glob ground-roll mechanic
-remains the first deferred Phase 2 gameplay task; do not mix authority changes into art/UI work.
+Export and visually inspect the 16-bit map presentation on all three playable stages (C6: stacked
+blocks still fall, one-shot-red still appears, no invented occupancy). Then continue U4 production
+art from `docs/UI_OVERHAUL_PLAN.md` beginning with Leslie's frog sheet. Leslie's Ant Glob ground-roll
+mechanic remains the first deferred Phase 2 gameplay task; do not mix authority changes into art/UI
+work. Do not shrink `PLAYER_COLLISION_RADIUS` without a simulation-version bump.
 
 ## Verified checkpoint
 
 - Rust workspace: 539 passed, 0 failed, 1 explicitly ignored fixture writer. This includes 25
   focused dormant-projectile tests.
 - Release FFI: 23 passed, 0 failed, 1 explicitly ignored fixture writer.
-- .NET: 12 contract + 152 interop = 164 passed, 0 failed.
+- .NET: 12 contract + 159 interop = 171 passed, 0 failed. This includes seven pixel-terrain sampler tests.
 - Exact CI restore `dotnet restore client/DungeonBarrage.sln --locked-mode`: passed after
   regenerating RID-neutral production lock files and restoring `GodotSharpEditor` to the app lock.
 - The interop test project conditionally copies `db_sim_ffi.dll`, `libdb_sim_ffi.so`, or

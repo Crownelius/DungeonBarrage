@@ -31,7 +31,13 @@ open player settings from the title screen.
 
 The aiming preview is intentionally one dotted line. Gold means the authority preview intersects a
 visible target body. Red means it does not; that can still be the correct shot when breaking terrain
-or setting up a ring-out.
+or setting up a ring-out. A faint ring around each fighter is the authoritative collision circle —
+shots that clip the ring hit even if they miss the painted sprite.
+
+The arenas are Melee-style stages painted in 16-bit pixel tiles. Destroying a soil perch drops
+whatever was standing on it onto the grey stone main stage. Falling past the bottom of the map is
+an elimination. Environment pieces do not show HP numbers: they fade, then turn red when one more
+shot would finish them.
 
 Main and secondary attacks have unlimited uses. The secondary is the weaker damage option, but it
 preserves the ability to pressure terrain and displacement without consuming ammunition. The SS is

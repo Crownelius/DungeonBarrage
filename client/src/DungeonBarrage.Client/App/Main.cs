@@ -14,13 +14,7 @@ namespace DungeonBarrage.Client.App;
 public partial class Main : Node2D
 {
     private static readonly Color BackgroundColor = new(0.08f, 0.09f, 0.12f);
-    private static readonly Color TerrainSoilColor = new(0.45f, 0.32f, 0.18f);
-    private static readonly Color TerrainWoodColor = new(0.55f, 0.42f, 0.20f);
-    private static readonly Color TerrainStoneColor = new(0.55f, 0.55f, 0.58f);
     private static readonly Color BlockMortarColor = new(0.22f, 0.16f, 0.10f, 0.55f);
-    private static readonly Color EnvironmentOneShotColor = new(0.86f, 0.16f, 0.12f);
-    private const float EnvironmentMaxTransparency = 0.45f;
-    private static readonly Color ArenaFillColor = new(0.10f, 0.12f, 0.16f);
     private static readonly Color ArenaEdgeColor = new(0.85f, 0.78f, 0.35f);
     private static readonly Color PlayerAColor = new(0.25f, 0.55f, 0.95f);
     private static readonly Color PlayerBColor = new(0.90f, 0.35f, 0.30f);
@@ -108,6 +102,7 @@ public partial class Main : Node2D
     private readonly CameraDirector _camera = new();
     private readonly CombatEffectSystem _effects = new();
     private readonly CharacterSpriteRegistry _spriteRegistry = new();
+    private readonly PixelTerrainAtlas _pixelTerrain = new();
     private float _cellSize = 12f;
     private Vector2 _worldOrigin = Vector2.Zero;
 
@@ -2457,17 +2452,20 @@ public partial class Main : Node2D
         var availH = Math.Max(80f, viewport.Y - padTop - padBottom);
         var width = Math.Max(1, (int)widthCells);
         var height = Math.Max(1, (int)heightCells);
-        _cellSize = Math.Clamp(Math.Min(availW / width, availH / height), 16f, 48f);
+        _cellSize = PixelTerrainSampler.PixelCellSize(availW, availH, width, height);
         var mapW = width * _cellSize;
         var mapH = height * _cellSize;
         _worldOrigin = new Vector2(
-            padLeft + ((availW - mapW) * 0.5f),
-            padTop + ((availH - mapH) * 0.5f));
+            MathF.Floor(padLeft + ((availW - mapW) * 0.5f)),
+            MathF.Floor(padTop + ((availH - mapH) * 0.5f)));
         _camera.UpdateArenaLimits(mapW, mapH, viewport.X, viewport.Y);
     }
 
     private Vector2 EffectiveCameraOffset =>
         new(_camera.EffectiveOffset.X, _camera.EffectiveOffset.Y);
+
+    private Rect2 UnpannedArenaRect(uint widthCells, uint heightCells) =>
+        new(_worldOrigin, new Vector2(widthCells * _cellSize, heightCells * _cellSize));
 
     private Rect2 ArenaRect(uint widthCells, uint heightCells) =>
         new(
@@ -2483,16 +2481,18 @@ public partial class Main : Node2D
 
     private void DrawArena(uint widthCells, uint heightCells)
     {
+        var viewport = GetViewportRect();
         var arena = ArenaRect(widthCells, heightCells);
-        DrawRect(arena, ArenaFillColor);
-        DrawRect(arena, ArenaEdgeColor, filled: false, width: 2f);
+        _pixelTerrain.DrawBackdrop(this, viewport, UnpannedArenaRect(widthCells, heightCells), EffectiveCameraOffset);
+        DrawRect(arena, new Color(0.05f, 0.07f, 0.10f, 0.18f));
+        DrawRect(arena, new Color(ArenaEdgeColor.R, ArenaEdgeColor.G, ArenaEdgeColor.B, 0.35f), filled: false, width: 1f);
         var font = ThemeDB.FallbackFont;
         DrawString(
             font,
             arena.Position + new Vector2(6, -6),
             "ARENA EDGE — shots that leave this box miss",
-            fontSize: 12,
-            modulate: ArenaEdgeColor);
+            fontSize: 11,
+            modulate: new Color(ArenaEdgeColor.R, ArenaEdgeColor.G, ArenaEdgeColor.B, 0.55f));
     }
 
     private void DrawTerrain(
@@ -2519,24 +2519,17 @@ public partial class Main : Node2D
                     continue;
                 }
 
-                var owner = BlockOwningCell(snapshot, x, y);
+                var owner = PixelTerrainSampler.BlockOwningCell(snapshot.Blocks, x, y);
                 var fallOffset = owner is not null
                     ? ComputeBlockFallOffset(owner.Id, events, currentTick, _cellSize, _settings.Accessibility.ReduceMotion)
                     : 0f;
-                var fill = EnvironmentCellColor(material, owner, x, y);
                 var rect = CellRect(x, y);
                 if (fallOffset != 0f)
                 {
                     rect = new Rect2(rect.Position.X, rect.Position.Y + fallOffset, rect.Size.X, rect.Size.Y);
                 }
 
-                DrawRect(rect, fill);
-                var aboveEmpty = y == 0 || cells[((y - 1) * width) + x] == 0;
-                if (aboveEmpty)
-                {
-                    var top = new Rect2(rect.Position, new Vector2(rect.Size.X, Math.Max(2f, _cellSize * 0.18f)));
-                    DrawRect(top, fill.Lightened(0.22f));
-                }
+                _pixelTerrain.DrawCell(this, cells, width, height, x, y, material, owner, rect);
             }
         }
     }
@@ -2561,11 +2554,12 @@ public partial class Main : Node2D
             return;
         }
 
-        var fill = EnvironmentCellColor(
-            MaterialByte(block.Material),
-            block,
-            block.OriginCellX,
-            block.OriginCellY);
+        if (_pixelTerrain.HasFillTextures)
+        {
+            return;
+        }
+
+        var fill = ToGodotColor(PixelTerrainSampler.Tint(MaterialByte(block.Material), block));
         var mortar = new Color(BlockMortarColor.R, BlockMortarColor.G, BlockMortarColor.B, fill.A);
         var lastX = block.OriginCellX + block.WidthCells - 1;
         var lastY = block.OriginCellY + block.HeightCells - 1;
@@ -2603,85 +2597,8 @@ public partial class Main : Node2D
             _ => 1,
         };
 
-    private static ClientBlockSnapshot? BlockOwningCell(ClientMatchSnapshot snapshot, int x, int y)
-    {
-        ClientBlockSnapshot? found = null;
-        var foundArea = int.MaxValue;
-        for (var i = 0; i < snapshot.Blocks.Count; i++)
-        {
-            var block = snapshot.Blocks[i];
-            if (block.Health == 0)
-            {
-                continue;
-            }
-
-            if (x < block.OriginCellX || y < block.OriginCellY)
-            {
-                continue;
-            }
-
-            if (x >= block.OriginCellX + block.WidthCells || y >= block.OriginCellY + block.HeightCells)
-            {
-                continue;
-            }
-
-            var area = block.WidthCells * block.HeightCells;
-            if (area < foundArea)
-            {
-                found = block;
-                foundArea = area;
-            }
-        }
-
-        return found;
-    }
-
-    /// <summary>
-    /// Remaining solid columns from health, matching the authority's ceil(width * hp / max).
-    /// </summary>
-    private static int SolidColumns(ClientBlockSnapshot block)
-    {
-        if (block.WidthCells == 0 || block.Health == 0 || block.MaxHealth == 0)
-        {
-            return 0;
-        }
-
-        var product = (int)block.WidthCells * block.Health;
-        var columns = (product + block.MaxHealth - 1) / block.MaxHealth;
-        return Math.Min(columns, block.WidthCells);
-    }
-
-    private static Color EnvironmentCellColor(byte material, ClientBlockSnapshot? block, int x, int y)
-    {
-        var baseColor = material switch
-        {
-            2 => TerrainWoodColor,
-            3 => TerrainStoneColor,
-            _ => TerrainSoilColor,
-        };
-        var shade = ((x + y) & 1) == 0 ? 1f : 0.88f;
-        baseColor *= shade;
-
-        if (block is null || block.MaxHealth == 0)
-        {
-            return baseColor;
-        }
-
-        var healthFrac = Math.Clamp(block.Health / (float)block.MaxHealth, 0f, 1f);
-        var transparency = (1f - healthFrac) * EnvironmentMaxTransparency;
-        var alpha = 1f - transparency;
-        if (SolidColumns(block) <= 1)
-        {
-            return new Color(
-                EnvironmentOneShotColor.R,
-                EnvironmentOneShotColor.G,
-                EnvironmentOneShotColor.B,
-                1f - EnvironmentMaxTransparency);
-        }
-
-        baseColor.A = alpha;
-        return baseColor;
-    }
+    private static Color ToGodotColor(PixelRgba tint) =>
+        new(tint.R / 255f, tint.G / 255f, tint.B / 255f, tint.A / 255f);
 
     private void DrawPlayer(
         ClientPlayerSnapshot player,
@@ -2757,6 +2674,11 @@ public partial class Main : Node2D
             {
                 DrawActorCue(center, radius, cue, model.FacingSign);
             }
+
+            // The sprite is narrower than the authoritative circle. Print the real collider
+            // so a gold-guide hit is not an invisible early strike.
+            var ringAlpha = aimAngleRadians.HasValue ? 0.55f : 0.20f;
+            DrawArc(center, radius, 0f, MathF.Tau, 28, new Color(1f, 0.95f, 0.75f, ringAlpha), 1.25f);
         }
         else
         {

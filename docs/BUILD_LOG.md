@@ -4165,3 +4165,17 @@ algorithm was corrected to `0, +1, -1, +2, -2` rather than weakening the asserti
 | Release FFI | pass; 23 passed, 0 failed, 1 ignored fixture writer |
 | rustfmt / strict workspace Clippy / `cargo deny` | pass; deny emitted only pre-existing unused-license warnings |
 | .NET/client | no client or contract changes |
+
+## 2026-09-07 - Reverse-engineer ammo/terrain; 16-bit Kingdom-style map presentation
+
+Reviewed `origin/main` through `8cf46cb` (dormant projectile kernel) and `787284b` (retro arcade
+shell). Launch-kit terrain mutation is not universal: Crow Heavy Revolver digs, Erus Curved
+Fireball craters radius 2, Leslie Ant Glob clusters three radius-3 SOFT craters, and the rest
+are `TerrainProfile::None` plus displacement/status. Unsupported soil perches settle onto the
+ReinforcedStone stage; `movement::settle` zeroes health on an unrecoverable fall past the mask
+bottom. Presentation previously filled each cell with a checkerboard `DrawRect`.
+
+Replaced occupancy painting with world-locked 16-bit tiles and dusk/hill/forest parallax
+(`PixelTerrainSampler`, `PixelTerrainAtlas`) without changing simulation, ABI, or content
+versions. Printed the authoritative collision ring on illustrated fighters because the sprite
+is narrower than the two-cell-radius circle. Known issues recorded in `docs/ISSUES.md`.
