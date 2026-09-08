@@ -2484,8 +2484,7 @@ public partial class Main : Node2D
         var viewport = GetViewportRect();
         var arena = ArenaRect(widthCells, heightCells);
         _pixelTerrain.DrawBackdrop(this, viewport, UnpannedArenaRect(widthCells, heightCells), EffectiveCameraOffset);
-        DrawRect(arena, new Color(0.05f, 0.07f, 0.10f, 0.18f));
-        DrawRect(arena, new Color(ArenaEdgeColor.R, ArenaEdgeColor.G, ArenaEdgeColor.B, 0.35f), filled: false, width: 1f);
+        DrawRect(arena, new Color(ArenaEdgeColor.R, ArenaEdgeColor.G, ArenaEdgeColor.B, 0.28f), filled: false, width: 1f);
         var font = ThemeDB.FallbackFont;
         DrawString(
             font,
@@ -3829,6 +3828,11 @@ public partial class Main : Node2D
                     powerBasisPoints: 1_500,
                     targetPlayerId: null).ConfigureAwait(true);
                 await WaitTicksAsync(abilityTrans.InputLockTicks, abilityTrans.PresentationTickRate).ConfigureAwait(true);
+
+                QueueRedraw();
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+                _ = CaptureScreenshot(options.MapScreenshotPath(PlayableMaps[mapIndex]));
 
                 humanTurnExecuted = humanTurnExecuted
                     || (moveTrans.Disposition == ClientTransitionDisposition.Accepted

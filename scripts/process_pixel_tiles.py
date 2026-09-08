@@ -72,23 +72,46 @@ def process_grass(src: Path) -> None:
     save_png(arr, "grass_cap.png")
 
 
-def process_wide(src: Path, dest_name: str, crop_top: float = 0.0) -> None:
+def process_wide(
+    src: Path,
+    dest_name: str,
+    crop_top: float = 0.0,
+    crop_bottom: float = 0.0,
+    size: tuple[int, int] = (640, 360),
+) -> None:
     im = Image.open(src).convert("RGB")
     w, h = im.size
     top = int(h * crop_top)
-    im = im.crop((0, top, w, h))
-    im = pixelate(im, (640, 360 if crop_top == 0.0 else 280))
+    bottom = h - int(h * crop_bottom)
+    im = im.crop((0, top, w, max(top + 1, bottom)))
+    im = pixelate(im, size)
     save_png(np.array(im), dest_name)
+
+
+def process_stone_cap(src: Path) -> None:
+    im = Image.open(src).convert("RGB")
+    w, h = im.size
+    cap = im.crop((0, int(h * 0.06), w, int(h * 0.42)))
+    cap = pixelate(cap, (256, 96))
+    arr = wrap_blend_x(np.array(cap), seam=18)
+    save_png(arr, "stone_cap.png")
 
 
 def main() -> None:
     process_fill(SESSION / "1.jpg", "wood_fill.png")
     process_fill(SESSION / "2.jpg", "soil_fill.png")
-    process_wide(SESSION / "3.jpg", "sky_dusk.png")
+    process_wide(SESSION / "3.jpg", "sky_dusk.png", crop_bottom=0.18)
     process_wide(SESSION / "4.jpg", "hills_far.png")
     process_fill(SESSION / "5.jpg", "stone_fill.png")
     process_grass(SESSION / "6.jpg")
-    process_wide(SESSION / "7.jpg", "forest_mid.png", crop_top=0.18)
+    process_wide(
+        SESSION / "7.jpg",
+        "forest_mid.png",
+        crop_top=0.18,
+        crop_bottom=0.16,
+        size=(640, 280),
+    )
+    process_stone_cap(SESSION / "8.jpg")
 
 
 if __name__ == "__main__":

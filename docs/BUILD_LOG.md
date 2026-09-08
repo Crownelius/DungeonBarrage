@@ -4179,3 +4179,10 @@ Replaced occupancy painting with world-locked 16-bit tiles and dusk/hill/forest 
 (`PixelTerrainSampler`, `PixelTerrainAtlas`) without changing simulation, ABI, or content
 versions. Printed the authoritative collision ring on illustrated fighters because the sprite
 is narrower than the two-cell-radius circle. Known issues recorded in `docs/ISSUES.md`.
+
+First C5 capture showed the dusk sky stretched over the whole window, so the gold horizon
+painted a fake floor under the HUD, and the ReinforcedStone stage had no walkable lip. Sky is
+now clipped to the arena, the chrome fills with teal, forest dirt-path was cropped, and
+exposed stone uses a flagstone cap. C5 and C6 then passed: all three maps, stacked blocks
+fell, rematch disposed, state hash `6b28cd9b5e7c4f3c`. Evidence:
+`C:\tmp\DungeonBarrage-16bit-maps-20260907`.

@@ -154,11 +154,10 @@ vector regeneration.
 
 ## Next task
 
-Export and visually inspect the 16-bit map presentation on all three playable stages (C6: stacked
-blocks still fall, one-shot-red still appears, no invented occupancy). Then continue U4 production
-art from `docs/UI_OVERHAUL_PLAN.md` beginning with Leslie's frog sheet. Leslie's Ant Glob ground-roll
-mechanic remains the first deferred Phase 2 gameplay task; do not mix authority changes into art/UI
-work. Do not shrink `PLAYER_COLLISION_RADIUS` without a simulation-version bump.
+U4 production art from `docs/UI_OVERHAUL_PLAN.md`: original Leslie frog animation sheet, then
+distinct Crow / Erus / Kreena sheets. Do not mix authority changes into that art work. Leslie's
+Ant Glob ground-roll remains the first deferred Phase 2 gameplay task. Do not shrink
+`PLAYER_COLLISION_RADIUS` without a simulation-version bump.
 
 ## Verified checkpoint
 
@@ -174,7 +173,9 @@ work. Do not shrink `PLAYER_COLLISION_RADIUS` without a simulation-version bump.
 - Strict Clippy, rustfmt check, `cargo deny`, .NET format, release export, and diff checks passed.
 - C5: Crow selected through Character Select; one-cell move and direct Precision .57 hit; exactly
   one dotted guide; both gold-hit and red-miss captures; 34 real damage; fire/hit/impact cues;
-  input lock/unlock; turn handoff.
+  input lock/unlock; turn handoff. Re-run 2026-09-07 on `feat/16bit-pixel-maps` captured 1280x720
+  combat frames of crow-perch with soil/grass/stone tiles and dusk forest parallax
+  (`C:\tmp\DungeonBarrage-16bit-maps-20260907`).
 - C6: roster 4; Kreena vs Erus; human/bot turns; all three maps; stacked blocks fell; terminal at
   turn 16; state hash `6b28cd9b5e7c4f3c`; rematch created and disposed cleanly.
 - C7: title plus settings screen captured at 1280x720; all six existing settings/platform checks

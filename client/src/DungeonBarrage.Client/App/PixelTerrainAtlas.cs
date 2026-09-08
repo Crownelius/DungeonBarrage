@@ -15,6 +15,7 @@ public sealed class PixelTerrainAtlas
     private Texture2D? _soil;
     private Texture2D? _grass;
     private Texture2D? _stone;
+    private Texture2D? _stoneCap;
     private Texture2D? _wood;
     private Texture2D? _sky;
     private Texture2D? _hills;
@@ -35,6 +36,7 @@ public sealed class PixelTerrainAtlas
         _soil = LoadTexture("soil_fill");
         _grass = LoadTexture("grass_cap");
         _stone = LoadTexture("stone_fill");
+        _stoneCap = LoadTexture("stone_cap");
         _wood = LoadTexture("wood_fill");
         _sky = LoadTexture("sky_dusk");
         _hills = LoadTexture("hills_far");
@@ -52,19 +54,14 @@ public sealed class PixelTerrainAtlas
         ArgumentNullException.ThrowIfNull(canvas);
         EnsureLoaded();
 
+        canvas.DrawRect(viewport, new Color(0.31f, 0.46f, 0.54f));
         if (_sky is not null)
         {
-            canvas.DrawTextureRect(_sky, viewport, tile: false);
-        }
-        else
-        {
-            canvas.DrawRect(viewport, new Color(0.42f, 0.55f, 0.62f));
-            var horizon = new Rect2(viewport.Position + new Vector2(0f, viewport.Size.Y * 0.55f), new Vector2(viewport.Size.X, viewport.Size.Y * 0.45f));
-            canvas.DrawRect(horizon, new Color(0.93f, 0.72f, 0.55f));
+            canvas.DrawTextureRect(_sky, arena, tile: false);
         }
 
-        DrawParallaxLayer(canvas, _hills, arena, camera, parallax: 0.18f, heightFraction: 0.78f, extraWidth: 0.20f);
-        DrawParallaxLayer(canvas, _forest, arena, camera, parallax: 0.42f, heightFraction: 0.52f, extraWidth: 0.35f);
+        DrawParallaxLayer(canvas, _hills, arena, camera, parallax: 0.18f, heightFraction: 0.72f, extraWidth: 0.12f);
+        DrawParallaxLayer(canvas, _forest, arena, camera, parallax: 0.42f, heightFraction: 0.48f, extraWidth: 0.18f);
     }
 
     /// <summary>Paints one occupied cell with a world-locked material atlas and optional grass cap.</summary>
@@ -109,15 +106,16 @@ public sealed class PixelTerrainAtlas
                 modulate);
         }
 
-        if (PixelTerrainSampler.IsExposedTop(cells, width, height, x, y) && material != 3)
+        if (PixelTerrainSampler.IsExposedTop(cells, width, height, x, y))
         {
-            var capHeight = Math.Max(3f, dest.Size.Y * 0.42f);
+            var capTexture = material == 3 ? _stoneCap : _grass;
+            var capHeight = Math.Max(3f, dest.Size.Y * (material == 3 ? 0.38f : 0.42f));
             var cap = new Rect2(dest.Position, new Vector2(dest.Size.X, capHeight));
-            if (_grass is not null)
+            if (capTexture is not null)
             {
                 BlitWrapped(
                     canvas,
-                    _grass,
+                    capTexture,
                     cap,
                     worldX: (int)MathF.Floor(x * dest.Size.X),
                     worldY: 0,

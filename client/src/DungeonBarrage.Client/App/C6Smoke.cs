@@ -33,6 +33,17 @@ internal sealed record C6SmokeOptions(string ReportPath, string ScreenshotPath)
             Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
             Path.GetFileNameWithoutExtension(ScreenshotPath) + "-local-setup" + Path.GetExtension(ScreenshotPath));
 
+    /// <summary>Where an in-match frame of one playable map is written after the human's first shot.</summary>
+    /// <param name="mapId">Stable map identifier.</param>
+    /// <returns>A sibling PNG path derived from <see cref="ScreenshotPath"/>.</returns>
+    internal string MapScreenshotPath(string mapId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mapId);
+        return Path.Combine(
+            Path.GetDirectoryName(ScreenshotPath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(ScreenshotPath) + "-" + mapId + Path.GetExtension(ScreenshotPath));
+    }
+
     /// <summary>
     /// Where the passive-selection modal's screenshot is written, if the human's own gauge
     /// fills during the run — derived the same way. Whether this happens at all depends on the

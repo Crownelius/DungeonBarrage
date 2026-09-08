@@ -52,6 +52,7 @@ UIDS = {
     "sky_dusk.png": "f3q6skydusk16bitx",
     "hills_far.png": "g4r7hillsfar16bit",
     "forest_mid.png": "h5s8forestmid16bt",
+    "stone_cap.png": "j6t9stonecap16bit",
 }
 
 
